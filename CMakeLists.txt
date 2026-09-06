@@ -15,12 +15,15 @@ find_package(Qt6 REQUIRED COMPONENTS
         Qml
         Quick
         QuickControls2
+        Multimedia
 )
 
 qt_standard_project_setup()
 
 qt_add_executable(Syncine
         src/main.cpp
+        src/PlaybackController.cpp
+        src/PlaybackController.h
 )
 
 set_source_files_properties(ui/Style.qml PROPERTIES
@@ -54,4 +57,5 @@ target_link_libraries(Syncine
         Qt6::Qml
         Qt6::Quick
         Qt6::QuickControls2
+        Qt6::Multimedia
 )

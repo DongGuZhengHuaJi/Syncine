@@ -1,19 +1,16 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import QtMultimedia
 
 RowLayout {
     id: root
-
-    required property MediaPlayer mediaPlayer
 
     signal interacted()
 
     spacing: 10
 
     Label {
-        text: formatTime(root.mediaPlayer.position)
+        text: formatTime(playbackController.position)
         Layout.preferredWidth: 42
         horizontalAlignment: Text.AlignRight
         color: "#FFFFFF"
@@ -25,7 +22,7 @@ RowLayout {
 
         Layout.fillWidth: true
 
-        enabled: root.mediaPlayer.seekable
+        enabled: playbackController.seekable
 
         from: 0
         to: 1
@@ -34,8 +31,8 @@ RowLayout {
         Binding {
             target: mediaSlider
             property: "value"
-            value: root.mediaPlayer.duration > 0
-                ? root.mediaPlayer.position / root.mediaPlayer.duration
+            value: playbackController.duration > 0
+                ? playbackController.position / playbackController.duration
                 : 0
             when: !mediaSlider.pressed
         }
@@ -45,9 +42,7 @@ RowLayout {
                 root.interacted()
         }
         onMoved: {
-            root.mediaPlayer.setPosition(
-                value * root.mediaPlayer.duration
-            )
+            playbackController.seek(value * playbackController.duration)
             root.interacted()
         }
 
@@ -80,7 +75,7 @@ RowLayout {
     }
 
     Label {
-        text: formatTime(root.mediaPlayer.duration)
+        text: formatTime(playbackController.duration)
         Layout.preferredWidth: 42
         color: "#FFFFFF"
         font.pixelSize: 12

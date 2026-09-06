@@ -8,50 +8,20 @@ Item {
     property url source: ""
     property bool controlsVisible: true
 
-    MediaPlayer {
-        id: mediaPlayer
-
-        source: root.source
-        videoOutput: videoOutput
-        audioOutput: audioOutput
-
-        onMediaStatusChanged: {
-            if (mediaStatus === MediaPlayer.LoadedMedia) {
-                console.log(
-                    "Media loaded, duration:",
-                    duration,
-                    "ms"
-                )
-            }
-        }
-
-        onErrorOccurred: {
-            console.log("Media error:", errorString)
-        }
-
-        onPlaybackStateChanged: {
-            if (playbackState !== MediaPlayer.PlayingState)
-                showControls()
-            else
-                hideTimer.restart()
-        }
-    }
+    onSourceChanged: playbackController.load(source)
 
     VideoOutput {
         id: videoOutput
         anchors.fill: parent
         fillMode: VideoOutput.PreserveAspectFit
-    }
 
-    AudioOutput {
-        id: audioOutput
-        volume: 0.6
+        Component.onCompleted: playbackController.player.videoOutput = videoOutput
     }
 
     MouseArea {
         anchors.fill: parent
         hoverEnabled: true
-        onClicked: togglePlayback()
+        onClicked: playbackController.togglePlayPause()
         onPositionChanged: showControls()
     }
 
@@ -61,7 +31,7 @@ Item {
         height: 80
         radius: 40
         color: "#73000000"
-        opacity: mediaPlayer.playbackState !== MediaPlayer.PlayingState ? 1 : 0
+        opacity: playbackController.playing ? 0 : 1
         visible: opacity > 0
         Behavior on opacity { NumberAnimation { duration: 150 } }
 
@@ -89,9 +59,6 @@ Item {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
 
-        mediaPlayer: mediaPlayer
-        audioOutput: audioOutput
-
         opacity: root.controlsVisible ? 1 : 0
         visible: opacity > 0
         Behavior on opacity { NumberAnimation { duration: 180 } }
@@ -103,16 +70,19 @@ Item {
         id: hideTimer
         interval: 3000
         onTriggered: {
-            if (mediaPlayer.playbackState === MediaPlayer.PlayingState)
+            if (playbackController.playing)
                 root.controlsVisible = false
         }
     }
 
-    function togglePlayback() {
-        if (mediaPlayer.playbackState === MediaPlayer.PlayingState)
-            mediaPlayer.pause()
-        else
-            mediaPlayer.play()
+    Connections {
+        target: playbackController
+        function onPlayingChanged() {
+            if (!playbackController.playing)
+                showControls()
+            else
+                hideTimer.restart()
+        }
     }
 
     function showControls() {

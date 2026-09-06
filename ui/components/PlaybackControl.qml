@@ -6,9 +6,6 @@ import QtMultimedia
 Rectangle {
     id: root
 
-    required property MediaPlayer mediaPlayer
-    required property AudioOutput audioOutput
-
     signal interacted()
 
     implicitHeight: 64
@@ -30,7 +27,6 @@ Rectangle {
 
         PlaybackSeekControl {
             Layout.fillWidth: true
-            mediaPlayer: root.mediaPlayer
             onInteracted: root.interacted()
         }
 
@@ -57,9 +53,7 @@ Rectangle {
             }
 
             onClicked: {
-                root.mediaPlayer.setPosition(
-                    Math.max(0, root.mediaPlayer.position - 10000)
-                )
+                playbackController.seekRelative(-10000)
                 root.interacted()
             }
         }
@@ -72,14 +66,13 @@ Rectangle {
             Layout.preferredHeight: 44
 
             contentItem: Canvas {
-                id: playPauseCanvas
+                id: playPauseBtnCanvas
                 anchors.fill: parent
                 onPaint: {
                     var ctx = getContext("2d")
                     ctx.fillStyle = "#FFFFFF"
                     ctx.clearRect(0, 0, width, height)
-                    if (root.mediaPlayer.playbackState
-                        === MediaPlayer.PlayingState) {
+                    if (playbackController.playing) {
                         ctx.fillRect(15, 12, 6, 20)
                         ctx.fillRect(23, 12, 6, 20)
                     } else {
@@ -93,9 +86,9 @@ Rectangle {
                 }
 
                 Connections {
-                    target: root.mediaPlayer
-                    function onPlaybackStateChanged() {
-                        playPauseCanvas.requestPaint()
+                    target: playbackController
+                    function onPlayingChanged() {
+                        playPauseBtnCanvas.requestPaint()
                     }
                 }
             }
@@ -106,12 +99,7 @@ Rectangle {
             }
 
             onClicked: {
-                if (root.mediaPlayer.playbackState
-                    === MediaPlayer.PlayingState) {
-                    root.mediaPlayer.pause()
-                } else {
-                    root.mediaPlayer.play()
-                }
+                playbackController.togglePlayPause()
                 root.interacted()
             }
         }
@@ -137,12 +125,7 @@ Rectangle {
             }
 
             onClicked: {
-                root.mediaPlayer.setPosition(
-                    Math.min(
-                        root.mediaPlayer.duration,
-                        root.mediaPlayer.position + 10000
-                    )
-                )
+                playbackController.seekRelative(10000)
                 root.interacted()
             }
         }
@@ -155,7 +138,7 @@ Rectangle {
             Layout.preferredHeight: 40
 
             contentItem: Canvas {
-                id: muteCanvas
+                id: muteBtnCanvas
                 anchors.fill: parent
                 onPaint: {
                     var ctx = getContext("2d")
@@ -174,7 +157,7 @@ Rectangle {
                     ctx.closePath()
                     ctx.fill()
 
-                    if (root.audioOutput.muted) {
+                    if (playbackController.muted) {
                         ctx.beginPath()
                         ctx.moveTo(26, 15)
                         ctx.lineTo(34, 25)
@@ -189,9 +172,9 @@ Rectangle {
                 }
 
                 Connections {
-                    target: root.audioOutput
+                    target: playbackController
                     function onMutedChanged() {
-                        muteCanvas.requestPaint()
+                        muteBtnCanvas.requestPaint()
                     }
                 }
             }
@@ -202,7 +185,7 @@ Rectangle {
             }
 
             onClicked: {
-                root.audioOutput.muted = !root.audioOutput.muted
+                playbackController.toggleMute()
                 root.interacted()
             }
         }
@@ -214,14 +197,14 @@ Rectangle {
 
             from: 0
             to: 1
-            value: root.audioOutput.volume
+            value: playbackController.volume
 
             onPressedChanged: {
                 if (volumeSlider.pressed)
                     root.interacted()
             }
             onMoved: {
-                root.audioOutput.volume = value
+                playbackController.volume = value
                 root.interacted()
             }
 
