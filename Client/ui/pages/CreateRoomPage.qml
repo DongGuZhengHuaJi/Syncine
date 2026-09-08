@@ -3,17 +3,34 @@ import QtQuick.Controls
 import SyncineApp
 
 Item {
-    property string codeError: ""
+    property string nameError: ""
     property string nickError: ""
+    property string serverError: ""
 
-    function tryJoin() {
-        codeError = roomCodeField.text.trim().length !== 6 ? "房间号是 6 位数字" : ""
+    function tryCreate() {
+        nameError = roomNameField.text.trim() === "" ? "请填写房间名称" : ""
         nickError = nickField.text.trim() === "" ? "请填写昵称" : ""
-        if (codeError === "" && nickError === "") {
-            stackView.push("RoomPage.qml", {
-                "roomName": "房间 " + roomCodeField.text.trim(),
-                "nickname": nickField.text.trim()
-            })
+        if (nameError === "" && nickError === "") {
+            // 状态已在房间里但页面没跳过去:直接进房间
+            if (roomManager.inRoom) {
+                stackView.push("RoomPage.qml")
+                return
+            }
+            serverError = ""
+            roomManager.createRoom(nickField.text.trim(), passwordField.text,
+                                   roomNameField.text.trim())
+        }
+    }
+
+    Connections {
+        target: roomManager
+
+        function onRoomCreated() {
+            stackView.push("RoomPage.qml")
+        }
+
+        function onErrorOccurred(message) {
+            serverError = message
         }
     }
 
@@ -33,7 +50,7 @@ Item {
 
         Label {
             anchors.horizontalCenter: parent.horizontalCenter
-            text: "加入房间"
+            text: "创建房间"
             font.pixelSize: 30
             font.bold: true
             color: Style.textPrimary
@@ -41,7 +58,7 @@ Item {
 
         Label {
             anchors.horizontalCenter: parent.horizontalCenter
-            text: "输入 6 位房间号,进入好友的房间"
+            text: "创建一个新房间,邀请好友一起观看"
             font.pixelSize: 14
             color: Style.textSecondary
         }
@@ -56,14 +73,11 @@ Item {
                 spacing: 18
 
                 AppTextField {
-                    id: roomCodeField
+                    id: roomNameField
                     width: parent.width
-                    label: "房间号"
-                    placeholderText: "6 位数字房间号"
-                    maximumLength: 6
-                    inputMethodHints: Qt.ImhDigitsOnly
-                    validator: RegularExpressionValidator { regularExpression: /[0-9]{0,6}/ }
-                    errorText: codeError
+                    label: "房间名称"
+                    placeholderText: "给你的房间起个名字"
+                    errorText: nameError
                 }
 
                 AppTextField {
@@ -75,9 +89,10 @@ Item {
                 }
 
                 AppTextField {
+                    id: passwordField
                     width: parent.width
                     label: "密码(可选)"
-                    placeholderText: "房间有密码时填写"
+                    placeholderText: "留空表示不设密码"
                     echoMode: TextInput.Password
                     passwordToggle: true
                 }
@@ -86,8 +101,19 @@ Item {
 
                 PrimaryButton {
                     width: parent.width
-                    text: "加入房间"
-                    onClicked: tryJoin()
+                    enabled: !roomManager.isConnecting
+                    text: roomManager.isConnecting ? "连接中…" : "创建房间"
+                    onClicked: tryCreate()
+                }
+
+                Label {
+                    visible: serverError !== ""
+                    width: parent.width
+                    text: serverError
+                    font.pixelSize: 13
+                    color: Style.danger
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
                 }
             }
         }

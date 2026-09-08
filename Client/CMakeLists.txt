@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.28)
 
 project(Syncine)
 
-set(CMAKE_CXX_STANDARD 26)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_AUTOMOC ON)
@@ -16,6 +16,7 @@ find_package(Qt6 REQUIRED COMPONENTS
         Quick
         QuickControls2
         Multimedia
+        WebSockets
 )
 
 qt_standard_project_setup()
@@ -24,6 +25,10 @@ qt_add_executable(Syncine
         src/main.cpp
         src/PlaybackController.cpp
         src/PlaybackController.h
+        src/RoomManager.cpp
+        src/RoomManager.h
+        src/NetworkManager.cpp
+        src/NetworkManager.h
 )
 
 set_source_files_properties(ui/Style.qml PROPERTIES
@@ -41,6 +46,7 @@ qt_add_qml_module(Syncine
         ui/components/PrimaryButton.qml
         ui/components/GhostButton.qml
         ui/components/AppTextField.qml
+        ui/components/ModeButton.qml
         ui/components/VideoPlayer.qml
         ui/components/PlaybackControl.qml
         ui/components/PlaybackSeekControl.qml
@@ -58,4 +64,5 @@ target_link_libraries(Syncine
         Qt6::Quick
         Qt6::QuickControls2
         Qt6::Multimedia
+        Qt6::WebSockets
 )

@@ -7,6 +7,7 @@ Rectangle {
     id: root
 
     signal interacted()
+    signal seeked(real position)
 
     implicitHeight: 64
     color: "#E6161922"
@@ -28,6 +29,7 @@ Rectangle {
         PlaybackSeekControl {
             Layout.fillWidth: true
             onInteracted: root.interacted()
+            onSeekFinished: root.seeked(position)
         }
 
         Item { Layout.preferredWidth: 8 }
@@ -54,6 +56,7 @@ Rectangle {
 
             onClicked: {
                 playbackController.seekRelative(-10000)
+                root.seeked(playbackController.position)
                 root.interacted()
             }
         }
@@ -126,6 +129,7 @@ Rectangle {
 
             onClicked: {
                 playbackController.seekRelative(10000)
+                root.seeked(playbackController.position)
                 root.interacted()
             }
         }

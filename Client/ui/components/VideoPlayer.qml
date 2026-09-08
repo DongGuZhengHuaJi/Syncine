@@ -8,6 +8,8 @@ Item {
     property url source: ""
     property bool controlsVisible: true
 
+    signal userSeeked(real position)
+
     onSourceChanged: playbackController.load(source)
 
     VideoOutput {
@@ -64,6 +66,7 @@ Item {
         Behavior on opacity { NumberAnimation { duration: 180 } }
 
         onInteracted: showControls()
+        onSeeked: root.userSeeked(position)
     }
 
     Timer {

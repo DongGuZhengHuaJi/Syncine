@@ -6,6 +6,7 @@ RowLayout {
     id: root
 
     signal interacted()
+    signal seekFinished(real position)
 
     spacing: 10
 
@@ -40,6 +41,8 @@ RowLayout {
         onPressedChanged: {
             if (mediaSlider.pressed)
                 root.interacted()
+            else
+                root.seekFinished(playbackController.position)
         }
         onMoved: {
             playbackController.seek(value * playbackController.duration)

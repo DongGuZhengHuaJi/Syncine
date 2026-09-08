@@ -3,6 +3,40 @@ import QtQuick.Controls
 import SyncineApp
 
 Item {
+    Rectangle {
+        id: statusPill
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.margins: 24
+        width: statusRow.implicitWidth + 28
+        height: 32
+        radius: 16
+        color: Style.card
+        border.width: 1
+        border.color: Style.border
+
+        Row {
+            id: statusRow
+            anchors.centerIn: parent
+            spacing: 8
+
+            Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                width: 8
+                height: 8
+                radius: 4
+                color: networkManager.isConnected ? Style.success : Style.textSecondary
+            }
+
+            Label {
+                anchors.verticalCenter: parent.verticalCenter
+                text: networkManager.isConnected ? "服务器已连接" : "服务器未连接"
+                font.pixelSize: 12
+                color: Style.textSecondary
+            }
+        }
+    }
+
     Column {
         anchors.centerIn: parent
         width: 560
