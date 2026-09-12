@@ -44,6 +44,7 @@ private:
 
     // 发送队列只在 io_context 线程里操作(所有写入都 post 到它),无需加锁
     std::deque<std::string> m_writeQueue;
+    bool m_writing = false;
 
     const std::string m_id;
     std::function<void(std::shared_ptr<Session>)> m_onClose;

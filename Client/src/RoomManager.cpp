@@ -20,6 +20,14 @@ QString generateRoomId() {
         .rightJustified(6, '0');
 }
 
+RoomManager::RoomMode modeFromString(const QString &mode) {
+    if (mode == "share")
+        return RoomManager::RoomMode::Share;
+    if (mode == "url")
+        return RoomManager::RoomMode::Url;
+    return RoomManager::RoomMode::Local;
+}
+
 } // namespace
 
 RoomManager::RoomManager(QObject *parent)
@@ -43,6 +51,23 @@ void RoomManager::setNetworkManager(NetworkManager *networkManager) {
             this, &RoomManager::onNetworkDisconnected);
 }
 
+void RoomManager::setPlaybackController(PlaybackController *playbackController) {
+    if (m_playbackController == playbackController)
+        return;
+
+    m_playbackController = playbackController;
+
+    if (m_playbackController == nullptr)
+        return;
+
+    connect(m_playbackController, &PlaybackController::sourceChanged,
+            this, &RoomManager::onPlaybackSourceChanged);
+    // 视频时长在元数据加载完成后才知道,到时再补报一次
+    connect(m_playbackController, &PlaybackController::durationChanged,
+            this, &RoomManager::onPlaybackSourceChanged);
+}
+
+
 
 // ============================
 // 属性
@@ -54,6 +79,35 @@ QString RoomManager::roomId() const {
 
 QString RoomManager::roomName() const {
     return m_roomName;
+}
+
+RoomManager::RoomMode RoomManager::roomMode() const {
+    return m_roomMode;
+}
+
+bool RoomManager::otherLoaded() const {
+    for (const QVariant &value : m_members) {
+        const QVariantMap member = value.toMap();
+        if (member.value("clientId").toString() == m_clientId)
+            continue;
+        if (!member.value("loaded").toBool())
+            return false;
+    }
+    return true;
+}
+
+bool RoomManager::allLoaded() const {
+    if (m_playbackController != nullptr && !m_playbackController->hasLoaded())
+        return false;
+    return otherLoaded();
+}
+
+bool RoomManager::videoMismatched() const {
+    return m_videoMismatched;
+}
+
+qint64 RoomManager::shortestDuration() const {
+    return m_shortestDuration;
 }
 
 bool RoomManager::inRoom() const {
@@ -155,6 +209,33 @@ void RoomManager::leaveRoom() {
     emit roomLeft();
 }
 
+void RoomManager::setRoomMode(RoomMode mode) {
+    if (!m_inRoom) {
+        emit errorOccurred("你不在房间里");
+        return;
+    }
+    if (!isHost()) {
+        emit errorOccurred("只有房主可以更改房间模式");
+        return;
+    }
+
+    QJsonObject message;
+    message["type"] = "set_room_mode";
+
+    if (mode == RoomMode::Local) {
+        message["mode"] = "local";
+    } else if (mode == RoomMode::Share) {
+        message["mode"] = "share";
+    } else if (mode == RoomMode::Url) {
+        message["mode"] = "url";
+    } else {
+        emit errorOccurred("未知的房间模式");
+        return;
+    }
+    send(message);
+    // 等服务器的 room_mode_changed 广播修改
+}
+
 
 // ============================
 // 房间内消息
@@ -183,6 +264,42 @@ void RoomManager::sendPlayback(const QString &action, qint64 position) {
     message["type"] = "playback";
     message["action"] = action;
     message["position"] = position;
+    send(message);
+}
+
+void RoomManager::sendWebrtcOffer(const QString &to, const QString &sdp) {
+    if (!m_inRoom)
+        return;
+
+    QJsonObject message;
+    message["type"] = "webrtc_offer";
+    message["to"] = to;
+    message["sdp"] = sdp;
+    send(message);
+}
+
+void RoomManager::sendWebrtcAnswer(const QString &to, const QString &sdp) {
+    if (!m_inRoom)
+        return;
+
+    QJsonObject message;
+    message["type"] = "webrtc_answer";
+    message["to"] = to;
+    message["sdp"] = sdp;
+    send(message);
+}
+
+void RoomManager::sendWebrtcIce(const QString &to, const QString &sdp,
+                                const QString &sdpMid, int sdpMLineIndex) {
+    if (!m_inRoom)
+        return;
+
+    QJsonObject message;
+    message["type"] = "webrtc_ice";
+    message["to"] = to;
+    message["sdp"] = sdp;
+    message["sdpMid"] = sdpMid;
+    message["sdpMLineIndex"] = sdpMLineIndex;
     send(message);
 }
 
@@ -273,6 +390,26 @@ void RoomManager::onNetworkDisconnected() {
     }
 }
 
+// ============================
+// 播放器源变化
+// ============================
+
+void RoomManager::onPlaybackSourceChanged() {
+    if (!m_inRoom || m_playbackController == nullptr)
+        return;
+
+    const bool loaded = m_playbackController->hasLoaded();
+
+    QJsonObject message;
+    message["type"] = "video_status";
+    message["loaded"] = loaded;
+    message["hash"] = loaded ? m_playbackController->hash() : QString();
+    message["duration"] = loaded ? m_playbackController->duration() : 0;
+    send(message);
+
+    emit allLoadedChanged();
+}
+
 
 // ============================
 // 解析服务端消息
@@ -300,16 +437,27 @@ void RoomManager::handleMessage(const QString &text) {
         m_roomName = message.value("roomName").toString();
         applyMembers(message.value("members").toArray());
 
+        m_roomMode = modeFromString(message.value("mode").toString());
+        const bool mismatched = message.value("videoMismatched").toBool(false);
+        const qint64 shortest =
+            static_cast<qint64>(message.value("shortestDuration").toDouble());
+        m_videoMismatched = mismatched;
+        m_shortestDuration = shortest;
+
         m_inRoom = true;
         setAwaitingReply(false);
         emit roomIdChanged();
         emit roomNameChanged();
-        emit inRoomChanged();
+        emit roomModeChanged();
+        emit videoMismatchChanged();
 
         if (type == "room_created")
             emit roomCreated();
         else
             emit roomJoined();
+
+        // 向房间报告自己的视频加载状态(可能进房前就已加载)
+        // onPlaybackSourceChanged();
 
         // 服务端附带房间当前播放状态,新成员据此对齐
         // 用 singleShot 延迟发出:页面在 roomJoined 信号里才被 push,
@@ -347,11 +495,16 @@ void RoomManager::handleMessage(const QString &text) {
         member["clientId"] = id;
         member["nickname"] = nick;
         member["isHost"] = message.value("isHost").toBool(false);
+        member["loaded"] = message.value("loaded").toBool(false);
+        member["duration"] =
+            static_cast<qint64>(message.value("duration").toDouble());
         m_members.append(member);
 
         emit membersChanged();
         emit isHostChanged();
         emit memberJoined(nick);
+        emit otherLoadedChanged();
+        emit allLoadedChanged();
         return;
     }
 
@@ -366,6 +519,8 @@ void RoomManager::handleMessage(const QString &text) {
                 emit membersChanged();
                 emit isHostChanged();
                 emit memberLeft(nick);
+                emit otherLoadedChanged();
+                emit allLoadedChanged();
                 break;
             }
         }
@@ -382,6 +537,64 @@ void RoomManager::handleMessage(const QString &text) {
         const qint64 position =
             static_cast<qint64>(message.value("position").toDouble());
         emit playbackReceived(message.value("action").toString(), position);
+        return;
+    }
+
+    if (type == "room_mode_changed") {
+        const RoomMode newMode = modeFromString(message.value("mode").toString());
+        if (newMode != m_roomMode) {
+            m_roomMode = newMode;
+            emit roomModeChanged();
+        }
+        return;
+    }
+
+    if (type == "video_status") {
+        const QString id = message.value("clientId").toString();
+        const bool loaded = message.value("loaded").toBool();
+        const qint64 duration =
+            static_cast<qint64>(message.value("duration").toDouble());
+
+        for (int i = 0; i < m_members.size(); ++i) {
+            QVariantMap member = m_members.at(i).toMap();
+            if (member.value("clientId").toString() == id) {
+                member["loaded"] = loaded;
+                member["duration"] = duration;
+                m_members[i] = member;
+                break;
+            }
+        }
+
+        emit membersChanged();
+        emit otherLoadedChanged();
+        emit allLoadedChanged();
+        return;
+    }
+
+    if (type == "video_mismatch") {
+        const bool mismatched = message.value("mismatched").toBool();
+        const qint64 shortest =
+            static_cast<qint64>(message.value("shortestDuration").toDouble());
+        if (mismatched != m_videoMismatched || shortest != m_shortestDuration) {
+            m_videoMismatched = mismatched;
+            m_shortestDuration = shortest;
+            emit videoMismatchChanged();
+        }
+        return;
+    }
+
+    if (type == "webrtc_offer" || type == "webrtc_answer" || type == "webrtc_ice") {
+        const QString from = message.value("from").toString();
+        const QString sdp = message.value("sdp").toString();
+        if (type == "webrtc_offer") {
+            emit webrtcOfferReceived(from, sdp);
+        } else if (type == "webrtc_answer") {
+            emit webrtcAnswerReceived(from, sdp);
+        } else {
+            emit webrtcIceReceived(from, sdp,
+                                   message.value("sdpMid").toString(),
+                                   message.value("sdpMLineIndex").toInt());
+        }
         return;
     }
 
@@ -405,10 +618,15 @@ void RoomManager::applyMembers(const QJsonArray &membersArray) {
         member["clientId"] = memberObject.value("clientId").toString();
         member["nickname"] = memberObject.value("nickname").toString();
         member["isHost"] = memberObject.value("isHost").toBool(false);
+        member["loaded"] = memberObject.value("loaded").toBool(false);
+        member["duration"] =
+            static_cast<qint64>(memberObject.value("duration").toDouble());
         m_members.append(member);
     }
     emit membersChanged();
     emit isHostChanged();
+    emit otherLoadedChanged();
+    emit allLoadedChanged();
 }
 
 void RoomManager::clearRoomState() {
@@ -417,9 +635,22 @@ void RoomManager::clearRoomState() {
     m_members.clear();
     m_inRoom = false;
 
+    const bool modeChanged = m_roomMode != RoomMode::Local;
+    m_roomMode = RoomMode::Local;
+    const bool mismatchChanged =
+        m_videoMismatched || m_shortestDuration != 0;
+    m_videoMismatched = false;
+    m_shortestDuration = 0;
+
     emit roomIdChanged();
     emit roomNameChanged();
     emit inRoomChanged();
     emit membersChanged();
     emit isHostChanged();
+    if (modeChanged)
+        emit roomModeChanged();
+    if (mismatchChanged)
+        emit videoMismatchChanged();
+    emit otherLoadedChanged();
+    emit allLoadedChanged();
 }

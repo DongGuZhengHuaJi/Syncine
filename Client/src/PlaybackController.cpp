@@ -3,7 +3,9 @@
 //
 
 #include "PlaybackController.h"
-
+#include <QCryptographicHash>
+#include <QFile>
+#include <QUrl>
 #include <QMediaPlayer>
 #include <QAudioOutput>
 #include <QDebug>
@@ -75,6 +77,10 @@ PlaybackController::PlaybackController(QObject *parent)
 // 状态
 // ============================
 
+bool PlaybackController::hasLoaded() const {
+    return m_player->source().isValid();
+}
+
 bool PlaybackController::playing() const
 {
     return m_player->playbackState()
@@ -139,6 +145,29 @@ void PlaybackController::setMuted(bool muted)
     emit mutedChanged();
 }
 
+QString PlaybackController::hash() const {
+    if (!hasLoaded())
+        return QString();
+
+    const QUrl source = m_player->source();
+    QByteArray data;
+    if (source.isLocalFile()) {
+        // 内容哈希:512KB
+        QFile file(source.toLocalFile());
+        if (!file.open(QIODevice::ReadOnly))
+            return QString();
+        data = file.read(512 * 1024);
+        data.append(QByteArray::number(file.size()));
+    } else {
+        // 非本地源暂以 URL 代替
+        data = source.toString().toUtf8();
+    }
+
+    const QByteArray hashData =
+        QCryptographicHash::hash(data, QCryptographicHash::Sha256);
+    return QString(hashData.toHex());
+}
+
 
 // ============================
 // 获取 QMediaPlayer
@@ -162,6 +191,15 @@ void PlaybackController::load(const QUrl &source)
     qDebug() << "Loading media:" << source;
 
     m_player->setSource(source);
+    emit sourceChanged();
+    emit hasLoadedChanged();
+}
+
+void PlaybackController::unload() {
+    m_player->stop();
+    m_player->setSource(QUrl());
+    emit sourceChanged();
+    emit hasLoadedChanged();
 }
 
 

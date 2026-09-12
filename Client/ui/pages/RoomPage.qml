@@ -7,11 +7,14 @@ import SyncineApp
 Item {
     id: root
 
-    property string roomMode: "local"
-
     // 正在执行远端命令时为 true,期间不广播自己的播放状态,避免回声
     property bool remoteApplying: false
     property bool leaving: false
+
+    MessageDialog {
+        id: messageDialog
+    }
+
 
     ListModel {
         id: messageModel
@@ -58,11 +61,21 @@ Item {
         function onPlaybackReceived(action, position) {
             remoteApplying = true
             playbackController.seek(position)
-            if (action === "play")
-                playbackController.play()
-            else if (action === "pause")
+            if (action === "play") {
+                // 本地模式:所有人都加载了视频才执行播放
+                if (roomManager.roomMode !== RoomManager.Local || roomManager.allLoaded)
+                    playbackController.play()
+            } else if (action === "pause") {
                 playbackController.pause()
+            }
             remoteApplying = false
+        }
+
+        function onVideoMismatchChanged() {
+            if (roomManager.videoMismatched) {
+                messageDialog.message = "检测到成员加载的视频不一致,同步将适配较短视频的时长"
+                messageDialog.open()
+            }
         }
 
         // 服务端断开(或被动离开)时,弹回上一页
@@ -81,8 +94,19 @@ Item {
         function onPlayingChanged() {
             if (remoteApplying)
                 return
-            roomManager.sendPlayback(playbackController.playing ? "play" : "pause",
-                                     playbackController.position)
+
+            if (playbackController.playing) {
+                // 本地模式:房间内所有人都加载了视频才能播放,否则退回暂停
+                if (roomManager.roomMode !== RoomManager.Local || roomManager.allLoaded) {
+                    roomManager.sendPlayback("play", playbackController.position)
+                } else {
+                    remoteApplying = true
+                    playbackController.pause()
+                    remoteApplying = false
+                }
+            } else {
+                roomManager.sendPlayback("pause", playbackController.position)
+            }
         }
     }
 
@@ -184,22 +208,25 @@ Item {
                 ModeButton {
                     width: 76
                     text: "本地"
-                    selected: root.roomMode === "local"
-                    onClicked: root.roomMode = "local"
+                    enabled: roomManager.isHost
+                    selected: roomManager.roomMode === RoomManager.Local
+                    onClicked: roomManager.setRoomMode(RoomManager.Local)
                 }
 
                 ModeButton {
                     width: 76
                     text: "共享"
-                    selected: root.roomMode === "share"
-                    onClicked: root.roomMode = "share"
+                    enabled: roomManager.isHost
+                    selected: roomManager.roomMode === RoomManager.Share
+                    onClicked: roomManager.setRoomMode(RoomManager.Share)
                 }
 
                 ModeButton {
                     width: 76
                     text: "网链"
-                    selected: root.roomMode === "url"
-                    onClicked: root.roomMode = "url"
+                    enabled: roomManager.isHost
+                    selected: roomManager.roomMode === RoomManager.Url
+                    onClicked: roomManager.setRoomMode(RoomManager.Url)
                 }
             }
         }
@@ -274,11 +301,25 @@ Item {
             }
 
             Label {
+                id: centerHint
                 anchors.centerIn: parent
-                visible: root.roomMode !== "local"
-                text: root.roomMode === "share" ? "共享模式 · 开发中" : "网链模式 · 开发中"
+                visible: text !== ""
                 font.pixelSize: 15
                 color: "#B3FFFFFF"
+
+                text: {
+                    if (roomManager.roomMode === RoomManager.Local) {
+                        // 本地模式:所有人都加载了视频才能播放
+                        if (!roomManager.allLoaded)
+                            return playbackController.hasLoaded ? "等待其他成员加载视频…" : "请先加载视频"
+                        return ""
+                    }
+                    if (roomManager.roomMode === RoomManager.Share)
+                        return "共享模式 · 开发中"
+                    if (roomManager.roomMode === RoomManager.Url)
+                        return "网链模式 · 开发中"
+                    return ""
+                }
             }
 
 
@@ -375,8 +416,11 @@ Item {
                                 Label {
                                     text: (modelData.isHost ? "房主" : "成员")
                                           + (modelData.clientId === roomManager.clientId ? " · 你" : "")
+                                          + (!modelData.loaded && roomManager.roomMode === RoomManager.Local
+                                             ? " · 未加载" : "")
                                     font.pixelSize: 11
-                                    color: Style.textSecondary
+                                    color: (!modelData.loaded && roomManager.roomMode === RoomManager.Local)
+                                           ? Style.danger : Style.textSecondary
                                 }
                             }
                         }

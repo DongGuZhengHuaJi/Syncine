@@ -6,15 +6,21 @@
 #define SYNCINE_ROOMMANAGER_H
 
 #include <QObject>
+#include <qqmlintegration.h>
 #include <QUrl>
 #include <QVariant>
+
+#include "PlaybackController.h"
 
 class NetworkManager;
 class QJsonArray;
 class QJsonObject;
 
+
+
 class RoomManager : public QObject {
     Q_OBJECT
+    QML_ELEMENT
 
     Q_PROPERTY(QString roomId
                READ roomId
@@ -48,21 +54,56 @@ class RoomManager : public QObject {
                READ members
                NOTIFY membersChanged)
 
+    Q_PROPERTY(RoomMode roomMode
+               READ roomMode
+               NOTIFY roomModeChanged)
+
+    Q_PROPERTY(bool otherLoaded
+               READ otherLoaded
+               NOTIFY otherLoadedChanged)
+
+    Q_PROPERTY(bool allLoaded
+               READ allLoaded
+               NOTIFY allLoadedChanged)
+
+    Q_PROPERTY(bool videoMismatched
+               READ videoMismatched
+               NOTIFY videoMismatchChanged)
+
+    Q_PROPERTY(qint64 shortestDuration
+               READ shortestDuration
+               NOTIFY videoMismatchChanged)
+
 public:
+
+    enum class RoomMode {
+        Local,
+        Share,
+        Url
+    };
+    Q_ENUM(RoomMode)
+
     explicit RoomManager(QObject *parent = nullptr);
     ~RoomManager() override = default;
 
-    // 由 main.cpp 调用一次,把网络模块注入进来
     void setNetworkManager(NetworkManager *networkManager);
+    void setPlaybackController(PlaybackController *playbackController);
+
 
     QString roomId() const;
     QString roomName() const;
+    RoomMode roomMode() const;
+    bool otherLoaded() const;
+    bool allLoaded() const;
+    bool videoMismatched() const;
+    qint64 shortestDuration() const;
     bool inRoom() const;
     bool isConnecting() const;
     QString nickname() const;
     QString clientId() const;
     bool isHost() const;
     QVariantList members() const;
+
 
     Q_INVOKABLE void createRoom(const QString &nickname,
                                 const QString &password,
@@ -72,8 +113,16 @@ public:
                               const QString &password);
     Q_INVOKABLE void leaveRoom();
 
+    Q_INVOKABLE void setRoomMode(RoomMode mode);
+
     Q_INVOKABLE void sendChat(const QString &text);
     Q_INVOKABLE void sendPlayback(const QString &action, qint64 position);
+
+    // WebRTC 信令转发(经由服务器定向发给同房间的指定成员)
+    Q_INVOKABLE void sendWebrtcOffer(const QString &to, const QString &sdp);
+    Q_INVOKABLE void sendWebrtcAnswer(const QString &to, const QString &sdp);
+    Q_INVOKABLE void sendWebrtcIce(const QString &to, const QString &sdp,
+                                   const QString &sdpMid, int sdpMLineIndex);
 
 signals:
     void roomIdChanged();
@@ -89,6 +138,10 @@ signals:
     void roomCreated();
     void roomJoined();
     void roomLeft();
+    void roomModeChanged();
+    void otherLoadedChanged();
+    void allLoadedChanged();
+    void videoMismatchChanged();
 
     void memberJoined(const QString &nickname);
     void memberLeft(const QString &nickname);
@@ -96,12 +149,19 @@ signals:
     void chatReceived(const QString &from, const QString &text);
     void playbackReceived(const QString &action, qint64 position);
 
+    void webrtcOfferReceived(const QString &from, const QString &sdp);
+    void webrtcAnswerReceived(const QString &from, const QString &sdp);
+    void webrtcIceReceived(const QString &from, const QString &sdp,
+                           const QString &sdpMid, int sdpMLineIndex);
+
     void errorOccurred(const QString &errorString);
 
 private slots:
     void handleMessage(const QString &message);
     void onNetworkConnected();
     void onNetworkDisconnected();
+
+    void onPlaybackSourceChanged();
 
 private:
     enum class PendingAction { None, CreateRoom, JoinRoom };
@@ -114,10 +174,14 @@ private:
     void clearRoomState();
 
     NetworkManager *m_networkManager = nullptr;
+    PlaybackController *m_playbackController = nullptr;
 
     QString m_roomId;
     QString m_roomName;
     bool m_inRoom = false;
+    RoomMode m_roomMode = RoomMode::Local;
+    bool m_videoMismatched = false;
+    qint64 m_shortestDuration = 0;
     QString m_nickname;
     QString m_clientId;
     QVariantList m_members;

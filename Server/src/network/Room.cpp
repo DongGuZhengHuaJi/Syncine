@@ -5,15 +5,26 @@
 #include "Room.h"
 #include "Session.h"
 
+#include <algorithm>
+#include <limits>
 #include <utility>
 
-Room::Room(std::string roomName, std::string password)
+Room::Room(std::string roomName, std::string password, std::string mode)
     : m_roomName(std::move(roomName)),
-      m_password(std::move(password)) {
+      m_password(std::move(password)),
+      m_mode(std::move(mode)) {
 }
 
 const std::string &Room::roomName() const {
     return m_roomName;
+}
+
+const std::string &Room::mode() const {
+    return m_mode;
+}
+
+void Room::setMode(const std::string &mode) {
+    m_mode = mode;
 }
 
 bool Room::hasPassword() const {
@@ -31,7 +42,7 @@ bool Room::isEmpty() const {
 void Room::addMember(std::shared_ptr<Session> session,
                      std::string nickname,
                      bool isHost) {
-    m_members.push_back({std::move(session), std::move(nickname), isHost});
+    m_members.push_back({std::move(session), std::move(nickname), isHost, false, "", 0});
 }
 
 bool Room::removeMember(const std::shared_ptr<Session> &session) {
@@ -76,6 +87,83 @@ std::vector<std::shared_ptr<Session>> Room::sessions() const {
     return result;
 }
 
+std::shared_ptr<Session> Room::findSession(const std::string &clientId) const {
+    for (const Member &member : m_members) {
+        if (member.session->id() == clientId)
+            return member.session;
+    }
+    return nullptr;
+}
+
+void Room::setMemberVideo(const std::shared_ptr<Session> &session, bool loaded,
+                          const std::string &hash, long long duration) {
+    for (Member &member : m_members) {
+        if (member.session == session) {
+            member.loaded = loaded;
+            member.hash = loaded ? hash : std::string();
+            member.duration = loaded ? duration : 0;
+            return;
+        }
+    }
+}
+
+bool Room::updateMismatch() {
+    bool mismatched = false;
+    long long shortest = 0;
+
+    std::string commonHash;
+    bool haveHash = false;
+    long long minDuration = std::numeric_limits<long long>::max();
+    long long maxDuration = 0;
+    int loadedCount = 0;
+
+    for (const Member &member : m_members) {
+        if (!member.loaded)
+            continue;
+        ++loadedCount;
+
+        if (!member.hash.empty()) {
+            if (!haveHash) {
+                commonHash = member.hash;
+                haveHash = true;
+            } else if (member.hash != commonHash) {
+                mismatched = true; // 内容哈希不同
+            }
+        }
+
+        if (member.duration > 0) {
+            minDuration = std::min(minDuration, member.duration);
+            maxDuration = std::max(maxDuration, member.duration);
+        }
+    }
+
+    // 只有一个人加载视频时不存在"不一致"
+    if (loadedCount < 2) {
+        mismatched = false;
+        shortest = 0;
+    } else if (minDuration != std::numeric_limits<long long>::max()) {
+        shortest = minDuration;
+        // 内容相同但时长差异超过 2 秒,视为不同版本(剪辑/编码不同)
+        if (maxDuration - minDuration > 2000)
+            mismatched = true;
+    }
+
+    if (mismatched == m_videoMismatched && shortest == m_shortestDuration)
+        return false;
+
+    m_videoMismatched = mismatched;
+    m_shortestDuration = shortest;
+    return true;
+}
+
+bool Room::videoMismatched() const {
+    return m_videoMismatched;
+}
+
+long long Room::shortestDuration() const {
+    return m_shortestDuration;
+}
+
 bool Room::playing() const {
     return m_playing;
 }
@@ -100,6 +188,8 @@ json Room::membersArray() const {
             {"clientId", member.session->id()},
             {"nickname", member.nickname},
             {"isHost", member.isHost},
+            {"loaded", member.loaded},
+            {"duration", member.duration},
         });
     }
     return array;

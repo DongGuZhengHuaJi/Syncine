@@ -8,6 +8,7 @@ Button {
     property bool selected: false
 
     height: 30
+    opacity: enabled ? 1.0 : 0.5
 
     contentItem: Label {
         text: modeBtn.text

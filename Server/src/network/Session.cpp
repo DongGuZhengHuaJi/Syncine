@@ -58,15 +58,18 @@ void Session::send(const std::string &message) {
     auto self = shared_from_this();
     asio::post(m_ws->get_executor(), [this, self, message]() {
         m_writeQueue.push_back(message);
-        if (m_writeQueue.size() > 1)
-            return; // 已有写入进行中,写完后会接着发
+        if (m_writing)
+            return;
+        m_writing = true;
         do_next_write();
     });
 }
 
 void Session::do_next_write() {
-    if (m_writeQueue.empty())
+    if (m_writeQueue.empty()) {
+        m_writing = false;
         return;
+    }
 
     std::string message = std::move(m_writeQueue.front());
     m_writeQueue.pop_front();

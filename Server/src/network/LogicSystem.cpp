@@ -94,12 +94,19 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
             return;
         }
 
+        const std::string mode = message.value("mode", "local");
+        if (mode != "local" && mode != "share" && mode != "url") {
+            replyError(session, "bad_message", "未知的房间模式");
+            return;
+        }
+
         // 已在别的房间:先退出
         removeMemberFromRoomLocked(session);
 
         auto room = std::make_shared<Room>(
             message.value("roomName", ""),
-            message.value("password", ""));
+            message.value("password", ""),
+            mode);
         room->addMember(session, message.value("nickname", ""), true);
 
         m_rooms[newRoomId] = room;
@@ -109,8 +116,11 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
         reply["type"] = "room_created";
         reply["roomId"] = newRoomId;
         reply["roomName"] = room->roomName();
+        reply["mode"] = room->mode();
         reply["members"] = room->membersArray();
         reply["state"] = room->stateJson();
+        reply["videoMismatched"] = room->videoMismatched();
+        reply["shortestDuration"] = room->shortestDuration();
         session->send(reply.dump());
         Logger::info("房间创建: " + newRoomId);
         return;
@@ -153,8 +163,11 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
         reply["type"] = "room_joined";
         reply["roomId"] = targetRoomId;
         reply["roomName"] = targetRoom->roomName();
+        reply["mode"] = targetRoom->mode();
         reply["members"] = targetRoom->membersArray();
         reply["state"] = targetRoom->stateJson();
+        reply["videoMismatched"] = targetRoom->videoMismatched();
+        reply["shortestDuration"] = targetRoom->shortestDuration();
         session->send(reply.dump());
 
         json notice;
@@ -162,6 +175,8 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
         notice["clientId"] = session->id();
         notice["nickname"] = nickname;
         notice["isHost"] = false;
+        notice["loaded"] = false;
+        notice["duration"] = 0;
         targetRoom->broadcast(notice, session);
         Logger::info("成员加入 " + targetRoomId + ": " + nickname);
         return;
@@ -169,6 +184,106 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
 
     if (type == "leave_room") {
         removeMemberFromRoomLocked(session);
+        return;
+    }
+
+    if (type == "set_room_mode") {
+        auto roomIt = m_sessionRooms.find(session);
+        if (roomIt == m_sessionRooms.end()) {
+            replyError(session, "not_in_room", "你不在房间里");
+            return;
+        }
+        auto it = m_rooms.find(roomIt->second);
+        if (it == m_rooms.end()) {
+            replyError(session, "not_in_room", "你不在房间里");
+            return;
+        }
+        const auto room = it->second;
+
+        if (!room->isHost(session)) {
+            replyError(session, "not_host", "只有房主可以更改房间模式");
+            return;
+        }
+
+        const std::string mode = message.value("mode", "");
+        if (mode != "local" && mode != "share" && mode != "url") {
+            replyError(session, "bad_message", "未知的房间模式");
+            return;
+        }
+
+        room->setMode(mode);
+
+        // 广播给所有成员(含房主自己),客户端以服务端为准
+        json notice;
+        notice["type"] = "room_mode_changed";
+        notice["mode"] = mode;
+        room->broadcast(notice);
+        Logger::info("房间 " + roomIt->second + " 模式切换: " + mode);
+        return;
+    }
+
+    if (type == "video_status") {
+        auto roomIt = m_sessionRooms.find(session);
+        if (roomIt == m_sessionRooms.end()) {
+            replyError(session, "not_in_room", "你不在房间里");
+            return;
+        }
+        auto it = m_rooms.find(roomIt->second);
+        if (it == m_rooms.end()) {
+            replyError(session, "not_in_room", "你不在房间里");
+            return;
+        }
+        const auto room = it->second;
+
+        const bool loaded = message.value("loaded", false);
+        const std::string hash = message.value("hash", "");
+        const long long duration = message.value("duration", 0LL);
+
+        room->setMemberVideo(session, loaded, hash, duration);
+
+        // 中继给其他人(不含哈希,哈希只留在服务端做比对)
+        json relay;
+        relay["type"] = "video_status";
+        relay["clientId"] = session->id();
+        relay["loaded"] = loaded;
+        relay["duration"] = duration;
+        room->broadcast(relay, session);
+
+        // 不一致状态变化时通知所有人
+        if (room->updateMismatch()) {
+            json notice;
+            notice["type"] = "video_mismatch";
+            notice["mismatched"] = room->videoMismatched();
+            notice["shortestDuration"] = room->shortestDuration();
+            room->broadcast(notice);
+        }
+        return;
+    }
+
+    if (type == "webrtc_offer" || type == "webrtc_answer" || type == "webrtc_ice") {
+        auto roomIt = m_sessionRooms.find(session);
+        if (roomIt == m_sessionRooms.end()) {
+            replyError(session, "not_in_room", "你不在房间里");
+            return;
+        }
+        auto it = m_rooms.find(roomIt->second);
+        if (it == m_rooms.end()) {
+            replyError(session, "not_in_room", "你不在房间里");
+            return;
+        }
+        const auto room = it->second;
+
+        // 定向转发:目标必须与发送者在同一个房间
+        const std::string targetId = message.value("to", "");
+        const auto target = room->findSession(targetId);
+        if (!target) {
+            replyError(session, "member_not_found", "目标成员不存在");
+            return;
+        }
+
+        json relay = message;
+        relay["from"] = session->id();
+        target->send(relay.dump());
         return;
     }
 
@@ -261,6 +376,15 @@ bool LogicSystem::removeMemberFromRoomLocked(const std::shared_ptr<Session> &ses
         notice["nickname"] = nickname;
         room->broadcast(notice); // 离开者已移除,自动只发给剩余成员
         Logger::info("成员离开 " + roomId + ": " + nickname);
+
+        // 离开的成员可能带走了不一致的视频,重新计算
+        if (room->updateMismatch()) {
+            json mismatch;
+            mismatch["type"] = "video_mismatch";
+            mismatch["mismatched"] = room->videoMismatched();
+            mismatch["shortestDuration"] = room->shortestDuration();
+            room->broadcast(mismatch);
+        }
     }
     return true;
 }

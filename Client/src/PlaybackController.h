@@ -18,6 +18,10 @@ class PlaybackController : public QObject
                READ playing
                NOTIFY playingChanged)
 
+    Q_PROPERTY(bool hasLoaded
+               READ hasLoaded
+               NOTIFY hasLoadedChanged)
+
     Q_PROPERTY(bool seekable
                READ seekable
                NOTIFY seekableChanged)
@@ -47,6 +51,7 @@ class PlaybackController : public QObject
 public:
     explicit PlaybackController(QObject *parent = nullptr);
 
+    bool hasLoaded() const;
     bool playing() const;
     bool seekable() const;
     qint64 position() const;
@@ -58,9 +63,12 @@ public:
     bool muted() const;
     void setMuted(bool muted);
 
+    QString hash() const;
+
     QMediaPlayer *player() const;
 
     Q_INVOKABLE void load(const QUrl &source);
+    Q_INVOKABLE void unload();
     Q_INVOKABLE void play();
     Q_INVOKABLE void pause();
     Q_INVOKABLE void togglePlayPause();
@@ -69,6 +77,9 @@ public:
     Q_INVOKABLE void toggleMute();
 
 signals:
+    void sourceChanged();
+    void hasLoadedChanged();
+
     void playingChanged();
     void seekableChanged();
     void positionChanged();

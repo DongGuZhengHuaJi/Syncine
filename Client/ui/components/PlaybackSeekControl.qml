@@ -39,13 +39,14 @@ RowLayout {
         }
 
         onPressedChanged: {
-            if (mediaSlider.pressed)
-                root.interacted()
-            else
-                root.seekFinished(playbackController.position)
+            if (!mediaSlider.pressed) {
+                const position = mediaSlider.value * playbackController.duration
+                playbackController.seek(position)
+                root.seekFinished(position)
+            }
+            root.interacted()
         }
         onMoved: {
-            playbackController.seek(value * playbackController.duration)
             root.interacted()
         }
 
