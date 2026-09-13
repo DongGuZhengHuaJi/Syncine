@@ -24,7 +24,10 @@ public:
     Q_INVOKABLE void setServerUrl(const QString &serverUrl);
     Q_INVOKABLE void connectToServer();
     Q_INVOKABLE void disconnectFromServer();
-    Q_INVOKABLE void sendMessage(const QString &message);
+
+    // 发送失败(未连接 / 空消息)返回 false 且不发信号,
+    // 由调用方决定怎么向上报告 —— 传输层不该猜业务的错误文案
+    bool sendMessage(const QString &message);
 
 signals:
     void connected();

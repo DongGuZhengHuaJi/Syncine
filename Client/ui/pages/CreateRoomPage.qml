@@ -12,18 +12,18 @@ Item {
         nickError = nickField.text.trim() === "" ? "请填写昵称" : ""
         if (nameError === "" && nickError === "") {
             // 状态已在房间里但页面没跳过去:直接进房间
-            if (roomManager.inRoom) {
+            if (roomSession.inRoom) {
                 stackView.push("RoomPage.qml")
                 return
             }
             serverError = ""
-            roomManager.createRoom(nickField.text.trim(), passwordField.text,
-                                   roomNameField.text.trim())
+            sessionController.createRoom(roomNameField.text.trim(), nickField.text.trim(),
+                                         passwordField.text)
         }
     }
 
     Connections {
-        target: roomManager
+        target: sessionController
 
         function onRoomCreated() {
             stackView.push("RoomPage.qml")
@@ -101,8 +101,8 @@ Item {
 
                 PrimaryButton {
                     width: parent.width
-                    enabled: !roomManager.isConnecting
-                    text: roomManager.isConnecting ? "连接中…" : "创建房间"
+                    enabled: !sessionController.busy
+                    text: sessionController.busy ? "连接中…" : "创建房间"
                     onClicked: tryCreate()
                 }
 

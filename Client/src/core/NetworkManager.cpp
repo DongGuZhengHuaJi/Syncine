@@ -86,16 +86,13 @@ void NetworkManager::disconnectFromServer() {
     m_webSocket->close();
 }
 
-void NetworkManager::sendMessage(const QString &message) {
-    if (m_webSocket->state() != QAbstractSocket::ConnectedState) {
-        emit errorOccurred("WebSocket is not connected.");
-        return;
-    }
+bool NetworkManager::sendMessage(const QString &message) {
+    if (m_webSocket->state() != QAbstractSocket::ConnectedState)
+        return false;
 
-    if (message.isEmpty()) {
-        emit errorOccurred("Cannot send an empty message.");
-        return;
-    }
+    if (message.isEmpty())
+        return false;
 
     m_webSocket->sendTextMessage(message);
+    return true;
 }

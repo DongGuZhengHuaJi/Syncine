@@ -121,9 +121,25 @@ set_target_properties(WebRTC::WebRTC PROPERTIES
 
 # ----------------------------------------------------------------------
 # 7. WebRTC 编译宏
+#
+# 这一节不是"随便加的开关"。下面每个宏都必须和编译 libwebrtc.a 时
+# 用的那一套完全一致 —— WebRTC 头文件里有大量 `#if <宏>` 包裹的条件成员,
+# 一旦不一致,同一个类在库里和客户端里 sizeof 就不同,内存布局错位。
+#
+# NDEBUG 就是这么踩出来的(症状:启动即 SIGSEGV):
+#   rtc_base/thread.h 里 webrtc::Thread 有 4 个成员被 `#if RTC_DCHECK_IS_ON`
+#   包着,而 RTC_DCHECK_IS_ON = !defined(NDEBUG) || defined(DCHECK_ALWAYS_ON)。
+#   libwebrtc.a 是 is_debug = false 编的(带 -DNDEBUG,RTC_DCHECK_IS_ON = 0),
+#   客户端不带 NDEBUG 就是 1 —— 实测 sizeof(webrtc::Thread) 256 vs 312,
+#   own_ss_ 偏移差 56 字节。于是 CreateWithSocketServer() 里
+#   `own_ss_ = std::move(ss)` 读到的是垃圾指针,销毁旧值时崩在虚析构调用上。
+#
+# 所以这里 NDEBUG 的含义是"和库的 ABI 对齐",不是"我要出发布版"。
+# 它必须独立于 CMAKE_BUILD_TYPE:客户端哪怕切成 Debug 也照样得定义。
 # ----------------------------------------------------------------------
 
 target_compile_definitions(WebRTC::WebRTC INTERFACE
+        NDEBUG # ABI 对齐用,勿删 —— 理由见上;WebrtcManager.cpp 有编译期护栏
         WEBRTC_POSIX
         WEBRTC_LINUX
         _FILE_OFFSET_BITS=64
@@ -166,47 +182,100 @@ target_link_libraries(WebRTC::WebRTC INTERFACE
 )
 
 # ----------------------------------------------------------------------
-# 9. Qt 项目初始化
+# 9. 链接器:必须用认识 CREL 重定位的 lld(>= LLVM 19.1)
+#
+# libwebrtc.a 是用 Chromium 自带的 clang 24 编的,对象文件里用的是实验性的
+# CREL 重定位格式 —— 节名是 `.crel.text` 而不是标准的 `.rela.text`。
+#
+# 系统自带的 lld 18 不认识 CREL —— 它不报错,只是把 `.crel.*` 当未知节静默
+# 忽略。后果是库里所有重定位一个都没被施加:每个 call 的位移都是 0,调用会
+# "穿透"到紧随其后的下一条指令,把未初始化的寄存器当成函数返回值。
+# 症状是程序启动即在 webrtc::Thread::CreateWithSocketServer() 里段错误,
+# 而且 gdb 看到的是"往一个垃圾指针上做虚调用",从代码层面完全看不出问题。
+#
+# 随 WebRTC 一起构建出来的 lld 就认识 CREL,直接指过去即可(它比 -fuse-ld
+# 优先级高,所以系统里原有的 -fuse-ld=lld 会被覆盖)。
+# ----------------------------------------------------------------------
+
+set(WEBRTC_LLD
+        "${WEBRTC_ROOT}/third_party/llvm-build/Release+Asserts/bin/ld.lld"
+)
+
+if(NOT EXISTS "${WEBRTC_LLD}")
+    message(FATAL_ERROR
+            "找不到支持 CREL 重定位的链接器:\n"
+            "  ${WEBRTC_LLD}\n"
+            "libwebrtc.a 的对象文件使用 CREL 重定位,用系统 lld(< 19.1) 链接不会报错,\n"
+            "但会产出一个所有跨函数调用都失效的可执行文件(启动即段错误)。\n"
+    )
+endif()
+
+# 挂在 WebRTC 这个 IMPORTED target 上,链接它的目标自动继承
+set_target_properties(WebRTC::WebRTC PROPERTIES
+        INTERFACE_LINK_OPTIONS "--ld-path=${WEBRTC_LLD}"
+)
+
+# ----------------------------------------------------------------------
+# 10. Qt 项目初始化
 # ----------------------------------------------------------------------
 
 qt_standard_project_setup()
 
 # ----------------------------------------------------------------------
-# 10. Syncine 可执行文件
+# 11. Syncine 可执行文件
 # ----------------------------------------------------------------------
 
 qt_add_executable(Syncine
 
         src/main.cpp
 
-        # Playback
-        src/PlaybackController.cpp
-        src/PlaybackController.h
+        # core:传输 + 协议(不认识房间,也不认识播放器)
+        src/core/NetworkManager.cpp
+        src/core/NetworkManager.h
+        src/core/Protocol.cpp
+        src/core/Protocol.h
+        src/core/RoomTypes.h
 
-        # Room
-        src/RoomManager.cpp
-        src/RoomManager.h
+        # playback:本地播放器 + 播放同步策略
+        src/playback/PlaybackController.cpp
+        src/playback/PlaybackController.h
+        src/playback/PlaybackSync.cpp
+        src/playback/PlaybackSync.h
 
-        # Network
-        src/NetworkManager.cpp
-        src/NetworkManager.h
+        # session:房间与会话
+        src/session/MemberModel.cpp
+        src/session/MemberModel.h
+        src/session/RoomSession.cpp
+        src/session/RoomSession.h
+        src/session/SessionController.cpp
+        src/session/SessionController.h
 
-        # WebRTC
-        src/WebrtcManager.cpp
-        src/WebrtcManager.h
+        # webrtc
+        src/webrtc/WebrtcManager.cpp
+        src/webrtc/WebrtcManager.h
+        src/webrtc/SignalingChannel.cpp
+        src/webrtc/SignalingChannel.h
 )
 
 # ----------------------------------------------------------------------
-# 11. Syncine 自己的头文件目录
+# 12. Syncine 自己的头文件目录
+#
+# src/ 是为了让源码里能写 "session/RoomSession.h" 这种带分层的路径;
+# 各子目录本身也要加进来,是因为 qmltyperegistrar 生成的
+# syncine_qmltyperegistrations.cpp 只会用基名 include(<RoomSession.h>)。
 # ----------------------------------------------------------------------
 
 target_include_directories(Syncine
         PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/playback"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/session"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/webrtc"
 )
 
 # ----------------------------------------------------------------------
-# 12. QML 单例
+# 13. QML 单例
 # ----------------------------------------------------------------------
 
 set_source_files_properties(
@@ -216,7 +285,7 @@ set_source_files_properties(
 )
 
 # ----------------------------------------------------------------------
-# 13. QML 模块
+# 14. QML 模块
 # ----------------------------------------------------------------------
 
 qt_add_qml_module(Syncine
@@ -249,7 +318,7 @@ qt_add_qml_module(Syncine
 )
 
 # ----------------------------------------------------------------------
-# 14. 链接所有依赖
+# 15. 链接所有依赖
 # ----------------------------------------------------------------------
 
 target_link_libraries(Syncine

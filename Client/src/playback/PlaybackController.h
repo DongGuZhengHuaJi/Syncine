@@ -80,6 +80,11 @@ signals:
     void sourceChanged();
     void hasLoadedChanged();
 
+    // 用户主动跳转(进度条拖动 / ±10s 按钮)。
+    // 只有这一条路径代表"用户意图",PlaybackSync 靠它决定是否广播;
+    // 应用远端命令时也会经过 seek(),但那侧有自己的抑制标志
+    void userSeeked(qint64 position);
+
     void playingChanged();
     void seekableChanged();
     void positionChanged();

@@ -8,8 +8,8 @@ Item {
     property url source: ""
     property bool controlsVisible: true
 
-    signal userSeeked(real position)
-
+    // 用户的跳转意图不再往上报:PlaybackController 自己会发 userSeeked,
+    // 由 PlaybackSync 统一决定要不要广播给房间
     onSourceChanged: playbackController.load(source)
 
     VideoOutput {
@@ -66,7 +66,6 @@ Item {
         Behavior on opacity { NumberAnimation { duration: 180 } }
 
         onInteracted: showControls()
-        onSeeked: root.userSeeked(position)
     }
 
     Timer {

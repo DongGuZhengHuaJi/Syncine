@@ -252,6 +252,8 @@ void PlaybackController::seek(qint64 position)
     );
 
     m_player->setPosition(position);
+
+    emit userSeeked(position);
 }
 
 

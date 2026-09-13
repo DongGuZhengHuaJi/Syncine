@@ -6,7 +6,6 @@ RowLayout {
     id: root
 
     signal interacted()
-    signal seekFinished(real position)
 
     spacing: 10
 
@@ -40,9 +39,8 @@ RowLayout {
 
         onPressedChanged: {
             if (!mediaSlider.pressed) {
-                const position = mediaSlider.value * playbackController.duration
-                playbackController.seek(position)
-                root.seekFinished(position)
+                // seek() 内部会发 userSeeked,广播由 PlaybackSync 负责
+                playbackController.seek(mediaSlider.value * playbackController.duration)
             }
             root.interacted()
         }

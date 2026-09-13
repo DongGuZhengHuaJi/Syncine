@@ -6,6 +6,25 @@
 
 #include <iostream>
 
+#include "rtc_base/checks.h"
+
+// ----------------------------------------------------------------------
+// ABI 护栏:客户端看到的类布局必须和 libwebrtc.a 编译时的一致。
+//
+// WebRTC 头文件里存在 `#if RTC_DCHECK_IS_ON` 包裹的条件成员
+// (见 rtc_base/thread.h 中 webrtc::Thread 的字段声明)。这个宏两边不一致时,
+// webrtc::Thread 之类的类在客户端和库里 sizeof 不同、成员偏移整体错位,
+// 症状是运行时随机段错误,极难定位。
+//
+// libwebrtc.a 为 Release 构建(is_debug = false),RTC_DCHECK_IS_ON 必须为 0;
+// 由 Client/CMakeLists.txt 第 7 节的 NDEBUG 保证。这里编译失败时:
+//   - 若你确实把 WebRTC 重编成了带 DCHECK 的版本,请同步去掉那边的 NDEBUG
+//   - 否则就是 NDEBUG 被误删了,加回去
+// ----------------------------------------------------------------------
+#if RTC_DCHECK_IS_ON
+#error "RTC_DCHECK_IS_ON 应为 0:libwebrtc.a 是 Release(is_debug = false)构建,详见 Client/CMakeLists.txt 第 7 节"
+#endif
+
 WebrtcManager::WebrtcManager() {
 }
 
@@ -370,17 +389,28 @@ bool WebrtcManager::initializeThreads() {
 }
 
 bool WebrtcManager::initializeFactory() {
-    m_peerConnectionFactory  =  webrtc::CreatePeerConnectionFactory(
+    // 音频/视频编解码工厂必须真传进去,不能留 nullptr:
+    // 旧版 CreatePeerConnectionFactory() 只是把它们原样搬进
+    // PeerConnectionFactoryDependencies(见 api/create_peerconnection_factory.cc),
+    // 并不做非空兜底。传 nullptr 会让 WebRtcVoiceEngine 拿到空的
+    // encoder_factory_,随后在 encoder_factory_->GetSupportedEncoders()
+    // 上空指针虚调用,直接 SIGSEGV —— 而且崩在 WebRTC 自己的线程里,
+    // 栈上完全看不到调用方,极难定位。
+    //
+    // 这几个内置工厂的头文件在 WebrtcManager.h 里本就 include 了,之前漏用。
+    // default_adm / audio_mixer / audio_processing 留 nullptr 是安全的:
+    // 前两个 WebRTC 会按平台默认建,apm 走内置实现。
+    m_peerConnectionFactory = webrtc::CreatePeerConnectionFactory(
         m_networkThread.get(),
         m_workerThread.get(),
         m_signalingThread.get(),
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr
+        /*default_adm=*/nullptr,
+        webrtc::CreateBuiltinAudioEncoderFactory(),
+        webrtc::CreateBuiltinAudioDecoderFactory(),
+        webrtc::CreateBuiltinVideoEncoderFactory(),
+        webrtc::CreateBuiltinVideoDecoderFactory(),
+        /*audio_mixer=*/nullptr,
+        /*audio_processing=*/nullptr
     );
 
     if (!m_peerConnectionFactory) {
