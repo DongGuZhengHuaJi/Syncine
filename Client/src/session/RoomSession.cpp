@@ -187,6 +187,9 @@ void RoomSession::reportVideoStatus(bool loaded, const QString &hash, qint64 dur
     if (!m_inRoom)
         return;
 
+    // 先更新本地成员表
+    m_members->setVideoStatus(m_clientId, loaded, duration);
+
     send(Protocol::encodeVideoStatus(loaded, hash, duration));
 }
 

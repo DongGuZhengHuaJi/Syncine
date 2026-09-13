@@ -350,15 +350,15 @@ Item {
                                 width: 38
                                 height: 38
                                 radius: 19
-                                color: modelData.isHost ? Style.accent : Style.accentSoft
+                                color: isHost ? Style.accent : Style.accentSoft
 
                                 Label {
                                     anchors.centerIn: parent
-                                    text: modelData.nickname.length > 0
-                                          ? modelData.nickname.charAt(0) : "?"
+                                    text: nickname.length > 0
+                                          ? nickname.charAt(0) : "?"
                                     font.pixelSize: 15
                                     font.bold: true
-                                    color: modelData.isHost ? "#FFFFFF" : Style.accent
+                                    color: isHost ? "#FFFFFF" : Style.accent
                                 }
                             }
 
@@ -366,18 +366,18 @@ Item {
                                 spacing: 4
 
                                 Label {
-                                    text: modelData.nickname
+                                    text: nickname
                                     font.pixelSize: 14
                                     color: Style.textPrimary
                                 }
 
                                 Label {
-                                    text: (modelData.isHost ? "房主" : "成员")
-                                          + (modelData.clientId === roomSession.clientId ? " · 你" : "")
-                                          + (!modelData.loaded && roomSession.roomMode === RoomSession.Local
+                                    text: (isHost ? "房主" : "成员")
+                                          + (clientId === roomSession.clientId ? " · 你" : "")
+                                          + (!loaded && roomSession.roomMode === RoomSession.Local
                                              ? " · 未加载" : "")
                                     font.pixelSize: 11
-                                    color: (!modelData.loaded && roomSession.roomMode === RoomSession.Local)
+                                    color: (!loaded && roomSession.roomMode === RoomSession.Local)
                                            ? Style.danger : Style.textSecondary
                                 }
                             }
@@ -446,7 +446,7 @@ Item {
                         }
                     }
 
-                    Row {
+                    RowLayout {
                         Layout.fillWidth: true
                         spacing: 10
 

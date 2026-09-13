@@ -4,8 +4,15 @@
 // 为什么用 QAbstractListModel 而不是 QVariantList<QVariantMap>:
 //   1. 类型安全:取值走 role,字段名写错会立刻暴露,
 //      而不是静默拿到一个空 QVariant
-//   2. QML 可以直接当 model 用,且 roleNames 与原 QVariantMap 的 key 同名,
-//      delegate 里的 modelData.xxx 写法一个字都不用改
+//   2. QML 可以直接当 model 用。注意 delegate 里要用**角色名本身**取值:
+//
+//          Label { text: nickname }        // 对
+//          Label { text: modelData.nickname }  // 错,恒为 undefined
+//
+//      modelData 只在"模型是 JS 数组、或没声明 role 的 ListModel"时才等于
+//      当前元素。这里定义了 roleNames,委托的上下文属性就是 nickname /
+//      isHost / loaded / clientId 这几个名字,没有 modelData 这个东西。
+//      写错的后果是 delegate 整片空白且不报任何错误,非常难查。
 //   3. 增删改全部经过这里,派生量只需要在一个地方重算并发信号,
 //      不会再出现"改了数据却漏 emit 某个属性"导致 QML 静默不同步
 //
