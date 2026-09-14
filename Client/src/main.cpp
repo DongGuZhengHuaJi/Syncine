@@ -49,6 +49,7 @@ int main(int argc, char *argv[]) {
     engine.rootContext()->setContextProperty("roomSession", &roomSession);
     engine.rootContext()->setContextProperty("sessionController", &sessionController);
     engine.rootContext()->setContextProperty("playbackSync", &playbackSync);
+    engine.rootContext()->setContextProperty("signalingChannel", &signalingChannel);
 
     engine.load(QUrl(QStringLiteral(
         "qrc:/qt/qml/SyncineApp/ui/Main.qml"

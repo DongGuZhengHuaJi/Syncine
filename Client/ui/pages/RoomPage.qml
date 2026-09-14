@@ -11,6 +11,10 @@ Item {
     // 播放广播、加载门禁、回声抑制都在 PlaybackSync 里,这一层不再判断。
     property bool leaving: false
 
+    function toggleMic() {
+        signalingChannel.setAudioEnabled(!signalingChannel.audioEnabled)
+    }
+
     MessageDialog {
         id: messageDialog
     }
@@ -18,7 +22,7 @@ Item {
 
     ListModel {
         id: messageModel
-        ListElement { who: "系统"; text: "欢迎来到房间,把房间号发给好友一起看片" }
+        ListElement { who: "系统"; text: "欢迎来到房间,把房间号发给好友一起观影" }
     }
 
     function sendMessage() {
@@ -35,6 +39,9 @@ Item {
         if (leaving)
             return
         leaving = true
+        // 先把麦克风关掉再走。否则人已经离开房间了,麦克风还在采集 ——
+        // 系统托盘上的录音指示灯会一直亮着,是用户最先注意到的异常。
+        signalingChannel.setAudioEnabled(false)
         playbackController.pause()
         sessionController.leaveRoom()
         stackView.pop()
@@ -69,10 +76,14 @@ Item {
         function onLeft() {
             if (leaving)
                 return
+            signalingChannel.setAudioEnabled(false)
             playbackController.pause()
             stackView.pop()
         }
     }
+
+    // 麦克风状态不需要 Connections 同步 —— signalingChannel.audioEnabled
+    // 是 Q_PROPERTY,引用它的绑定会随 NOTIFY 自动重算。
 
     FileDialog {
         id: fileDialog
@@ -210,6 +221,38 @@ Item {
             }
 
             onClicked: fileDialog.open()
+        }
+
+        // 麦克风开关
+        Button {
+            id: micBtn
+            anchors.left: loadVideoBtn.right
+            anchors.leftMargin: 12
+            anchors.verticalCenter: parent.verticalCenter
+
+            width: 96
+            height: 36
+
+            contentItem: Label {
+                text: signalingChannel.audioEnabled ? "关闭语音" : "开启语音"
+                font.pixelSize: 13
+                color: signalingChannel.audioEnabled ? "#FFFFFF" : Style.textPrimary
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+            }
+
+            background: Rectangle {
+                radius: 18
+                // 开麦时用强调色,关麦时用浅色 —— 一眼能看出当前状态,
+                // 不用去读文字。这是视频会议类界面的通行做法。
+                color: signalingChannel.audioEnabled
+                       ? (micBtn.hovered ? Style.accentPressed : Style.accent)
+                       : (micBtn.hovered ? Style.fieldHover : Style.fieldBg)
+                border.width: signalingChannel.audioEnabled ? 0 : 1
+                border.color: Style.border
+            }
+
+            onClicked: root.toggleMic()
         }
 
         // 显示/隐藏侧边栏

@@ -6,6 +6,7 @@
 
 #include <iostream>
 
+#include "api/audio_options.h"
 #include "rtc_base/checks.h"
 
 // ----------------------------------------------------------------------
@@ -50,6 +51,24 @@ bool WebrtcManager::initialize(const std::vector<std::string> &stunServers) {
 
     m_stunServers = stunServers;
     m_initialized = true;
+
+    // 立刻把音轨准备好(保持禁用,不碰麦克风)。
+    //
+    // 为什么必须在这里,而不能等用户点"开启语音":
+    //
+    //   SDP 里的 m=audio 段只在**协商那一刻**决定。如果音轨是在
+    //   协商完成之后才 AddTrack 的,WebRTC 会要求重新协商
+    //   (renegotiation)才能把音频写进 SDP —— 而我们没有实现重协商,
+    //   于是对端从头到尾都不知道要收音频,表现就是"点了没声音"。
+    //
+    //   音轨先建好并保持禁用,协商就能一次到位;之后开麦关麦只改
+    //   track->set_enabled(),完全不碰 SDP,对端毫无感知。
+    if (getOrCreateAudioTrack() == nullptr) {
+        // 麦克风不可用(设备被占用、没有声卡)不该拖垮整个 WebRTC ——
+        // 连接本身还有数据通道,后面还要承载视频。
+        std::cerr << "[WebrtcManager] 音轨预创建失败,本次运行将没有语音功能" << std::endl;
+    }
+
     return true;
 }
 
@@ -88,11 +107,10 @@ bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataC
         return false;
     }
 
+    // AddTrack后再createOffer
     if (m_localAudioTrack != nullptr)
         link->addLocalAudioTrack(m_localAudioTrack);
 
-    // 这里不接任何信号。PeerLink 的信号由 SignalingChannel 直接连 ——
-    // 它才是这些消息的消费者,管理器不参与转发。
     m_peers.insert(peerId, link);
     std::cout << "[WebrtcManager] 已建立对端连接: " << peerId.toStdString()
               << "(当前共 " << m_peers.size() << " 条)" << std::endl;
@@ -127,11 +145,81 @@ PeerLink *WebrtcManager::peer(const QString &peerId) const {
 void WebrtcManager::setLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track) {
     m_localAudioTrack = std::move(track);
 
-    if (m_localAudioTrack == nullptr)
+    if (m_localAudioTrack == nullptr) {
+        emit audioEnabledChanged(false);
         return;
+    }
 
     for (PeerLink *link : m_peers)
         link->addLocalAudioTrack(m_localAudioTrack);
+
+    emit audioEnabledChanged(m_localAudioTrack->enabled());
+}
+
+// ============================
+// 麦克风
+// ============================
+
+webrtc::scoped_refptr<webrtc::AudioTrackInterface> WebrtcManager::getOrCreateAudioTrack() {
+    if (m_localAudioTrack != nullptr)
+        return m_localAudioTrack;
+
+    if (m_peerConnectionFactory == nullptr || !m_initialized) {
+        std::cerr << "[WebrtcManager] 尚未初始化,无法创建音频源" << std::endl;
+        return nullptr;
+    }
+
+    // 音频源描述"从哪取音"。全进程一个 —— 所有对端共用同一个麦克风。
+    //
+    // AudioOptions 这里设定的不是"建议",而是**全局生效**的音频处理配置
+    // (见 api/peer_connection_interface.h 中 CreateAudioSource 的注释):
+    // 它会下发到媒体引擎,决定整条链路开不开 AEC/AGC/NS。
+    if (m_audioSource == nullptr) {
+        webrtc::AudioOptions options;
+        // 扬声器外放 + 麦克风同时工作的场景下,不消回声就是啸叫
+        options.echo_cancellation = true;
+        // 不同人说话的远近、音量差很大,自动增益能把它们拉平
+        options.auto_gain_control = true;
+        // 风扇、键盘、空调底噪
+        options.noise_suppression = true;
+        // 过滤低频轰鸣(桌面震动、空调)
+        options.highpass_filter = true;
+
+        m_audioSource = m_peerConnectionFactory->CreateAudioSource(options);
+        if (m_audioSource == nullptr) {
+            std::cerr << "[WebrtcManager] 创建音频源失败(麦克风可能不可用)" << std::endl;
+            return nullptr;
+        }
+    }
+
+    // 音轨是"把音频源接到 PeerConnection 上"的插头。
+    // 这里建的是原型,每个对端拿它去 AddTrack 时 WebRTC 会各建一条独立的流。
+    m_localAudioTrack = m_peerConnectionFactory->CreateAudioTrack("syncine-mic", m_audioSource.get());
+    if (m_localAudioTrack == nullptr) {
+        std::cerr << "[WebrtcManager] 创建音轨失败" << std::endl;
+        return nullptr;
+    }
+
+    m_localAudioTrack->set_enabled(false);
+
+    return m_localAudioTrack;
+}
+
+void WebrtcManager::setAudioEnabled(bool enabled) {
+    webrtc::scoped_refptr<webrtc::AudioTrackInterface> track = getOrCreateAudioTrack();
+    if (track == nullptr) {
+        emit audioEnabledChanged(false);
+        return;
+    }
+
+    if (track->enabled() == enabled)
+        return;
+
+    track->set_enabled(enabled);
+
+    std::cout << "[WebrtcManager] 麦克风已" << (enabled ? "开启" : "关闭")
+              << "(当前 " << m_peers.size() << " 条对端连接)" << std::endl;
+    emit audioEnabledChanged(enabled);
 }
 
 void WebrtcManager::destroy() {
@@ -155,7 +243,10 @@ void WebrtcManager::destroy() {
         m_signalingThread.reset();
     }
 
+    // 音轨和音频源都要在工厂之前释放 —— 它们内部引用工厂，
+    // 工厂先没了会留下悬空引用。
     m_localAudioTrack = nullptr;
+    m_audioSource = nullptr;
     m_initialized = false;
 }
 
@@ -197,16 +288,6 @@ bool WebrtcManager::initializeThreads() {
 }
 
 bool WebrtcManager::initializeFactory() {
-    // 音频/视频编解码工厂必须真传进去,不能留 nullptr:
-    // 旧版 CreatePeerConnectionFactory() 只是把它们原样搬进
-    // PeerConnectionFactoryDependencies(见 api/create_peerconnection_factory.cc),
-    // 并不做非空兜底。传 nullptr 会让 WebRtcVoiceEngine 拿到空的
-    // encoder_factory_,随后在 encoder_factory_->GetSupportedEncoders()
-    // 上空指针虚调用,直接 SIGSEGV —— 而且崩在 WebRTC 自己的线程里,
-    // 栈上完全看不到调用方,极难定位。
-    //
-    // default_adm / audio_mixer / audio_processing 留 nullptr 是安全的:
-    // 前两个 WebRTC 会按平台默认建,apm 走内置实现。
     m_peerConnectionFactory = webrtc::CreatePeerConnectionFactory(
         m_networkThread.get(),
         m_workerThread.get(),

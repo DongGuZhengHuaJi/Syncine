@@ -35,6 +35,27 @@ SignalingChannel::SignalingChannel(RoomSession *session,
     // 分开监听 memberJoined / memberLeft 会漏掉 room_joined 时的整表下发。
     connect(m_session, &RoomSession::membersChanged,
             this, &SignalingChannel::onMembersChanged);
+
+    // 麦克风状态直接来自 WebrtcManager(它才知道音轨的真实 enabled)。
+    // 本类只做转发,不自己存一份 —— 两份状态迟早会不一致。
+    connect(m_webrtcManager, &WebrtcManager::audioEnabledChanged,
+            this, &SignalingChannel::audioEnabledChanged);
+}
+
+// ============================
+// 麦克风
+// ============================
+
+void SignalingChannel::setAudioEnabled(bool enabled) {
+    if (m_webrtcManager == nullptr)
+        return;
+
+    std::cout << "[SignalingChannel] setAudioEnabled: " << (enabled ? "true" : "false") << std::endl;
+    m_webrtcManager->setAudioEnabled(enabled);
+}
+
+bool SignalingChannel::audioEnabled() const {
+    return m_webrtcManager != nullptr && m_webrtcManager->audioEnabled();
 }
 
 // ============================

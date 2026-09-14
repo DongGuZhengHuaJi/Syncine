@@ -30,6 +30,19 @@ class WebrtcManager;
 class SignalingChannel : public QObject {
     Q_OBJECT
 
+    // 麦克风开关状态。QML 直接读这个属性,不要自己再存一份。
+    //
+    // 之前 audioEnabled() 只是个普通成员函数 —— 既不是 Q_PROPERTY 也不是
+    // Q_INVOKABLE,所以 QML 里写 signalingChannel.audioEnabled 求值成
+    // undefined。而 !undefined === true,于是每次点击都发出 setAudioEnabled(true):
+    // 第一次有效,第二次撞上 setAudioEnabled 里的"值没变就返回",静默失效。
+    //
+    // 加上 Q_PROPERTY 之后 Qt 会自己管依赖追踪:属性一变,所有绑定它的
+    // QML 表达式自动重算,不需要手写 Connections 去同步副本。
+    Q_PROPERTY(bool audioEnabled
+               READ audioEnabled
+               NOTIFY audioEnabledChanged)
+
 public:
     SignalingChannel(RoomSession *session,
                      NetworkManager *networkManager,
@@ -37,11 +50,19 @@ public:
                      QObject *parent = nullptr);
     ~SignalingChannel() override = default;
 
+    // 开关麦克风。QML 绑定这个。
+    Q_INVOKABLE void setAudioEnabled(bool enabled);
+
+    bool audioEnabled() const;
+
 signals:
     void errorOccurred(const QString &message);
     // 与某个对端的连接真正打通(ICE 完成),供界面显示状态
     void peerConnected(const QString &peerId);
     void peerDisconnected(const QString &peerId);
+    // 麦克风实际开关状态。QML 用它驱动按钮显示,不要自己记状态 ——
+    // 开着麦克风但界面上显示"已静音",是视频会议里最招骂的 bug。
+    void audioEnabledChanged(bool enabled);
 
 private slots:
     void onMessage(const QString &text);

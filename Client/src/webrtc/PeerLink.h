@@ -50,7 +50,16 @@ public:
     void addIceCandidate(const QString &sdp, const QString &sdpMid, int sdpMLineIndex);
 
     // 本地播放的音轨。留空则本次协商只建数据通道,不涉及媒体。
+    //
+    // 必须在 createOffer() **之前**调用,否则 SDP 里不会有 m=audio 段。
     void addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track);
+
+    // 临时闭麦。与 WebrtcManager::setAudioEnabled 的区别:
+    //   setAudioEnabled(false) —— 关麦克风,不再采集(省 CPU、指示灯灭)
+    //   setAudioMuted(true)    —— 麦克风还开着,但发出去的帧被替换成静音
+    //
+    // 两者都不会影响连接本身,也都不需要重新协商。
+    void setAudioMuted(bool muted);
 
     // ---- 观察者接口要求的引用计数实现 ----
     // 生命周期由 WebrtcManager 掌控(close() + delete),这里只记账不自杀。
@@ -118,6 +127,7 @@ private:
     QString m_peerId;
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> m_factory;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> m_connection;
+    webrtc::scoped_refptr<webrtc::AudioTrackInterface> m_localAudioTrack;
 
     // 每个对端各一份,这就是多对端串扰的解药
     PendingOperation m_pendingOperation = PendingOperation::None;

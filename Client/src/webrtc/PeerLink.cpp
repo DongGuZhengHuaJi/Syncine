@@ -178,7 +178,43 @@ void PeerLink::addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterf
     if (m_connection == nullptr || track == nullptr)
         return;
 
-    m_connection->AddTrack(track, {"syncine-audio"});
+    // 已经挂过同一根音轨就直接返回。
+    //
+    // 这个判断是必须的:一条 PeerConnection 对同一根音轨只能 AddTrack 一次,
+    // 重复调用会被 WebRTC 直接拒绝(Sender already exists for track ...)。
+    // 而 setAudioEnabled(true) 会遍历所有对端重挂一遍 ——
+    // 那些早就挂过的对端就会撞上这个限制。
+    //
+    // 按 track id 比对而不是按指针:指针可能因包装对象不同而变,
+    // 但 track id 是 WebRTC 内部用来认这根轨的唯一标识。
+    if (m_localAudioTrack != nullptr
+        && m_localAudioTrack->id() == track->id()) {
+        return;
+    }
+
+    m_localAudioTrack = track;
+
+    // AddTrack 的正确时机是 CreateOffer 之前 —— 它决定 SDP 里有没有
+    // m=audio 段。WebRTC 会把新加的轨纳入下一次协商,而我们的协商
+    // 还没开始(syncPeers 里 ensurePeer 之后才 createOffer),正好。
+    auto sender = m_connection->AddTrack(track, {"syncine-audio"});
+    if (!sender.ok()) {
+        std::cerr << "[PeerLink " << m_peerId.toStdString()
+                  << "] 添加音轨失败: " << sender.error().message() << std::endl;
+        return;
+    }
+
+    std::cout << "[PeerLink " << m_peerId.toStdString() << "] 已挂载本地音轨" << std::endl;
+}
+
+void PeerLink::setAudioMuted(bool muted) {
+    if (m_localAudioTrack == nullptr)
+        return;
+
+    // set_enabled(false) 不是"停止发送",而是"发送静音帧"。
+    // 这样 SSRC、编解码器、时序全部保持不变,对端感觉不到任何变化,
+    // 我们也就不需要重新协商。这是 WebRTC 里闭麦的标准做法。
+    m_localAudioTrack->set_enabled(!muted);
 }
 
 // ============================

@@ -83,11 +83,22 @@ public:
         return static_cast<int>(m_peers.size());
     }
 
+    // 开关麦克风。
+    void setAudioEnabled(bool enabled);
+
+    bool audioEnabled() const {
+        return m_localAudioTrack != nullptr && m_localAudioTrack->enabled();
+    }
+
     // 本地播放的音轨交给某个对端发送。留空则本次协商只有数据通道。
     void setLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track);
 
     // 销毁一切,包括线程和工厂。析构时自动调用。
     void destroy();
+
+signals:
+    // 麦克风实际可用状态发生变化。QML 用它驱动按钮的显示。
+    void audioEnabledChanged(bool enabled);
 
     // 这里**没有** offerCreated / iceCandidateCreated 之类的信号。
     //
@@ -103,6 +114,11 @@ private:
     bool initializeThreads();
     bool initializeFactory();
 
+    // 惰性创建音频源和音轨,全进程只建一次。失败返回 nullptr。
+    // 放在私有:调用方只该通过 setAudioEnabled 开关麦克风,
+    // 不该关心音轨对象本身的生命周期。
+    webrtc::scoped_refptr<webrtc::AudioTrackInterface> getOrCreateAudioTrack();
+
     std::unique_ptr<webrtc::Thread> m_networkThread;
     std::unique_ptr<webrtc::Thread> m_workerThread;
     std::unique_ptr<webrtc::Thread> m_signalingThread;
@@ -115,6 +131,12 @@ private:
     // 但 destroy() 里仍要**显式**先关连接再停线程,顺序见 .cpp
     QHash<QString, PeerLink *> m_peers;
 
+    // 音频源描述"从哪取音"(麦克风)。全进程一个:所有对端共用同一个麦克风,
+    // 只是各自有一条独立的 RTP 流。
+    webrtc::scoped_refptr<webrtc::AudioSourceInterface> m_audioSource;
+
+    // 音轨是"把音频源接到某个 PeerConnection 上"的插头。
+    // 这里只保存一份原型,每个对端拿它去 AddTrack,WebRTC 内部会各建一条流。
     webrtc::scoped_refptr<webrtc::AudioTrackInterface> m_localAudioTrack;
     bool m_initialized = false;
 };
