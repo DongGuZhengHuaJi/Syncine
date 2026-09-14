@@ -1,22 +1,27 @@
 //
 // WebRTC 信令 <-> 房间消息 之间的胶水层。
 //
-// 这些逻辑原先散在 main.cpp 里:6 条 connect、一个 webrtcPeerId 成员、
-// 以及"offer 的接收方还没定下来时从成员列表里猜一个"这种业务流程。
-// 它属于「共享模式会话」的业务,不属于「程序启动」,所以单独成类,
-// main.cpp 于是退回成纯粹的装配点。
+// 出站:WebRTC 事件 -> 带路由信息的信令消息
+// 入站:信令消息 -> 对应 PeerLink 的状态机
 //
-// 出站:WebRTC 事件 -> 信令消息
-// 入站:信令消息 -> WebRTC 状态机
+// 多对端之后这一层多了两件它该管的事:
+//   1. **该和谁建连** —— 谁发起、什么时候发起(syncPeers)
+//   2. **路由** —— 每条信令归哪个对端(靠 peerId 认领)
+//
+// 为什么要定"谁发起":网状网里若两端同时 CreateOffer,会撞成 glare
+// (双方都在 offer 状态,收到对方的 offer 谁也不知道该回滚谁)。
+// 用 clientId 比较来单向决定,是无需额外协商就能打破对称的办法。
 //
 
 #ifndef SYNCINE_SIGNALINGCHANNEL_H
 #define SYNCINE_SIGNALINGCHANNEL_H
 
 #include <QObject>
+#include <QSet>
 #include <QString>
 
 #include "core/Protocol.h"
+#include "webrtc/PeerLink.h"
 
 class NetworkManager;
 class RoomSession;
@@ -34,29 +39,45 @@ public:
 
 signals:
     void errorOccurred(const QString &message);
+    // 与某个对端的连接真正打通(ICE 完成),供界面显示状态
+    void peerConnected(const QString &peerId);
+    void peerDisconnected(const QString &peerId);
 
 private slots:
     void onMessage(const QString &text);
 
-    void onOfferCreated(const QString &sdp);
-    void onAnswerCreated(const QString &sdp);
-    void onIceCandidateCreated(const QString &sdp,
+    void onOfferCreated(const QString &peerId, const QString &sdp);
+    void onAnswerCreated(const QString &peerId, const QString &sdp);
+    void onIceCandidateCreated(const QString &peerId,
+                               const QString &sdp,
                                const QString &sdpMid,
                                int sdpMLineIndex);
 
+    void onPeerConnected(const QString &peerId);
+    void onPeerClosed(const QString &peerId);
+    void onPeerError(const QString &peerId, const QString &message);
+
+    void onRoomEntered();
     void onRoomLeft();
+    void onMembersChanged();
 
 private:
+    // 房间成员表变化后,对齐连接:该建的建、该删的删
+    void syncPeers();
+    void teardownPeer(const QString &peerId);
+    // 保证 peerId 有 PeerLink。已存在返回 true;新建失败返回 false。
+    bool ensurePeer(const QString &peerId);
+    // 本端是否该主动向 peerId 发起协商(半开连接的处理见 .cpp)
+    bool shouldInitiate(const QString &peerId) const;
     bool send(const QString &text);
-    // 记录对端;返回 false 表示这次没能确定对端(房间里没有别人)
-    bool resolvePeer();
 
     RoomSession *m_session = nullptr;
     NetworkManager *m_networkManager = nullptr;
     WebrtcManager *m_webrtcManager = nullptr;
 
-    // v1 只支持单对端(单观众);更多人共享时需要为每个观众各建一个 WebrtcManager
-    QString m_peerId;
+    // 已经发出过 offer 的对端。用来区分"等待连上"和"该重试"——
+    // 没有它就无法判断一条半开的连接是死了还是还在握手中。
+    QSet<QString> m_offeredPeers;
 };
 
 #endif //SYNCINE_SIGNALINGCHANNEL_H

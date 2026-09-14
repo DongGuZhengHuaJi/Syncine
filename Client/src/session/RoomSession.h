@@ -98,8 +98,10 @@ public:
 
     // 除自己之外的成员是否都已加载视频(本地模式门禁用)
     bool allOthersLoaded() const;
-    // 房间里第一个非自己的成员 clientId(没有则返回空串)
-    QString firstOtherMemberId() const;
+
+    // 除自己之外的全部成员 ID。网状网要为每个对端各建一条 WebRTC 连接,
+    // 所以这里返回的是列表而不是单个 ID。
+    QList<QString> otherMemberIds() const;
 
     // ---- 生命周期:由 SessionController 在入场/离场时调用 ----
     void enterRoom(const RoomSnapshot &snapshot);

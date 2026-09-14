@@ -61,12 +61,12 @@ qint64 RoomSession::shortestDuration() const {
     return m_shortestDuration;
 }
 
-bool RoomSession::allOthersLoaded() const {
-    return m_members->allOthersLoaded(m_clientId);
+QList<QString> RoomSession::otherMemberIds() const {
+    return m_members->idsExcept(m_clientId);
 }
 
-QString RoomSession::firstOtherMemberId() const {
-    return m_members->firstIdExcept(m_clientId);
+bool RoomSession::allOthersLoaded() const {
+    return m_members->allOthersLoaded(m_clientId);
 }
 
 // ============================

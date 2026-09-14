@@ -4,6 +4,8 @@
 
 #include "SignalingChannel.h"
 
+#include <iostream>
+
 #include "core/NetworkManager.h"
 #include "session/RoomSession.h"
 #include "webrtc/WebrtcManager.h"
@@ -20,65 +22,145 @@ SignalingChannel::SignalingChannel(RoomSession *session,
     if (m_session == nullptr || m_networkManager == nullptr || m_webrtcManager == nullptr)
         return;
 
-    // 出站:WebRTC 事件 -> 信令消息
-    connect(m_webrtcManager, &WebrtcManager::offerCreated,
-            this, &SignalingChannel::onOfferCreated);
-    connect(m_webrtcManager, &WebrtcManager::answerCreated,
-            this, &SignalingChannel::onAnswerCreated);
-    connect(m_webrtcManager, &WebrtcManager::iceCandidateCreated,
-            this, &SignalingChannel::onIceCandidateCreated);
 
-    // 入站:信令消息 -> WebRTC 状态机
+    // ---- 入站:信令消息 -> WebRTC 状态机 ----
     connect(m_networkManager, &NetworkManager::messageReceived,
             this, &SignalingChannel::onMessage);
 
-    // 离开房间后对端作废,下次共享重新解析
+    // ---- 房间生命周期 -> 连接的建与拆 ----
+    connect(m_session, &RoomSession::entered, this, &SignalingChannel::onRoomEntered);
     connect(m_session, &RoomSession::left, this, &SignalingChannel::onRoomLeft);
+
+    // 成员一变就重新对齐。成员表是"谁该连着"的唯一事实来源,
+    // 分开监听 memberJoined / memberLeft 会漏掉 room_joined 时的整表下发。
+    connect(m_session, &RoomSession::membersChanged,
+            this, &SignalingChannel::onMembersChanged);
 }
 
 // ============================
-// 出站
+// 连接的对齐:该建谁、该删谁
 // ============================
 
-bool SignalingChannel::resolvePeer() {
-    if (!m_peerId.isEmpty())
+bool SignalingChannel::shouldInitiate(const QString &peerId) const {
+    if (m_session == nullptr)
+        return false;
+
+    return m_session->clientId() < peerId;
+}
+
+bool SignalingChannel::ensurePeer(const QString &peerId) {
+    if (m_webrtcManager == nullptr || peerId.isEmpty())
+        return false;
+
+    if (m_webrtcManager->peer(peerId) != nullptr)
         return true;
 
-    // 发起 offer 的一方此前没收到过对端消息,目标只能从房间成员里解析
-    m_peerId = m_session->firstOtherMemberId();
-    return !m_peerId.isEmpty();
+    if (!m_webrtcManager->createPeerConnection(peerId))
+        return false;
+
+    // 建立新的PeerLink，并把它的信号连到本类的槽上。
+    PeerLink *link = m_webrtcManager->peer(peerId);
+    if (link == nullptr)
+        return false;
+
+    connect(link, &PeerLink::offerCreated,
+            this, &SignalingChannel::onOfferCreated);
+    connect(link, &PeerLink::answerCreated,
+            this, &SignalingChannel::onAnswerCreated);
+    connect(link, &PeerLink::iceCandidateCreated,
+            this, &SignalingChannel::onIceCandidateCreated);
+    connect(link, &PeerLink::connected,
+            this, &SignalingChannel::onPeerConnected);
+    connect(link, &PeerLink::closed,
+            this, &SignalingChannel::onPeerClosed);
+    connect(link, &PeerLink::errorOccurred,
+            this, &SignalingChannel::onPeerError);
+
+    return true;
 }
 
-void SignalingChannel::onOfferCreated(const QString &sdp) {
-    if (!resolvePeer()) {
-        emit errorOccurred("房间里没有其他成员,无法发起共享");
+void SignalingChannel::syncPeers() {
+    if (m_session == nullptr || m_webrtcManager == nullptr)
         return;
+
+    const QList<QString> want = m_session->otherMemberIds();
+
+    // 删除不在表中的连接
+    const QList<QString> existing = m_webrtcManager->peerIds();
+    for (const QString &peerId : existing) {
+        if (!want.contains(peerId))
+            teardownPeer(peerId);
     }
 
-    send(Protocol::encodeWebrtcOffer(m_peerId, sdp));
-}
+    // 建立新连接
+    for (const QString &peerId : want) {
+        if (!ensurePeer(peerId))
+            continue;
 
-void SignalingChannel::onAnswerCreated(const QString &sdp) {
-    if (!resolvePeer()) {
-        emit errorOccurred("对端成员已离开");
-        return;
+        if (!shouldInitiate(peerId))
+            continue;
+
+        if (m_offeredPeers.contains(peerId))
+            continue;
+
+        m_offeredPeers.insert(peerId);
+        if (auto *link = m_webrtcManager->peer(peerId))
+            link->createOffer();
     }
-
-    send(Protocol::encodeWebrtcAnswer(m_peerId, sdp));
 }
 
-void SignalingChannel::onIceCandidateCreated(const QString &sdp,
+void SignalingChannel::teardownPeer(const QString &peerId) {
+    m_offeredPeers.remove(peerId);
+    if (m_webrtcManager != nullptr)
+        m_webrtcManager->removePeer(peerId);
+}
+
+void SignalingChannel::onRoomEntered() {
+    syncPeers();
+}
+
+void SignalingChannel::onMembersChanged() {
+    if (m_session == nullptr || !m_session->inRoom())
+        return;
+
+    syncPeers();
+}
+
+void SignalingChannel::onRoomLeft() {
+    m_offeredPeers.clear();
+    if (m_webrtcManager != nullptr)
+        m_webrtcManager->closeAllPeers();
+}
+
+// ============================
+// 出站:WebRTC -> 信令
+// ============================
+//
+// 每条消息都带 peerId(编码进 "to" 字段),服务端据此定向转发,
+// 不再需要"猜对端是谁"。
+
+void SignalingChannel::onOfferCreated(const QString &peerId, const QString &sdp) {
+    send(Protocol::encodeWebrtcOffer(peerId, sdp));
+}
+
+void SignalingChannel::onAnswerCreated(const QString &peerId, const QString &sdp) {
+    send(Protocol::encodeWebrtcAnswer(peerId, sdp));
+}
+
+void SignalingChannel::onIceCandidateCreated(const QString &peerId,
+                                             const QString &sdp,
                                              const QString &sdpMid,
                                              int sdpMLineIndex) {
-    if (!resolvePeer())
-        return;
-
-    send(Protocol::encodeWebrtcIce(m_peerId, sdp, sdpMid, sdpMLineIndex));
+    send(Protocol::encodeWebrtcIce(peerId, sdp, sdpMid, sdpMLineIndex));
 }
 
 // ============================
-// 入站
+// 入站:信令 -> WebRTC
 // ============================
+//
+// 每条消息的 from 字段就是这条信令属于哪个对端。
+// 路由不需要状态,从消息本身读出来即可 —— 这也是为什么
+// SignalingChannel 里没有任何"当前对端"之类的成员。
 
 void SignalingChannel::onMessage(const QString &text) {
     const std::optional<Protocol::Message> message = Protocol::decode(text);
@@ -86,22 +168,52 @@ void SignalingChannel::onMessage(const QString &text) {
         return;
 
     switch (message->type) {
-    case Protocol::MessageType::WebrtcOffer:
-        m_peerId = message->from;
-        // offer 到达会自动触发内部 createAnswer
-        m_webrtcManager->setRemoteDescription(message->sdp.toStdString(), "offer");
-        break;
+    case Protocol::MessageType::WebrtcOffer: {
+        const QString from = message->from;
+        if (from.isEmpty())
+            return;
 
-    case Protocol::MessageType::WebrtcAnswer:
-        m_peerId = message->from;
-        m_webrtcManager->setRemoteDescription(message->sdp.toStdString(), "answer");
-        break;
+        // 对端先发起了。即使按规则"该我发起",也照样收下 ——
+        // 死锁的破解就在这一步(见 shouldInitiate 的说明)。
+        if (!ensurePeer(from))
+            return;
 
-    case Protocol::MessageType::WebrtcIce:
-        m_webrtcManager->addIceCandidate(message->sdp.toStdString(),
-                                         message->sdpMid.toStdString(),
-                                         message->sdpMLineIndex);
+        m_webrtcManager->peer(from)->setRemoteDescription(message->sdp, QStringLiteral("offer"));
         break;
+    }
+
+    case Protocol::MessageType::WebrtcAnswer: {
+        const QString from = message->from;
+        if (from.isEmpty())
+            return;
+
+        auto *link = m_webrtcManager->peer(from);
+        if (link == nullptr) {
+            // 收到了一个我们不认识的 answer —— 说明它对应的 offer 不是我们发的,
+            // 或者连接已经被拆了。静默忽略,不新建连接(否则会凭空多出一条)。
+            std::cerr << "[信令] 忽略来自未知对端的 answer: " << from.toStdString() << std::endl;
+            return;
+        }
+
+        link->setRemoteDescription(message->sdp, QStringLiteral("answer"));
+        break;
+    }
+
+    case Protocol::MessageType::WebrtcIce: {
+        const QString from = message->from;
+        if (from.isEmpty())
+            return;
+
+        // ICE 与 SDP 是两条独立通道,候选可能先于 offer 到达。
+        // 这里若对端还不存在就先丢掉 —— 重新收集的候选随后就到,
+        // 而为一条可能永远不来的 offer 提前建连接是更糟的赌注。
+        auto *link = m_webrtcManager->peer(from);
+        if (link == nullptr)
+            return;
+
+        link->addIceCandidate(message->sdp, message->sdpMid, message->sdpMLineIndex);
+        break;
+    }
 
     default:
         // 其余消息归 SessionController / RoomSession
@@ -109,8 +221,25 @@ void SignalingChannel::onMessage(const QString &text) {
     }
 }
 
-void SignalingChannel::onRoomLeft() {
-    m_peerId.clear();
+// ============================
+// 连接状态
+// ============================
+
+void SignalingChannel::onPeerConnected(const QString &peerId) {
+    std::cout << "[信令] 与对端 " << peerId.toStdString() << " 的连接已建立" << std::endl;
+    emit peerConnected(peerId);
+}
+
+void SignalingChannel::onPeerClosed(const QString &peerId) {
+    emit peerDisconnected(peerId);
+}
+
+void SignalingChannel::onPeerError(const QString &peerId, const QString &message) {
+    // 连接级错误(ICE 失败、协商失败)不弹给用户:网状网里一个人掉线
+    // 不该打断其他人。只报给上层,由它决定怎么处理。
+    std::cerr << "[信令] 对端 " << peerId.toStdString() << " 出错: "
+              << message.toStdString() << std::endl;
+    emit errorOccurred(message);
 }
 
 bool SignalingChannel::send(const QString &text) {

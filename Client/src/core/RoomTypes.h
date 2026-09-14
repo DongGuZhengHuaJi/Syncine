@@ -1,9 +1,7 @@
 //
 // 房间相关的传输层数据类型。
 //
-// 只描述"线上长什么样",不含任何 Qt 对象或房间逻辑:
-// 上层(session/)拿到这些值之后再决定怎么用。
-//
+
 
 #ifndef SYNCINE_ROOMTYPES_H
 #define SYNCINE_ROOMTYPES_H

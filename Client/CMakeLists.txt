@@ -253,6 +253,8 @@ qt_add_executable(Syncine
         # webrtc
         src/webrtc/WebrtcManager.cpp
         src/webrtc/WebrtcManager.h
+        src/webrtc/PeerLink.cpp
+        src/webrtc/PeerLink.h
         src/webrtc/SignalingChannel.cpp
         src/webrtc/SignalingChannel.h
 )

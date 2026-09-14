@@ -77,6 +77,8 @@ public:
     bool allOthersLoaded(const QString &clientId) const;
     // 房间里第一个非 clientId 的成员(没有则返回空串)
     QString firstIdExcept(const QString &clientId) const;
+    // 除 clientId 之外的全部成员 ID(网状网建连时用:每个对端都要连一条)
+    QList<QString> idsExcept(const QString &clientId) const;
 
 signals:
     void countChanged();

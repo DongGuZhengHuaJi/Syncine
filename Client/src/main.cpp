@@ -1,11 +1,3 @@
-//
-// 装配点(composition root)。
-//
-// 这里只做三件事:创建对象、连好依赖、load QML。
-// 任何"业务逻辑"都不应该出现在这里 —— 需要跨模块粘合的部分
-// 各自有归属:播放同步 -> PlaybackSync,信令转发 -> SignalingChannel,
-// 入场流程 -> SessionController。
-//
 
 #include <QDebug>
 #include <QGuiApplication>
@@ -41,9 +33,11 @@ int main(int argc, char *argv[]) {
     // ---- WebRTC 信令:房间 <-> WebRTC 状态机 ----
     SignalingChannel signalingChannel(&roomSession, &networkManager, &webrtcManager);
 
-    // 局域网联调暂不需要 STUN;上互联网时再配置
-    if (webrtcManager.initialize({}))
-        webrtcManager.createPeerConnection();
+    // 局域网联调暂不需要 STUN;上互联网时再配置。
+    //
+    // 这里只初始化线程和工厂 —— 对端连接**不在这里建**。
+    // 每条连接对应一个对端,由 SignalingChannel 在进房后按成员表创建。
+    webrtcManager.initialize({});
 
     QObject::connect(&signalingChannel, &SignalingChannel::errorOccurred, &app,
                      [](const QString &message) {

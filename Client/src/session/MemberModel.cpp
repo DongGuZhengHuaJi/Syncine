@@ -169,3 +169,13 @@ QString MemberModel::firstIdExcept(const QString &clientId) const {
     }
     return QString();
 }
+
+QList<QString> MemberModel::idsExcept(const QString &clientId) const {
+    QList<QString> ids;
+    ids.reserve(m_members.size());
+    for (const Member &member : m_members) {
+        if (member.clientId != clientId)
+            ids.append(member.clientId);
+    }
+    return ids;
+}
