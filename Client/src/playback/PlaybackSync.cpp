@@ -50,11 +50,23 @@ PlaybackSync::PlaybackSync(RoomSession *session,
     connect(m_playback, &PlaybackController::durationChanged,
             this, &PlaybackSync::onMediaChanged);
 
-    // ---- 房间 -> 本地播放器 ----
+    // 房主/本地模式:界面状态跟着本地播放器走,这里把变化转发出去
+    connect(m_playback, &PlaybackController::playingChanged,
+            this, &PlaybackSync::playingChanged);
+    connect(m_playback, &PlaybackController::positionChanged,
+            this, &PlaybackSync::positionChanged);
+    connect(m_playback, &PlaybackController::durationChanged,
+            this, &PlaybackSync::durationChanged);
+    connect(m_playback, &PlaybackController::seekableChanged,
+            this, &PlaybackSync::seekableChanged);
+
+    // ---- 房间 -> 本地播放器 / 同步状态 ----
     connect(m_session, &RoomSession::playbackCommandReceived,
             this, &PlaybackSync::onRemoteCommand);
+    connect(m_session, &RoomSession::playbackPositionReceived,
+            this, &PlaybackSync::onPositionUpdate);
 
-    // ---- 房间状态变化 -> 重算门禁 ----
+    // ---- 房间状态变化 -> 重算门禁 / 同步状态 ----
     connect(m_session, &RoomSession::membersChanged,
             this, &PlaybackSync::onRoomChanged);
     connect(m_session, &RoomSession::roomModeChanged,
@@ -66,8 +78,99 @@ PlaybackSync::PlaybackSync(RoomSession *session,
                 // 进房之前可能就已经加载好视频了,补报一次,
                 // 否则服务端不知道"这个成员能播"
                 pushVideoStatus();
-                emit gateChanged();
+                onRoomChanged();
             });
+
+    // 房主周期性广播位置(观众端进度条的数据源)
+    m_positionTimer.setInterval(500);
+    connect(&m_positionTimer, &QTimer::timeout,
+            this, &PlaybackSync::onPositionTimer);
+    m_positionTimer.start();
+}
+
+// ============================
+// 统一状态
+// ============================
+
+qint64 PlaybackSync::duration() const {
+    if (m_showRemote)
+        return m_syncedDuration;
+
+    return m_playback != nullptr ? m_playback->duration() : 0;
+}
+
+qint64 PlaybackSync::position() const {
+    if (m_showRemote)
+        return m_syncedPosition;
+
+    return m_playback != nullptr ? m_playback->position() : 0;
+}
+
+bool PlaybackSync::playing() const {
+    if (m_showRemote)
+        return m_syncedPlaying;
+
+    return m_playback != nullptr && m_playback->playing();
+}
+
+bool PlaybackSync::seekable() const {
+    if (m_showRemote)
+        return m_syncedDuration > 0;      // 知道时长就能拖进度条
+
+    return m_playback != nullptr && m_playback->seekable();
+}
+
+// ============================
+// 统一控制入口
+// ============================
+
+void PlaybackSync::play() {
+    // 观众:自己没有媒体,直接给房间发命令。
+    // 乐观置位让界面立刻响应;房主执行后会周期回传状态做最终确认。
+    if (m_showRemote && m_session->inRoom()) {
+        m_session->sendPlayback(RoomSession::PlaybackAction::Play, m_syncedPosition);
+        updateSyncedState(m_syncedPosition, true);
+        return;
+    }
+
+    // 房主/本地:驱动本地播放器,广播由 playingChanged → onLocalPlayingChanged 完成
+    if (m_playback != nullptr)
+        m_playback->play();
+}
+
+void PlaybackSync::pause() {
+    if (m_showRemote && m_session->inRoom()) {
+        m_session->sendPlayback(RoomSession::PlaybackAction::Pause, m_syncedPosition);
+        updateSyncedState(m_syncedPosition, false);
+        return;
+    }
+
+    if (m_playback != nullptr)
+        m_playback->pause();
+}
+
+void PlaybackSync::togglePlayPause() {
+    if (playing())
+        pause();
+    else
+        play();
+}
+
+void PlaybackSync::seek(qint64 position) {
+    if (m_showRemote && m_session->inRoom()) {
+        const qint64 clamped = qBound<qint64>(0, position, m_syncedDuration);
+        m_session->sendPlayback(RoomSession::PlaybackAction::Seek, clamped);
+        updateSyncedState(clamped, m_syncedPlaying);
+        return;
+    }
+
+    // 房主/本地:本地跳转,广播由 userSeeked → onLocalSeeked 完成
+    if (m_playback != nullptr)
+        m_playback->seek(position);
+}
+
+void PlaybackSync::seekRelative(qint64 offset) {
+    seek(position() + offset);
 }
 
 // ============================
@@ -132,10 +235,47 @@ void PlaybackSync::onLocalSeeked(qint64 position) {
 void PlaybackSync::onMediaChanged() {
     pushVideoStatus();
     emit gateChanged();
+    emit durationChanged();
 }
 
 void PlaybackSync::onRoomChanged() {
+    if (m_session == nullptr || m_playback == nullptr)
+        return;
+
+    // 该显示哪一路画面:
+    //
+    //   本地模式           → 自己的画面(每人各自加载各自的文件)
+    //   共享/网链 + 房主   → 自己的画面(房主就是推流的那一方)
+    //   共享/网链 + 非房主 → 远端画面(房主推过来的)
+    const bool isLocal = (m_session->roomMode() == RoomSession::RoomMode::Local);
+    m_showRemote = !isLocal && !m_session->isHost();
+
+    m_playback->setShowingRemote(m_showRemote);
+
+    // 观众端的时长来自房主的 video_status(成员表里就有)
+    m_syncedDuration = hostDuration();
+
+    emit durationChanged();
+    emit seekableChanged();
+    emit positionChanged();
+    emit playingChanged();
     emit gateChanged();
+}
+
+void PlaybackSync::onPositionTimer() {
+    if (m_session == nullptr || m_playback == nullptr)
+        return;
+
+    // 只有"推流方"需要周期广播位置;观众端据此画进度条。
+    // 其余时刻这个定时器空转,开销可忽略。
+    if (!m_session->inRoom() || !m_session->isHost())
+        return;
+    if (m_session->roomMode() == RoomSession::RoomMode::Local)
+        return;
+    if (!m_playback->playing())
+        return;
+
+    m_session->sendPlaybackPosition(m_playback->position(), true);
 }
 
 void PlaybackSync::pushVideoStatus() {
@@ -148,12 +288,18 @@ void PlaybackSync::pushVideoStatus() {
 }
 
 // ============================
-// 房间 -> 本地
+// 房间 -> 本地 / 同步状态
 // ============================
 
 void PlaybackSync::onRemoteCommand(RoomSession::PlaybackAction action, qint64 position) {
     if (m_session == nullptr || m_playback == nullptr)
         return;
+
+    // 观众端:命令是"状态更新",不是驱动本地播放器(观众没有媒体)
+    if (m_showRemote) {
+        updateSyncedState(position, action == RoomSession::PlaybackAction::Play);
+        return;
+    }
 
     const RemoteScope scope(m_applyingRemote);
 
@@ -174,4 +320,42 @@ void PlaybackSync::onRemoteCommand(RoomSession::PlaybackAction action, qint64 po
     case RoomSession::PlaybackAction::Seek:
         break;
     }
+}
+
+void PlaybackSync::onPositionUpdate(qint64 position, bool playing) {
+    if (!m_showRemote)
+        return;                     // 房主/本地不需要这个
+
+    updateSyncedState(position, playing);
+}
+
+void PlaybackSync::updateSyncedState(qint64 position, bool playing) {
+    bool changed = false;
+
+    if (m_syncedPosition != position) {
+        m_syncedPosition = position;
+        changed = true;
+        emit positionChanged();
+    }
+
+    if (m_syncedPlaying != playing) {
+        m_syncedPlaying = playing;
+        changed = true;
+        emit playingChanged();
+    }
+
+    if (changed)
+        emit gateChanged();
+}
+
+qint64 PlaybackSync::hostDuration() const {
+    if (m_session == nullptr || m_session->members() == nullptr)
+        return 0;
+
+    // 成员数只有个位数,线性扫描足够
+    for (const Member &member : m_session->members()->members()) {
+        if (member.isHost)
+            return member.duration;
+    }
+    return 0;
 }

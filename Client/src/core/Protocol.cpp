@@ -24,6 +24,7 @@ MessageType typeFromString(const QString &type) {
         {"member_left", MessageType::MemberLeft},
         {"chat", MessageType::Chat},
         {"playback", MessageType::Playback},
+        {"playback_position", MessageType::PlaybackPosition},
         {"room_mode_changed", MessageType::RoomModeChanged},
         {"video_status", MessageType::VideoStatus},
         {"video_mismatch", MessageType::VideoMismatch},
@@ -121,6 +122,11 @@ std::optional<Message> decode(const QString &text) {
         message.position = int64Of(object, "position");
         break;
 
+    case MessageType::PlaybackPosition:
+        message.position = int64Of(object, "position");
+        message.playing = object.value("playing").toBool(false);
+        break;
+
     case MessageType::RoomModeChanged:
         message.mode = object.value("mode").toString();
         break;
@@ -209,6 +215,14 @@ QString encodePlayback(const QString &action, qint64 position) {
     message["type"] = "playback";
     message["action"] = action;
     message["position"] = position;
+    return serialize(message);
+}
+
+QString encodePlaybackPosition(qint64 position, bool playing) {
+    QJsonObject message;
+    message["type"] = "playback_position";
+    message["position"] = position;
+    message["playing"] = playing;
     return serialize(message);
 }
 

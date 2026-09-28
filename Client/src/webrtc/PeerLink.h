@@ -13,6 +13,7 @@
 
 #include "api/peer_connection_interface.h"
 #include "api/media_stream_interface.h"
+#include "api/video/video_sink_interface.h"
 
 class WebrtcManager;
 
@@ -29,11 +30,6 @@ public:
              bool createDataChannel,
              QObject *parent = nullptr);
 
-    // 唯一正确的销毁方式。
-    //
-    // 不能直接 delete:此刻对端的回调可能还在 WebRTC 信令线程上跑,虚表里
-    // 还有指向本对象的指针。close() 先把连接关掉并释放引用,之后这个对象
-    // 就只剩主线程持有,再删才是安全的。
     void close();
 
     QString peerId() const {
@@ -49,25 +45,18 @@ public:
     void setRemoteDescription(const QString &sdp, const QString &type);
     void addIceCandidate(const QString &sdp, const QString &sdpMid, int sdpMLineIndex);
 
-    // 本地播放的音轨。留空则本次协商只建数据通道,不涉及媒体。
-    //
-    // 必须在 createOffer() **之前**调用,否则 SDP 里不会有 m=audio 段。
+    // 添加本地音轨
     void addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track);
+    // 添加本地视频轨
+    void addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterface> track);
 
-    // 临时闭麦。与 WebrtcManager::setAudioEnabled 的区别:
-    //   setAudioEnabled(false) —— 关麦克风,不再采集(省 CPU、指示灯灭)
-    //   setAudioMuted(true)    —— 麦克风还开着,但发出去的帧被替换成静音
-    //
-    // 两者都不会影响连接本身,也都不需要重新协商。
+    // 设置远端视频轨的渲染器。由 WebrtcManager 注入,生命周期比本对象长。
+    void setRemoteVideoSink(webrtc::VideoSinkInterface<webrtc::VideoFrame> *sink);
+
+    // 临时闭麦
     void setAudioMuted(bool muted);
 
-    // ---- 观察者接口要求的引用计数实现 ----
-    // 生命周期由 WebrtcManager 掌控(close() + delete),这里只记账不自杀。
-    //
-    // 永远返回 kOtherRefsRemained 是有意的:它等于告诉 WebRTC
-    // "对象还有人管,你别动"。若返回 kDroppedLastRef,WebRTC 会认为本对象
-    // 该自己 delete 自己 —— 而真正的释放权在管理器手上,两边都删就是重复释放。
-    // 这个引用计数只用来记录"回调期间有谁在引用我",不承担析构职责。
+    // 生命周期由 WebrtcManager 管理,Release返回 kOtherRefsRemained
     void AddRef() const override {
         ++m_refCount;
     }
@@ -86,7 +75,6 @@ signals:
     void closed(const QString &peerId);
     void errorOccurred(const QString &peerId, const QString &message);
 
-    // 实现细节:下面的观察者回调是 WebRTC 调用的,不该出现在公开接口里。
 private:
     // ---- PeerConnectionObserver ----
     void OnSignalingChange(webrtc::PeerConnectionInterface::SignalingState) override;
@@ -128,8 +116,15 @@ private:
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> m_factory;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> m_connection;
     webrtc::scoped_refptr<webrtc::AudioTrackInterface> m_localAudioTrack;
+    webrtc::scoped_refptr<webrtc::VideoTrackInterface> m_localVideoTrack;
 
-    // 每个对端各一份,这就是多对端串扰的解药
+    // 对端的视频轨
+    webrtc::scoped_refptr<webrtc::VideoTrackInterface> m_remoteVideoTrack;
+
+    // 远端画面往哪送。由 WebrtcManager 注入,生命周期比本对象长。
+    webrtc::VideoSinkInterface<webrtc::VideoFrame> *m_remoteVideoSink = nullptr;
+
+    // 等待执行的操作
     PendingOperation m_pendingOperation = PendingOperation::None;
 
     // 已设好远端描述?

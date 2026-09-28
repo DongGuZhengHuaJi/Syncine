@@ -287,7 +287,7 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
         return;
     }
 
-    if (type == "chat" || type == "playback") {
+    if (type == "chat" || type == "playback" || type == "playback_position") {
         auto roomIt = m_sessionRooms.find(session);
         if (roomIt == m_sessionRooms.end()) {
             replyError(session, "not_in_room", "你不在房间里");
@@ -306,6 +306,11 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
             relay["type"] = "chat";
             relay["from"] = nickname;
             relay["text"] = message.value("text", "");
+            room->broadcast(relay, session);
+        } else if (type == "playback_position") {
+            // 房主周期性的位置广播:透传 + 盖发送者,不更新房间状态
+            json relay = message;
+            relay["from"] = nickname;
             room->broadcast(relay, session);
         } else {
             const std::string action = message.value("action", "");

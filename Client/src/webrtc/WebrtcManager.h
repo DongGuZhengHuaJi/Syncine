@@ -37,6 +37,11 @@
 #include "rtc_base/thread.h"
 
 #include "PeerLink.h"
+#include "RemoteVideoRenderer.h"
+#include "VideoTrackSource.h"
+
+class QVideoFrame;
+class QVideoSink;
 
 class WebrtcManager : public QObject {
     Q_OBJECT
@@ -83,6 +88,31 @@ public:
         return static_cast<int>(m_peers.size());
     }
 
+    // ---- 视频 ----
+    //
+    // 视频源(帧的入口)。链路验证阶段由测试代码直接喂合成帧,
+    // 接上真实播放器以后再从 Qt 那边喂。
+    VideoTrackSource *videoSource() const {
+        return m_videoSource.get();
+    }
+
+    // 把一帧送进 WebRTC。没人订阅时是空操作。
+    void pushVideoFrame(const webrtc::VideoFrame &frame);
+
+    // 真实入口:喂一帧 Qt 解码出来的画面。
+    // 由 PlaybackController 的 videoFrameAvailable 信号驱动(main.cpp 里接线)。
+    void pushQtVideoFrame(const QVideoFrame &frame);
+
+    // 远端画面往哪里送。由 main.cpp 装配时设置。
+    // 不设的话,收到的远端视频会被丢弃(PeerLink 里会打日志说明)。
+    void setRemoteVideoSink(QVideoSink *sink);
+
+    // 渲染器是否往 sink 写帧。
+    //
+    // 只在"显示远端"时开启:显示本地时渲染器收到的都是回声帧,
+    // 不该渲染,否则会盖掉本地画面、并维持回声环(见 PlaybackController::applyVideoSink)。
+    void setRemoteVideoEnabled(bool enabled);
+
     // 开关麦克风。
     void setAudioEnabled(bool enabled);
 
@@ -100,15 +130,6 @@ signals:
     // 麦克风实际可用状态发生变化。QML 用它驱动按钮的显示。
     void audioEnabledChanged(bool enabled);
 
-    // 这里**没有** offerCreated / iceCandidateCreated 之类的信号。
-    //
-    // 那些是 PeerLink 的信号,由 SignalingChannel 在拿到 PeerLink 后直接连。
-    // 之前这里做过一层同名转发,但那既没加工参数、也没改语义,只是让
-    // "消息从哪来"多绕了一站。去掉之后信号流是一条直路:
-    //
-    //     PeerLink --(信号)--> SignalingChannel --(网络)--> 对端
-    //
-    // 本类只负责建、拆、查对端,以及持有线程和工厂。
 
 private:
     bool initializeThreads();
@@ -118,6 +139,9 @@ private:
     // 放在私有:调用方只该通过 setAudioEnabled 开关麦克风,
     // 不该关心音轨对象本身的生命周期。
     webrtc::scoped_refptr<webrtc::AudioTrackInterface> getOrCreateAudioTrack();
+
+    // 同上,视频侧。必须在任何一次协商之前调用过,
+    webrtc::scoped_refptr<webrtc::VideoTrackInterface> getOrCreateVideoTrack();
 
     std::unique_ptr<webrtc::Thread> m_networkThread;
     std::unique_ptr<webrtc::Thread> m_workerThread;
@@ -138,6 +162,17 @@ private:
     // 音轨是"把音频源接到某个 PeerConnection 上"的插头。
     // 这里只保存一份原型,每个对端拿它去 AddTrack,WebRTC 内部会各建一条流。
     webrtc::scoped_refptr<webrtc::AudioTrackInterface> m_localAudioTrack;
+
+    // 视频源。所有对端共用同一个帧来源,各自有一条独立的 RTP 流。
+    webrtc::scoped_refptr<VideoTrackSource> m_videoSource;
+
+    // 视频轨原型。和音轨一样,每个对端拿它去 AddTrack。
+    webrtc::scoped_refptr<webrtc::VideoTrackInterface> m_localVideoTrack;
+
+    // 接收侧:WebRTC 帧 → QVideoFrame → QVideoSink。
+    // 所有对端共用一个 —— 房间里同时只显示一路视频。
+    std::unique_ptr<RemoteVideoRenderer> m_remoteRenderer;
+
     bool m_initialized = false;
 };
 

@@ -10,7 +10,7 @@ RowLayout {
     spacing: 10
 
     Label {
-        text: formatTime(playbackController.position)
+        text: formatTime(playbackSync.position)
         Layout.preferredWidth: 42
         horizontalAlignment: Text.AlignRight
         color: "#FFFFFF"
@@ -22,7 +22,7 @@ RowLayout {
 
         Layout.fillWidth: true
 
-        enabled: playbackController.seekable
+        enabled: playbackSync.seekable
 
         from: 0
         to: 1
@@ -31,16 +31,15 @@ RowLayout {
         Binding {
             target: mediaSlider
             property: "value"
-            value: playbackController.duration > 0
-                ? playbackController.position / playbackController.duration
+            value: playbackSync.duration > 0
+                ? playbackSync.position / playbackSync.duration
                 : 0
             when: !mediaSlider.pressed
         }
 
         onPressedChanged: {
             if (!mediaSlider.pressed) {
-                // seek() 内部会发 userSeeked,广播由 PlaybackSync 负责
-                playbackController.seek(mediaSlider.value * playbackController.duration)
+                playbackSync.seek(mediaSlider.value * playbackSync.duration)
             }
             root.interacted()
         }
@@ -77,7 +76,7 @@ RowLayout {
     }
 
     Label {
-        text: formatTime(playbackController.duration)
+        text: formatTime(playbackSync.duration)
         Layout.preferredWidth: 42
         color: "#FFFFFF"
         font.pixelSize: 12

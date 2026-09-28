@@ -183,6 +183,13 @@ void RoomSession::sendPlayback(PlaybackAction action, qint64 position) {
     send(Protocol::encodePlayback(actionToWire(action), position));
 }
 
+void RoomSession::sendPlaybackPosition(qint64 position, bool playing) {
+    if (!m_inRoom)
+        return;
+
+    send(Protocol::encodePlaybackPosition(position, playing));
+}
+
 void RoomSession::reportVideoStatus(bool loaded, const QString &hash, qint64 duration) {
     if (!m_inRoom)
         return;
@@ -220,6 +227,10 @@ void RoomSession::onMessage(const QString &text) {
 
     case Protocol::MessageType::Playback:
         handlePlayback(*message);
+        break;
+
+    case Protocol::MessageType::PlaybackPosition:
+        emit playbackPositionReceived(message->position, message->playing);
         break;
 
     case Protocol::MessageType::RoomModeChanged: {

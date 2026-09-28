@@ -53,7 +53,7 @@ Rectangle {
             }
 
             onClicked: {
-                playbackController.seekRelative(-10000)
+                playbackSync.seekRelative(-10000)
                 root.interacted()
             }
         }
@@ -72,7 +72,7 @@ Rectangle {
                     var ctx = getContext("2d")
                     ctx.fillStyle = "#FFFFFF"
                     ctx.clearRect(0, 0, width, height)
-                    if (playbackController.playing) {
+                    if (playbackSync.playing) {
                         ctx.fillRect(15, 12, 6, 20)
                         ctx.fillRect(23, 12, 6, 20)
                     } else {
@@ -86,7 +86,7 @@ Rectangle {
                 }
 
                 Connections {
-                    target: playbackController
+                    target: playbackSync
                     function onPlayingChanged() {
                         playPauseBtnCanvas.requestPaint()
                     }
@@ -99,7 +99,7 @@ Rectangle {
             }
 
             onClicked: {
-                playbackController.togglePlayPause()
+                playbackSync.togglePlayPause()
                 root.interacted()
             }
         }
@@ -125,7 +125,7 @@ Rectangle {
             }
 
             onClicked: {
-                playbackController.seekRelative(10000)
+                playbackSync.seekRelative(10000)
                 root.interacted()
             }
         }

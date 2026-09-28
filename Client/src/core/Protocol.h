@@ -26,6 +26,7 @@ enum class MessageType {
     MemberLeft,
     Chat,
     Playback,
+    PlaybackPosition,   // 房主周期性广播的播放位置(观众据此画进度条)
     RoomModeChanged,
     VideoStatus,
     VideoMismatch,
@@ -104,6 +105,8 @@ QString encodeSetRoomMode(const QString &mode);
 QString encodeChat(const QString &text);
 
 QString encodePlayback(const QString &action, qint64 position);
+
+QString encodePlaybackPosition(qint64 position, bool playing);
 
 QString encodeVideoStatus(bool loaded, const QString &hash, qint64 duration);
 

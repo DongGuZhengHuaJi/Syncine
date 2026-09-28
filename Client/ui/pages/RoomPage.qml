@@ -316,7 +316,7 @@ Item {
                         return ""
                     }
                     if (roomSession.roomMode === RoomSession.Share)
-                        return "共享模式 · 开发中"
+                        return ""
                     if (roomSession.roomMode === RoomSession.Url)
                         return "网链模式 · 开发中"
                     return ""

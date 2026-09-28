@@ -8,6 +8,12 @@
 #include <QUrl>
 #include <QMediaPlayer>
 #include <QAudioOutput>
+#include <QVideoSink>
+#include <QVideoFrame>
+
+// 只为了转发"远端渲染器该往哪个 sink 写"这一条信息。
+// 本类不知道 WebRTC 的任何细节 —— 那是 WebrtcManager 的事。
+#include "webrtc/WebrtcManager.h"
 #include <QDebug>
 
 PlaybackController::PlaybackController(QObject *parent)
@@ -120,7 +126,7 @@ void PlaybackController::setVolume(double volume)
     if (qFuzzyCompare(static_cast<double>(m_audioOutput->volume()), volume))
         return;
 
-    m_audioOutput->setVolume(volume);
+    m_audioOutput->setVolume(static_cast<float>(volume));
 
     emit volumeChanged();
 }
@@ -177,6 +183,110 @@ QMediaPlayer *PlaybackController::player() const
 {
     return m_player;
 }
+
+void PlaybackController::onVideoFrame(const QVideoFrame &frame) {
+    if (!frame.isValid())
+        return;
+
+
+    // 本回调接在 m_outputSink 上,共享模式下远端渲染器也会往这里送帧
+    // 只有显示本地时才往外转发,否则会产生回声
+    if (m_showingRemote)
+        return;
+
+    // 诊断:前 10 帧 + 每 300 帧打印一次
+    static int count = 0;
+    if (count < 10 || count % 300 == 0) {
+        qDebug() << "[诊断] onVideoFrame 第" << (count + 1) << "帧"
+                 << frame.width() << "x" << frame.height();
+    }
+    ++count;
+
+    // 向外转发，WebrtcManager捕获
+    emit videoFrameAvailable(frame);
+}
+
+QVideoSink *PlaybackController::displayVideoSink() const {
+    return m_outputSink;
+}
+
+bool PlaybackController::showingRemote() const {
+    return m_showingRemote;
+}
+
+void PlaybackController::bindVideoOutput(QVideoSink *sink) {
+    if (sink == nullptr)
+        return;
+
+    if (m_outputSink == sink)
+        return;                         // 已经绑过了
+
+    m_outputSink = sink;
+
+    // 本地解码帧到达时往外发一份 —— 推流侧订阅这个信号。
+    connect(m_outputSink, &QVideoSink::videoFrameChanged,
+            this, &PlaybackController::onVideoFrame);
+
+    // 向sink送帧的对象可能是播放器也可能是远端渲染器,取决于显示本地还是远端。
+    applyVideoSink();
+
+    // 将sink交给 WebrtcManager,让远端渲染器往这里送帧。
+    if (m_webrtcManager != nullptr)
+        m_webrtcManager->setRemoteVideoSink(m_outputSink);
+
+    qDebug() << "视频输出端已绑定:" << sink;
+    emit displayVideoSinkChanged();
+}
+
+void PlaybackController::setRemoteRenderer(WebrtcManager *manager) {
+    m_webrtcManager = manager;
+
+    // 如果 sink 已经交过来了(顺序反过来),立刻接上
+    if (m_webrtcManager != nullptr && m_outputSink != nullptr)
+        m_webrtcManager->setRemoteVideoSink(m_outputSink);
+}
+
+void PlaybackController::setShowingRemote(bool showing) {
+    if (m_showingRemote == showing)
+        return;
+
+    m_showingRemote = showing;
+
+
+    // 显示本地 → 播放器往 sink 送(远端渲染器停手)
+    // 显示远端 → 远端渲染器往 sink 送(播放器停手)
+    applyVideoSink();
+
+    emit showingRemoteChanged();
+}
+
+void PlaybackController::applyVideoSink() {
+    // bindVideoOutput 还没交过来 sink
+    if (m_outputSink == nullptr)
+        return;
+
+    if (m_showingRemote) {
+        // 远端画面由 WebrtcManager 的渲染器直接推进 m_outputSink。
+        m_player->setVideoSink(nullptr);
+
+        // 渲染器开始往 sink 写帧
+        if (m_webrtcManager != nullptr)
+            m_webrtcManager->setRemoteVideoEnabled(true);
+
+        qDebug() << "[诊断] applyVideoSink: 显示远端,播放器已脱钩";
+    } else {
+        // 显示本地画面,播放器往 sink 送帧
+        m_player->setVideoSink(m_outputSink);
+
+        // 停止远端渲染器
+        if (m_webrtcManager != nullptr)
+            m_webrtcManager->setRemoteVideoEnabled(false);
+
+        qDebug() << "[诊断] applyVideoSink: 显示本地,播放器 →" << m_outputSink
+                 << " 实际生效:" << m_player->videoSink();
+    }
+}
+
 
 
 // ============================

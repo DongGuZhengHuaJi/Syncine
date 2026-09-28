@@ -8,6 +8,8 @@
 
 #include "WebrtcManager.h"
 
+
+
 // ============================
 // 构造 / 销毁
 // ============================
@@ -35,14 +37,10 @@ PeerLink::PeerLink(const QString &peerId,
     }
     m_connection = result.value();
 
-    // 建一条数据通道。它的作用不是传业务数据,而是**让"连接是否真的通了"
-    // 变得可观测** —— 在加音视频轨之前,这是唯一能验证 ICE 打洞成功、
-    // DTLS 握手完成的手段。没有它,连接失败和连接成功在界面上长得一样。
+    // 建一条数据通道，暂时没有数据传输，只是验证链路联通性
     if (createDataChannel) {
         webrtc::DataChannelInit init;
         init.ordered = true;
-        // 用 CreateDataChannelOrError:旧的 CreateDataChannel 已废弃。
-        // 必须先于 CreateOffer 调用 —— 这是让 SDP 里出现 data "m=" 段的唯一途径。
         auto channel = m_connection->CreateDataChannelOrError("syncine-probe", &init);
         if (!channel.ok()) {
             std::cerr << "[PeerLink " << m_peerId.toStdString()
@@ -59,7 +57,7 @@ void PeerLink::close() {
     m_pendingOperation = PendingOperation::None;
 
     if (m_connection != nullptr) {
-        // 先断回调,再放引用 —— 顺序反了的话,析构过程中还会有回调进来
+        // 先断开连接再释放,防止析构过程中发生回调
         m_connection->Close();
         m_connection = nullptr;
     }
@@ -179,24 +177,13 @@ void PeerLink::addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterf
         return;
 
     // 已经挂过同一根音轨就直接返回。
-    //
-    // 这个判断是必须的:一条 PeerConnection 对同一根音轨只能 AddTrack 一次,
-    // 重复调用会被 WebRTC 直接拒绝(Sender already exists for track ...)。
-    // 而 setAudioEnabled(true) 会遍历所有对端重挂一遍 ——
-    // 那些早就挂过的对端就会撞上这个限制。
-    //
-    // 按 track id 比对而不是按指针:指针可能因包装对象不同而变,
-    // 但 track id 是 WebRTC 内部用来认这根轨的唯一标识。
     if (m_localAudioTrack != nullptr
         && m_localAudioTrack->id() == track->id()) {
         return;
     }
 
-    m_localAudioTrack = track;
 
-    // AddTrack 的正确时机是 CreateOffer 之前 —— 它决定 SDP 里有没有
-    // m=audio 段。WebRTC 会把新加的轨纳入下一次协商,而我们的协商
-    // 还没开始(syncPeers 里 ensurePeer 之后才 createOffer),正好。
+    // 在createOffer之前挂音轨,SDP中会包含相应的m=audio段
     auto sender = m_connection->AddTrack(track, {"syncine-audio"});
     if (!sender.ok()) {
         std::cerr << "[PeerLink " << m_peerId.toStdString()
@@ -204,16 +191,39 @@ void PeerLink::addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterf
         return;
     }
 
+    m_localAudioTrack = track;
+
     std::cout << "[PeerLink " << m_peerId.toStdString() << "] 已挂载本地音轨" << std::endl;
+}
+
+void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterface> track) {
+    if (m_connection == nullptr || track == nullptr)
+        return;
+
+    // 已经挂过同一根视频轨就直接返回。
+    if (m_localVideoTrack != nullptr
+        && m_localVideoTrack->id() == track->id()) {
+        return;
+    }
+
+
+    // 在createOffer之前挂视频轨,SDP中会包含相应的m=video段
+    auto sender = m_connection->AddTrack(track, {"syncine-video"});
+    if (!sender.ok()) {
+        std::cerr << "[PeerLink " << m_peerId.toStdString()
+                  << "] 添加视频轨失败: " << sender.error().message() << std::endl;
+        return;
+    }
+
+    m_localVideoTrack = track;
+
+    std::cout << "[PeerLink " << m_peerId.toStdString() << "] 已挂载本地视频轨" << std::endl;
 }
 
 void PeerLink::setAudioMuted(bool muted) {
     if (m_localAudioTrack == nullptr)
         return;
 
-    // set_enabled(false) 不是"停止发送",而是"发送静音帧"。
-    // 这样 SSRC、编解码器、时序全部保持不变,对端感觉不到任何变化,
-    // 我们也就不需要重新协商。这是 WebRTC 里闭麦的标准做法。
     m_localAudioTrack->set_enabled(!muted);
 }
 
@@ -234,8 +244,7 @@ void PeerLink::OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface>
     if (channel == nullptr)
         return;
 
-    // 对端建的数据通道能到达这里,本身就说明 DTLS 握手已经完成、
-    // 连接确实打通了 —— 这是我们现阶段最需要的信号。
+    // 数据通道打通后输出
     std::cout << "[PeerLink " << m_peerId.toStdString() << "] 收到数据通道: "
               << channel->label() << std::endl;
     emit connected(m_peerId);
@@ -289,8 +298,38 @@ void PeerLink::OnTrack(webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> tr
     if (receiver == nullptr)
         return;
 
+    auto track = receiver->track();
+    if (track == nullptr)
+        return;
+
     std::cout << "[PeerLink " << m_peerId.toStdString()
-              << "] 收到远端媒体轨: " << receiver->track()->kind() << std::endl;
+              << "] 收到远端媒体轨: " << track->kind() << std::endl;
+
+    // 只处理视频轨，音频轨交给webrtc处理
+    if (track->kind() != webrtc::MediaStreamTrackInterface::kVideoKind)
+        return;
+
+    auto videoTrack = webrtc::scoped_refptr<webrtc::VideoTrackInterface>(
+        static_cast<webrtc::VideoTrackInterface *>(track.get()));
+
+    // 保留引用避免被释放
+    m_remoteVideoTrack = videoTrack;
+
+    // 检查是否有视频渲染器
+    if (m_remoteVideoSink == nullptr) {
+        std::cout << "[PeerLink " << m_peerId.toStdString()
+                  << "] 收到视频轨,但没有渲染器可接(推流接收未启用)" << std::endl;
+        return;
+    }
+
+    // 将远端视频轨接到渲染器上
+    m_remoteVideoTrack->AddOrUpdateSink(m_remoteVideoSink, webrtc::VideoSinkWants{});
+    std::cout << "[PeerLink " << m_peerId.toStdString()
+              << "] 远端视频已接到渲染器" << std::endl;
+}
+
+void PeerLink::setRemoteVideoSink(webrtc::VideoSinkInterface<webrtc::VideoFrame> *sink) {
+    m_remoteVideoSink = sink;
 }
 
 void PeerLink::OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectionState state) {

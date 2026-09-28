@@ -6,7 +6,11 @@
 
 #include <iostream>
 
+#include <QDebug>
+#include <QVideoFrame>
+
 #include "api/audio_options.h"
+#include "api/make_ref_counted.h"
 #include "rtc_base/checks.h"
 
 // ----------------------------------------------------------------------
@@ -52,22 +56,18 @@ bool WebrtcManager::initialize(const std::vector<std::string> &stunServers) {
     m_stunServers = stunServers;
     m_initialized = true;
 
-    // 立刻把音轨准备好(保持禁用,不碰麦克风)。
-    //
-    // 为什么必须在这里,而不能等用户点"开启语音":
-    //
-    //   SDP 里的 m=audio 段只在**协商那一刻**决定。如果音轨是在
-    //   协商完成之后才 AddTrack 的,WebRTC 会要求重新协商
-    //   (renegotiation)才能把音频写进 SDP —— 而我们没有实现重协商,
-    //   于是对端从头到尾都不知道要收音频,表现就是"点了没声音"。
-    //
-    //   音轨先建好并保持禁用,协商就能一次到位;之后开麦关麦只改
-    //   track->set_enabled(),完全不碰 SDP,对端毫无感知。
+    // 预创建音轨
     if (getOrCreateAudioTrack() == nullptr) {
-        // 麦克风不可用(设备被占用、没有声卡)不该拖垮整个 WebRTC ——
-        // 连接本身还有数据通道,后面还要承载视频。
         std::cerr << "[WebrtcManager] 音轨预创建失败,本次运行将没有语音功能" << std::endl;
     }
+
+    // 预创建视频轨
+    if (getOrCreateVideoTrack() == nullptr) {
+        std::cerr << "[WebrtcManager] 视频轨预创建失败,本次运行将没有画面共享" << std::endl;
+    }
+
+    // 创建共享模式下的接收端渲染器
+    m_remoteRenderer = std::make_unique<RemoteVideoRenderer>();
 
     return true;
 }
@@ -77,8 +77,6 @@ bool WebrtcManager::initialize(const std::vector<std::string> &stunServers) {
 // ============================
 
 bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataChannel) {
-    // 这两条是管理器自身的内部校验,不是连接级错误 —— 所以走日志而不是信号。
-    // 连接级错误(ICE 失败、协商失败)由 PeerLink 发出,那条路是给上层看的。
     if (!m_initialized) {
         std::cerr << "[WebrtcManager] 尚未初始化,无法建立对端连接" << std::endl;
         return false;
@@ -93,6 +91,7 @@ bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataC
     if (m_peers.contains(peerId))
         return true;
 
+    // PeerConnection 配置。STUN 服务器列表由上层传入,TURN 服务器暂不支持。
     webrtc::PeerConnectionInterface::RTCConfiguration config;
     for (const auto &stunServer : m_stunServers) {
         webrtc::PeerConnectionInterface::IceServer iceServer;
@@ -100,6 +99,7 @@ bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataC
         config.servers.push_back(iceServer);
     }
 
+    // 创建新的 PeerLink 实例
     auto *link = new PeerLink(peerId, m_peerConnectionFactory, config,
                               createDataChannel, this);
     if (!link->isValid()) {
@@ -107,9 +107,17 @@ bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataC
         return false;
     }
 
-    // AddTrack后再createOffer
+    // createOffer前挂载本地音视频轨，否则 SDP 里不会有 m=audio/m=video 段,对端就收不到音视频。
     if (m_localAudioTrack != nullptr)
         link->addLocalAudioTrack(m_localAudioTrack);
+
+    if (m_localVideoTrack != nullptr)
+        link->addLocalVideoTrack(m_localVideoTrack);
+
+    // 设置共享模式下接收端解码后使用的sink
+    if (m_remoteRenderer != nullptr)
+        link->setRemoteVideoSink(m_remoteRenderer.get());
+
 
     m_peers.insert(peerId, link);
     std::cout << "[WebrtcManager] 已建立对端连接: " << peerId.toStdString()
@@ -122,9 +130,7 @@ void WebrtcManager::removePeer(const QString &peerId) {
     if (link == nullptr)
         return;
 
-    // 先关连接,再 delete。
-    // 顺序反了的话,delete 期间 WebRTC 信令线程上可能还有回调在跑,
-    // 虚表里指向的就是一块已释放的内存。
+    // 先关闭连接再delete，防止析构过程中发生回调
     link->close();
     link->deleteLater();
 
@@ -169,11 +175,7 @@ webrtc::scoped_refptr<webrtc::AudioTrackInterface> WebrtcManager::getOrCreateAud
         return nullptr;
     }
 
-    // 音频源描述"从哪取音"。全进程一个 —— 所有对端共用同一个麦克风。
-    //
-    // AudioOptions 这里设定的不是"建议",而是**全局生效**的音频处理配置
-    // (见 api/peer_connection_interface.h 中 CreateAudioSource 的注释):
-    // 它会下发到媒体引擎,决定整条链路开不开 AEC/AGC/NS。
+    // 创建音频源，所有track共享同一个源
     if (m_audioSource == nullptr) {
         webrtc::AudioOptions options;
         // 扬声器外放 + 麦克风同时工作的场景下,不消回声就是啸叫
@@ -222,14 +224,93 @@ void WebrtcManager::setAudioEnabled(bool enabled) {
     emit audioEnabledChanged(enabled);
 }
 
+void WebrtcManager::pushVideoFrame(const webrtc::VideoFrame &frame) {
+    if (m_videoSource == nullptr)
+        return;
+
+    m_videoSource->pushFrame(frame);
+}
+
+void WebrtcManager::pushQtVideoFrame(const QVideoFrame &frame) {
+    static int n = 0;
+    if (n < 10 || n%300 == 0) {
+        qDebug() << "[诊断] pushQtVideoFrame 第" << (n + 1) << "帧,"
+                 << "videoSource =" << (void *)m_videoSource.get();
+    }
+    ++n;
+
+    if (m_videoSource == nullptr)
+        return;
+
+    m_videoSource->pushQtFrame(frame);
+}
+
+void WebrtcManager::setRemoteVideoSink(QVideoSink *sink) {
+    if (m_remoteRenderer == nullptr)
+        return;
+
+    // 将播放器的sink传给渲染器,渲染器解码后通过这个sink把帧送给播放器显示
+    m_remoteRenderer->setTargetSink(sink);
+}
+
+void WebrtcManager::setRemoteVideoEnabled(bool enabled) {
+    if (m_remoteRenderer == nullptr)
+        return;
+
+    // 只有作为接收端时才往sink写帧,发送端不写避免回声覆盖本地画面
+    m_remoteRenderer->setWritingEnabled(enabled);
+}
+
+webrtc::scoped_refptr<webrtc::VideoTrackInterface> WebrtcManager::getOrCreateVideoTrack() {
+    if (m_localVideoTrack != nullptr)
+        return m_localVideoTrack;
+
+    if (m_peerConnectionFactory == nullptr || !m_initialized) {
+        std::cerr << "[WebrtcManager] 尚未初始化,无法创建视频轨" << std::endl;
+        return nullptr;
+    }
+
+    // 创建视频源，所有track共享同一个源
+    m_videoSource = webrtc::scoped_refptr<VideoTrackSource>(new VideoTrackSource());
+
+    // 视频轨是"把视频源接到 PeerConnection 上"的插头
+    // 这里建的是原型,每个对端拿它去 AddTrack 时 WebRTC 会各建一条独立的流。
+    m_localVideoTrack = m_peerConnectionFactory->CreateVideoTrack(m_videoSource,
+                                                                  "syncine-video");
+    if (m_localVideoTrack == nullptr) {
+        std::cerr << "[WebrtcManager] 创建视频轨失败" << std::endl;
+        return nullptr;
+    }
+
+    std::cout << "[WebrtcManager] 视频轨已创建" << std::endl;
+    return m_localVideoTrack;
+}
+
 void WebrtcManager::destroy() {
-    // 必须在停线程之前:关连接的过程中还可能触发回调,需要线程还活着
+    // 释放顺序是有依赖的,不能随意调整: 对端 → 音轨 → 音频源 → 工厂 → 线程
+    // 理由:
+    //   - 对端要在最前:关连接时 WebRTC 还可能在回调,线程必须还活着
+    //   - 音轨/音频源要在工厂之前:它们内部持有工厂引用,
+    //     工厂先没了它们就指向一块已释放的内存
+    //   - 音轨要在音频源之前:音轨引用音频源,反过来则会留下悬空引用
+    //   - 工厂要在线程之前:工厂内部引用这三根线程,
+    //     先停线程会让工厂里的引用失效
+
+    // 1. 对端连接 —— 必须在停线程之前
     closeAllPeers();
 
-    if (m_peerConnectionFactory != nullptr)
-        m_peerConnectionFactory = nullptr;
+    // 2. 轨 → 源 → 工厂(顺序同上:引用方先释放)
+    m_localVideoTrack = nullptr;
+    m_localAudioTrack = nullptr;
+    m_videoSource = nullptr;
+    m_audioSource = nullptr;
 
-    // 工厂释放后再停线程(工厂内部引用这些线程),否则析构运行中的线程会崩溃
+    // 接收侧渲染器也要在工厂之前放掉:它内部的转换会用到 WebRTC 的类型
+    m_remoteRenderer.reset();
+
+    m_peerConnectionFactory = nullptr;
+
+    // 3. 线程 —— 必须在工厂之后
     if (m_networkThread != nullptr) {
         m_networkThread->Stop();
         m_networkThread.reset();
@@ -243,10 +324,6 @@ void WebrtcManager::destroy() {
         m_signalingThread.reset();
     }
 
-    // 音轨和音频源都要在工厂之前释放 —— 它们内部引用工厂，
-    // 工厂先没了会留下悬空引用。
-    m_localAudioTrack = nullptr;
-    m_audioSource = nullptr;
     m_initialized = false;
 }
 

@@ -4,6 +4,7 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QUrl>
+#include <QVideoFrame>
 
 #include "core/NetworkManager.h"
 #include "playback/PlaybackController.h"
@@ -38,6 +39,26 @@ int main(int argc, char *argv[]) {
     // 这里只初始化线程和工厂 —— 对端连接**不在这里建**。
     // 每条连接对应一个对端,由 SignalingChannel 在进房后按成员表创建。
     webrtcManager.initialize({});
+
+    // ---- 视频的两条接线 ----
+    //
+    // 两边接口故意互不认识:PlaybackController 只管发"解出一帧了",
+    // WebrtcManager 只管收帧并送出/渲染。胶水贴在这唯一一个装配点上。
+
+    // 发送:本地解码帧 → WebRTC(会做 Qt 格式 → I420 的转换)
+    QObject::connect(&playbackController, &PlaybackController::videoFrameAvailable,
+                     &app, [&webrtcManager](const QVideoFrame &f) {
+                         webrtcManager.pushQtVideoFrame(f);
+                     });
+
+    // 接收:把渲染器的落点交给 PlaybackController 保管。
+    //
+    // **不能**在这里直接 setRemoteVideoSink(playbackController.displayVideoSink()) ——
+    // 此刻 engine 还没 load,QML 的 VideoOutput 还不存在,拿到的必然是 null,
+    // 结果是渲染器永远对着空指针推帧(静默丢弃)。
+    //
+    // 改由 PlaybackController 在 QML 交出 sink 后再转给渲染器(见 bindVideoOutput)。
+    playbackController.setRemoteRenderer(&webrtcManager);
 
     QObject::connect(&signalingChannel, &SignalingChannel::errorOccurred, &app,
                      [](const QString &message) {

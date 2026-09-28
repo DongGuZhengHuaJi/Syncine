@@ -115,6 +115,10 @@ public:
     void sendPlayback(PlaybackAction action, qint64 position);
     void reportVideoStatus(bool loaded, const QString &hash, qint64 duration);
 
+    // 房主周期性广播自己的播放位置 —— 观众端据此画进度条。
+    // 只有房主/推流方调用,且只在共享/网链模式下有意义。
+    void sendPlaybackPosition(qint64 position, bool playing);
+
 signals:
     void roomIdChanged();
     void roomNameChanged();
@@ -135,6 +139,9 @@ signals:
 
     void chatReceived(const QString &from, const QString &text);
     void playbackCommandReceived(RoomSession::PlaybackAction action, qint64 position);
+
+    // 收到房主的位置广播(不是命令 —— 只用于更新界面,不驱动本地播放器)
+    void playbackPositionReceived(qint64 position, bool playing);
 
     void errorOccurred(const QString &message);
 

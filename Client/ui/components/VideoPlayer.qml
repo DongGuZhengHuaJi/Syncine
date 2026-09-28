@@ -12,18 +12,26 @@ Item {
     // 由 PlaybackSync 统一决定要不要广播给房间
     onSourceChanged: playbackController.load(source)
 
+    // 只有一个 VideoOutput —— 它渲染的永远是"界面该显示的那一路"。
+    //
+    // **不能**写成 videoSink: playbackController.xxx。Qt 6.4 里
+    // VideoOutput.videoSink 是只读属性,连绑定赋值都报
+    // "Invalid property assignment: videoSink is a read-only property"。
+    //
+    // 所以方向反过来:把我们的 sink 交给 C++,由 C++ 决定谁往里面送帧
+    // (本地播放器 或 远端渲染器)。
     VideoOutput {
         id: videoOutput
         anchors.fill: parent
         fillMode: VideoOutput.PreserveAspectFit
 
-        Component.onCompleted: playbackController.player.videoOutput = videoOutput
+        Component.onCompleted: playbackController.bindVideoOutput(videoOutput.videoSink)
     }
 
     MouseArea {
         anchors.fill: parent
         hoverEnabled: true
-        onClicked: playbackController.togglePlayPause()
+        onClicked: playbackSync.togglePlayPause()
         onPositionChanged: showControls()
     }
 
@@ -33,7 +41,7 @@ Item {
         height: 80
         radius: 40
         color: "#73000000"
-        opacity: playbackController.playing ? 0 : 1
+        opacity: playbackSync.playing ? 0 : 1
         visible: opacity > 0
         Behavior on opacity { NumberAnimation { duration: 150 } }
 
@@ -72,15 +80,15 @@ Item {
         id: hideTimer
         interval: 3000
         onTriggered: {
-            if (playbackController.playing)
+            if (playbackSync.playing)
                 root.controlsVisible = false
         }
     }
 
     Connections {
-        target: playbackController
+        target: playbackSync
         function onPlayingChanged() {
-            if (!playbackController.playing)
+            if (!playbackSync.playing)
                 showControls()
             else
                 hideTimer.restart()
