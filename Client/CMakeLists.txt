@@ -22,6 +22,22 @@ endif()
 # 使用 lld
 add_link_options(-fuse-ld=lld)
 
+# RTTI 必须关掉,和 libwebrtc.a 保持一致。
+#
+# libwebrtc.a 是 -fno-rtti 编的(Chromium 默认),归档里**没有任何 typeinfo 符号**。
+# 我们这边开着 RTTI 时,派生自 webrtc 接口的类会生成自己的 typeinfo,而它需要
+# 引用基类的 typeinfo —— 于是链接期报:
+#     undefined symbol: typeinfo for webrtc::AudioSourceInterface
+#
+# 为什么只有部分接口会炸:Itanium ABI 规定,若一个类有"key function"
+# (第一个非内联的虚函数,定义在 .cc 里),它的 vtable/typeinfo 只在定义该函数的
+# 那个 TU 里生成一次。AudioSourceInterface::options() 正是这种情况,所以它的
+# typeinfo 只存在于 libwebrtc 的 .o 里 —— 而那里面因为 -fno-rtti 是空的。
+# VideoTrackSourceInterface 没有 key function,每个 TU 各自生成弱符号,所以不炸。
+#
+# 关掉 RTTI 对本项目无副作用:src/ 下没有任何 dynamic_cast/typeid。
+add_compile_options(-fno-rtti)
+
 # ----------------------------------------------------------------------
 # 2. Qt 自动化工具
 # ----------------------------------------------------------------------
@@ -261,6 +277,10 @@ qt_add_executable(Syncine
         src/webrtc/VideoTrackSource.h
         src/webrtc/RemoteVideoRenderer.cpp
         src/webrtc/RemoteVideoRenderer.h
+        src/webrtc/MovieAudioSource.cpp
+        src/webrtc/MovieAudioSource.h
+        src/webrtc/MovieAudioPlayer.cpp
+        src/webrtc/MovieAudioPlayer.h
 )
 
 # ----------------------------------------------------------------------

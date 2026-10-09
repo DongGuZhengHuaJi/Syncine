@@ -6,6 +6,8 @@
 #include <QUrl>
 #include <QVideoFrame>
 
+#include "rtc_base/logging.h"
+
 #include "core/NetworkManager.h"
 #include "playback/PlaybackController.h"
 #include "playback/PlaybackSync.h"
@@ -16,6 +18,16 @@
 
 int main(int argc, char *argv[]) {
     QGuiApplication app(argc, argv);
+
+    // 诊断开关:设了 SYNCINE_WEBRTC_LOG=1 才打开 WebRTC 自己的日志。
+    //
+    // 用来查"数据进了适配器却没发出去"这一类问题 —— WebRTC 内部很多失败
+    // 是静默的(比如 SetSend 失败只在 LS_ERROR 级别留一行),平时不该刷屏,
+    // 需要时再开。
+    if (qEnvironmentVariableIsSet("SYNCINE_WEBRTC_LOG")) {
+        webrtc::LogMessage::LogToDebug(webrtc::LS_INFO);
+        webrtc::LogMessage::LogTimestamps(true);
+    }
 
     QQmlApplicationEngine engine;
 
@@ -50,6 +62,30 @@ int main(int argc, char *argv[]) {
                      &app, [&webrtcManager](const QVideoFrame &f) {
                          webrtcManager.pushQtVideoFrame(f);
                      });
+
+    // 发送:电影音频帧 → WebRTC 的第二条音轨。
+    // 比视频那条多一步:WebRTC 要的是裸 PCM,而 QAudioBuffer 是带格式描述的容器,
+    // 所以在这里把它拆成 指针 + 每声道采样数 + 采样率 + 声道数。
+    QObject::connect(&playbackController, &PlaybackController::movieAudioFrameAvailable,
+                     &app, [&webrtcManager](const QAudioBuffer &buffer) {
+                         const QAudioFormat format = buffer.format();
+                         webrtcManager.pushMovieAudioPcm(
+                             buffer.constData<int16_t>(),
+                             static_cast<size_t>(buffer.frameCount()),
+                             format.sampleRate(),
+                             static_cast<size_t>(format.channelCount()));
+                     });
+
+    // 电影音轨的开关:既要在播,又要在"共享"模式。
+    auto updateMovieAudioEnabled = [&playbackController, &roomSession, &webrtcManager] {
+        const bool sharing = roomSession.roomMode() == RoomSession::RoomMode::Share;
+        webrtcManager.setMovieAudioEnabled(sharing && playbackController.playing());
+    };
+
+    QObject::connect(&playbackController, &PlaybackController::playingChanged,
+                     &app, updateMovieAudioEnabled);
+    QObject::connect(&roomSession, &RoomSession::roomModeChanged,
+                     &app, updateMovieAudioEnabled);
 
     // 接收:把渲染器的落点交给 PlaybackController 保管。
     //

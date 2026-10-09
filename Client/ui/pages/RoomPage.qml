@@ -332,6 +332,150 @@ Item {
             height: parent.height
             spacing: 20
 
+            // 声音控制:两条音量各自独立。
+            //
+            // 这两条调的是**你听到的**音量(对端传过来的两路音频),
+            // 和顶栏那个麦克风开关(控制你发不发语音)是两回事。
+            // 房主那边的电影声和聊天声走的是两条独立的 WebRTC 音轨,
+            // 所以能分开调;这也是整个功能最后落在界面上的一步。
+            Card {
+                id: audioCard
+                width: parent.width
+                height: 124
+                padding: 20
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    spacing: 6
+
+                    Label {
+                        text: "声音"
+                        font.pixelSize: 15
+                        font.bold: true
+                        color: Style.textPrimary
+                    }
+
+                    // 电影音量
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+
+                        Label {
+                            Layout.preferredWidth: 34
+                            text: "电影"
+                            font.pixelSize: 12
+                            color: Style.textSecondary
+                        }
+
+                        Slider {
+                            id: movieVolumeSlider
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 22
+                            from: 0
+                            to: 1
+                            // 读的是 SignalingChannel 的属性,状态真身在 WebrtcManager。
+                            // onMoved 里**只写对端属性**,不直接给 value 赋值 ——
+                            // 那样会打断这条绑定,滑块就再也不同步了。
+                            value: signalingChannel.movieVolume
+                            onMoved: signalingChannel.movieVolume = value
+
+                            background: Rectangle {
+                                x: movieVolumeSlider.leftPadding
+                                y: movieVolumeSlider.topPadding + movieVolumeSlider.availableHeight / 2 - height / 2
+                                implicitWidth: 100
+                                implicitHeight: 4
+                                width: movieVolumeSlider.availableWidth
+                                height: implicitHeight
+                                radius: 2
+                                color: Style.border
+
+                                Rectangle {
+                                    width: movieVolumeSlider.visualPosition * parent.width
+                                    height: parent.height
+                                    radius: 2
+                                    color: Style.accent
+                                }
+                            }
+
+                            handle: Rectangle {
+                                x: movieVolumeSlider.leftPadding + movieVolumeSlider.visualPosition * (movieVolumeSlider.availableWidth - width)
+                                y: movieVolumeSlider.topPadding + movieVolumeSlider.availableHeight / 2 - height / 2
+                                implicitWidth: 14
+                                implicitHeight: 14
+                                radius: 7
+                                color: Style.accent
+                            }
+                        }
+
+                        Label {
+                            Layout.preferredWidth: 32
+                            horizontalAlignment: Text.AlignRight
+                            text: Math.round(movieVolumeSlider.value * 100) + "%"
+                            font.pixelSize: 11
+                            color: Style.textSecondary
+                        }
+                    }
+
+                    // 聊天音量
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+
+                        Label {
+                            Layout.preferredWidth: 34
+                            text: "聊天"
+                            font.pixelSize: 12
+                            color: Style.textSecondary
+                        }
+
+                        Slider {
+                            id: chatVolumeSlider
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 22
+                            from: 0
+                            to: 1
+                            value: signalingChannel.chatVolume
+                            onMoved: signalingChannel.chatVolume = value
+
+                            background: Rectangle {
+                                x: chatVolumeSlider.leftPadding
+                                y: chatVolumeSlider.topPadding + chatVolumeSlider.availableHeight / 2 - height / 2
+                                implicitWidth: 100
+                                implicitHeight: 4
+                                width: chatVolumeSlider.availableWidth
+                                height: implicitHeight
+                                radius: 2
+                                color: Style.border
+
+                                Rectangle {
+                                    width: chatVolumeSlider.visualPosition * parent.width
+                                    height: parent.height
+                                    radius: 2
+                                    color: Style.accent
+                                }
+                            }
+
+                            handle: Rectangle {
+                                x: chatVolumeSlider.leftPadding + chatVolumeSlider.visualPosition * (chatVolumeSlider.availableWidth - width)
+                                y: chatVolumeSlider.topPadding + chatVolumeSlider.availableHeight / 2 - height / 2
+                                implicitWidth: 14
+                                implicitHeight: 14
+                                radius: 7
+                                color: Style.accent
+                            }
+                        }
+
+                        Label {
+                            Layout.preferredWidth: 32
+                            horizontalAlignment: Text.AlignRight
+                            text: Math.round(chatVolumeSlider.value * 100) + "%"
+                            font.pixelSize: 11
+                            color: Style.textSecondary
+                        }
+                    }
+                }
+            }
+
             Card {
                 id: membersCard
                 width: parent.width
@@ -449,7 +593,8 @@ Item {
 
             Card {
                 width: parent.width
-                height: parent.height - membersCard.height - 20
+                // 三张卡片之间有两道 spacing(20),所以减 40
+                height: parent.height - audioCard.height - membersCard.height - 40
                 padding: 20
 
                 ColumnLayout {

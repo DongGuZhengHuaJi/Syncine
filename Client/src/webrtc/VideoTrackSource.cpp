@@ -6,6 +6,7 @@
 
 #include <cstdio>
 
+#include <QDebug>
 #include <QVideoFrame>
 #include <QVideoFrameFormat>
 
@@ -94,6 +95,37 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
         return;
     }
 
+    // 诊断:把源帧的真实像素格式和行距打出来。
+    //
+    // 为什么值得单独打:画面"斜切/撕裂"是行距算错的典型症状,而颜色错位是
+    // 平面偏移算错的症状 —— 两者都不报错,只能靠这几个数字定位。
+    // Qt 6.5 起媒体后端由 GStreamer 换成 FFmpeg,同一个文件给出的像素格式
+    // 可能和以前不同(见 CMakePresets 里的迁移说明)。
+    static int diagCount = 0;
+    if (diagCount < 3 || diagCount % 300 == 0) {
+        qDebug() << "[诊断] 源帧: pixelFormat=" << mapped.surfaceFormat().pixelFormat()
+                 << " handleType=" << mapped.handleType()
+                 << " 平面数=" << mapped.planeCount()
+                 << " 尺寸=" << width << "x" << height
+                 << " strideY=" << mapped.bytesPerLine(0)
+                 << " strideU=" << (mapped.planeCount() > 1 ? mapped.bytesPerLine(1) : 0)
+                 << " strideV=" << (mapped.planeCount() > 2 ? mapped.bytesPerLine(2) : 0)
+                 << " fourcc=" << fourcc;
+
+        // 决定性的一组数字:UV 平面的实际偏移 vs libyuv 会去推算的偏移。
+        // 两者不等,就说明"按显示高度推算 UV 位置"必然读错 —— 这正是上面
+        // 改用 NV12ToI420(显式传指针)的原因。
+        if (mapped.planeCount() > 1 && mapped.bits(0) != nullptr && mapped.bits(1) != nullptr) {
+            const long long actualUvOffset = mapped.bits(1) - mapped.bits(0);
+            const long long assumedUvOffset =
+                static_cast<long long>(mapped.bytesPerLine(0)) * height;
+            qDebug() << "[诊断] UV 偏移: 实际=" << actualUvOffset
+                     << " libyuv会推算成=" << assumedUvOffset
+                     << (actualUvOffset == assumedUvOffset ? "(一致)" : "(!! 不一致,会读错 !!)");
+        }
+    }
+    ++diagCount;
+
     // WebRTC 要的是**紧凑**的 I420:每个平面的行距等于宽度。
     // 而 Qt 给的帧行距往往更大(内存对齐填充),所以不能直接把 Qt 的
     // 缓冲区交给 WebRTC —— 必须按行搬一遍,把填充去掉。
@@ -129,19 +161,50 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
             buffer->MutableDataU(), buffer->StrideU(),
             buffer->MutableDataV(), buffer->StrideV(),
             width, height);
+    } else if (fourcc == libyuv::FOURCC_NV12) {
+        // NV12:一个 Y 平面 + 一个 UV 交错平面。
+        //
+        // **必须显式传 UV 指针,不能用 ConvertToI420。**
+        //
+        // ConvertToI420 会自己去算 UV 平面的位置,规则是
+        //     src_uv = src_y + src_stride_y * src_height
+        // 这个公式只在"解码缓冲的行数恰好等于显示高度"时成立。
+        //
+        // 而 H.264 的宏块是 16×16,解码器按编码尺寸(width/height 向上取整到
+        // 16 的倍数)分配缓冲。一旦显示尺寸不是 16 的倍数(例如 1916×1036),
+        // 缓冲的行数就比显示高度多几行,UV 的实际位置相应前移 ——
+        // 而 libyuv 还按显示高度去算,读到的位置就落在 Y 数据里,
+        // 表现为色块错位、甚至整幅斜切。
+        //
+        // 两个实测样本正好印证:
+        //   2560×1600(宽高都是 16 的倍数,缓冲行数 == 显示高度)→ 基本能看,但有色偏
+        //   1916×1036(不是 16 的倍数,缓冲 1920×1040)→ 完全花掉
+        //
+        // NV12ToI420 直接收 UV 指针,不做任何假设,所以两种情况都对。
+        ret = libyuv::NV12ToI420(
+            srcY, srcStrideY,
+            srcU, srcStrideU,           // ← 用 Qt 给的实际 UV 指针,而不是推算出来的
+            buffer->MutableDataY(), buffer->StrideY(),
+            buffer->MutableDataU(), buffer->StrideU(),
+            buffer->MutableDataV(), buffer->StrideV(),
+            width, height);
+    } else if (fourcc == libyuv::FOURCC_NV21) {
+        // NV21 与 NV12 只差 UV 两个分量的先后顺序,同样的道理。
+        ret = libyuv::NV21ToI420(
+            srcY, srcStrideY,
+            srcU, srcStrideU,
+            buffer->MutableDataY(), buffer->StrideY(),
+            buffer->MutableDataU(), buffer->StrideU(),
+            buffer->MutableDataV(), buffer->StrideV(),
+            width, height);
     } else {
-        // 其他格式(NV12/NV21/YUY2)确实是另一种内存排布,
-        // 这时才需要 ConvertToI420 去做真正的格式转换。
-        ret = libyuv::ConvertToI420(
+        // YUY2 是单平面打包格式,没有第二个平面可传,不存在上面那个问题。
+        ret = libyuv::YUY2ToI420(
             srcY, srcStrideY,
             buffer->MutableDataY(), buffer->StrideY(),
             buffer->MutableDataU(), buffer->StrideU(),
             buffer->MutableDataV(), buffer->StrideV(),
-            0, 0,                       // 不裁剪
-            width, height,
-            width, height,
-            libyuv::kRotate0,           // 旋转交给下面 VideoFrame 的字段描述
-            fourcc);
+            width, height);
     }
 
     const int rotationAngle = mapped.rotationAngle();

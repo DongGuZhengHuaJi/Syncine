@@ -5,9 +5,49 @@
 #include "PeerLink.h"
 
 #include <iostream>
+#include <optional>
+#include <sstream>
+#include <string>
 
 #include "WebrtcManager.h"
 
+namespace {
+
+// 给一条音轨设音量。
+//
+// **必须在 WebRTC 信令线程上执行** —— track->GetSource()->SetVolume() 最终会走到
+// AudioRtpReceiver::OnSetVolume,那里有 RTC_DCHECK_RUN_ON(&signaling_thread_checker_)。
+//
+// 单独拆成自由函数是为了让投递到信令线程的 lambda 只捕获 track 本身
+// (scoped_refptr 会保住它的命),而**不捕获 this** —— 否则 PeerLink 析构后
+// 任务才轮到执行,就会踩到悬空指针。
+void setSourceVolume(const webrtc::scoped_refptr<webrtc::AudioTrackInterface> &track,
+                     double volume) {
+    if (track == nullptr)
+        return;
+
+    webrtc::AudioSourceInterface *source = track->GetSource();
+    if (source != nullptr)
+        source->SetVolume(volume);
+}
+
+// 把一条轨上挂着的所有 MediaStream id 拼起来,排障用。
+std::string describeStreams(const webrtc::scoped_refptr<webrtc::RtpReceiverInterface> &receiver) {
+    if (receiver == nullptr)
+        return "<无 receiver>";
+
+    std::string result;
+    for (const auto &stream : receiver->streams()) {
+        if (stream == nullptr)
+            continue;
+        if (!result.empty())
+            result += ",";
+        result += stream->id();
+    }
+    return result.empty() ? "<无>" : result;
+}
+
+} // namespace
 
 
 // ============================
@@ -15,12 +55,14 @@
 // ============================
 
 PeerLink::PeerLink(const QString &peerId,
+                   LinkKind kind,
                    webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory,
                    const webrtc::PeerConnectionInterface::RTCConfiguration &config,
                    bool createDataChannel,
                    QObject *parent)
     : QObject(parent),
       m_peerId(peerId),
+      m_kind(kind),
       m_factory(std::move(factory)) {
 
     if (m_factory == nullptr) {
@@ -55,6 +97,14 @@ void PeerLink::close() {
     m_pendingCandidateIndexes.clear();
     m_remoteDescriptionSet = false;
     m_pendingOperation = PendingOperation::None;
+
+    // 立刻松开外部播放器。
+    //
+    // 这个指针指向 WebrtcManager 持有的 MovieAudioPlayer。管理器的 destroy()
+    // 里是先关连接、再放播放器,而关闭到真正析构之间还有一段 deleteLater 的
+    // 窗口期 —— 只要这期间还有一帧音频摸进来,就会踩到已经释放的播放器。
+    // 这里先断开,窗口就不存在了。
+    m_remoteAudioSink = nullptr;
 
     if (m_connection != nullptr) {
         // 先断开连接再释放,防止析构过程中发生回调
@@ -176,6 +226,13 @@ void PeerLink::addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterf
     if (m_connection == nullptr || track == nullptr)
         return;
 
+    if (m_kind != LinkKind::Voice) {
+        std::cerr << "[PeerLink " << m_peerId.toStdString() << ":"
+                  << linkId().toStdString() << "] 麦克风音轨只能在 voice 连接上挂载,已忽略"
+                  << std::endl;
+        return;
+    }
+
     // 已经挂过同一根音轨就直接返回。
     if (m_localAudioTrack != nullptr
         && m_localAudioTrack->id() == track->id()) {
@@ -184,7 +241,10 @@ void PeerLink::addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterf
 
 
     // 在createOffer之前挂音轨,SDP中会包含相应的m=audio段
-    auto sender = m_connection->AddTrack(track, {"syncine-audio"});
+    //
+    // 第二个参数是 MediaStream id,它会进 SDP 的 a=msid,接收端靠它认出
+    // "这是语音那条"。取值必须和 kChatStreamId 一致。
+    auto sender = m_connection->AddTrack(track, {kChatStreamId});
     if (!sender.ok()) {
         std::cerr << "[PeerLink " << m_peerId.toStdString()
                   << "] 添加音轨失败: " << sender.error().message() << std::endl;
@@ -199,6 +259,13 @@ void PeerLink::addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterf
 void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterface> track) {
     if (m_connection == nullptr || track == nullptr)
         return;
+
+    if (m_kind != LinkKind::Media) {
+        std::cerr << "[PeerLink " << m_peerId.toStdString() << ":"
+                  << linkId().toStdString() << "] 视频轨只能在 media 连接挂载,已忽略"
+                  << std::endl;
+        return;
+    }
 
     // 已经挂过同一根视频轨就直接返回。
     if (m_localVideoTrack != nullptr
@@ -220,11 +287,83 @@ void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterf
     std::cout << "[PeerLink " << m_peerId.toStdString() << "] 已挂载本地视频轨" << std::endl;
 }
 
+void PeerLink::addLocalMovieAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track) {
+    if (m_connection == nullptr || track == nullptr)
+        return;
+
+    if (m_kind != LinkKind::Media) {
+        std::cerr << "[PeerLink " << m_peerId.toStdString() << ":"
+                  << linkId().toStdString() << "] 电影音轨只能在 media 连接挂载,已忽略"
+                  << std::endl;
+        return;
+    }
+
+    if (m_localMovieAudioTrack != nullptr
+        && m_localMovieAudioTrack->id() == track->id()) {
+        return;
+    }
+
+    // stream id 用 kMovieStreamId —— 接收端就是靠它把这条轨认成"电影"的。
+    auto sender = m_connection->AddTrack(track, {kMovieStreamId});
+    if (!sender.ok()) {
+        std::cerr << "[PeerLink " << m_peerId.toStdString()
+                  << "] 添加电影音轨失败: " << sender.error().message() << std::endl;
+        return;
+    }
+
+    m_localMovieAudioTrack = track;
+
+    std::cout << "[PeerLink " << m_peerId.toStdString() << "] 已挂载本地电影音轨" << std::endl;
+}
+
 void PeerLink::setAudioMuted(bool muted) {
     if (m_localAudioTrack == nullptr)
         return;
 
     m_localAudioTrack->set_enabled(!muted);
+}
+
+void PeerLink::setPlayoutEnabled(bool enabled) {
+    if (m_connection == nullptr)
+        return;
+
+    m_connection->SetAudioPlayout(enabled);
+}
+
+void PeerLink::setRemoteAudioSink(webrtc::AudioTrackSinkInterface *sink) {
+    m_remoteAudioSink = sink;
+}
+
+void PeerLink::setRemoteAudioVolume(double volume) {
+    webrtc::scoped_refptr<webrtc::AudioTrackInterface> track;
+
+    // 1. 记下目标音量(轨还没到也要记 —— OnTrack 到达时会套用),
+    //    同时把轨的引用抄一份出来,免得下面投递任务期间被换掉。
+    {
+        webrtc::MutexLock lock(&m_remoteAudioLock);
+        m_remoteVolume = volume;
+        track = m_remoteAudioTrack;
+    }
+
+    // 连接已经没了:音量已经记下,等下次 OnTrack 自己套用。
+    if (m_connection == nullptr || track == nullptr)
+        return;
+
+    webrtc::Thread *signalingThread = m_connection->signaling_thread();
+    if (signalingThread == nullptr)
+        return;
+
+    // 已经在信令线程上就直接设,省一轮投递。
+    // (正常不会走到这里 —— 这个接口是给 Qt 主线程的音量滑块调的)
+    if (signalingThread->IsCurrent()) {
+        setSourceVolume(track, volume);
+        return;
+    }
+
+    // 2. 投递到信令线程执行。lambda 只捕获 track 和音量值,**不捕获 this**,
+    //    这样即使 PeerLink 先析构、任务后执行,也不会踩到悬空指针。
+    signalingThread->PostTask(
+        [track, volume] { setSourceVolume(track, volume); });
 }
 
 // ============================
@@ -247,7 +386,7 @@ void PeerLink::OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface>
     // 数据通道打通后输出
     std::cout << "[PeerLink " << m_peerId.toStdString() << "] 收到数据通道: "
               << channel->label() << std::endl;
-    emit connected(m_peerId);
+    emit connected(m_peerId, linkId());
 }
 
 void PeerLink::OnRenegotiationNeeded() {
@@ -257,7 +396,7 @@ void PeerLink::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnect
     switch (state) {
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionConnected:
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionCompleted:
-        emit connected(m_peerId);
+        emit connected(m_peerId, linkId());
         break;
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionFailed:
         emitError(QStringLiteral("ICE 连接失败(双方可能不在同一网络)"));
@@ -282,6 +421,7 @@ void PeerLink::OnIceCandidate(const webrtc::IceCandidate *candidate) {
         return;
 
     emit iceCandidateCreated(m_peerId,
+                             linkId(),
                              QString::fromStdString(sdp),
                              QString::fromStdString(candidate->sdp_mid()),
                              candidate->sdp_mline_index());
@@ -302,10 +442,47 @@ void PeerLink::OnTrack(webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> tr
     if (track == nullptr)
         return;
 
-    std::cout << "[PeerLink " << m_peerId.toStdString()
-              << "] 收到远端媒体轨: " << track->kind() << std::endl;
+    // 把能用来"认出这是哪条轨"的线索都打出来,排障用。
+    // 注意 track->id() 是 WebRTC 随机生成的 UUID,认不出是谁;
+    // 不过现在也不需要认了 —— 轨是从哪条连接来的,它就是什么。
+    std::cout << "[PeerLink " << m_peerId.toStdString() << ":" << linkId().toStdString()
+              << "] 收到远端媒体轨: " << track->kind()
+              << " (mid=" << transceiver->mid().value_or("<无>")
+              << ", streams=[" << describeStreams(receiver) << "])" << std::endl;
 
-    // 只处理视频轨，音频轨交给webrtc处理
+    // ---- 音频轨 ----
+    //
+    // 每条连接只有一条音频轨,所以它的身份由 m_kind 直接决定,不用猜:
+    //   Voice → 对端的麦克风。放音交给 WebRTC 自己(真声卡),我们只管音量。
+    //   Media → 对端的电影声。假声卡放不出来,交给我们自己的 sink 播。
+    if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
+        auto audioTrack = webrtc::scoped_refptr<webrtc::AudioTrackInterface>(
+            static_cast<webrtc::AudioTrackInterface *>(track.get()));
+
+        double volume = 1.0;
+        {
+            webrtc::MutexLock lock(&m_remoteAudioLock);
+            m_remoteAudioTrack = audioTrack;
+            volume = m_remoteVolume;
+        }
+
+        if (m_remoteAudioSink != nullptr) {
+            // 自己播的那条(电影):把轨接到我们的 sink 上,由 MovieAudioPlayer
+            // 解码后的 PCM 喂给 QAudioSink。音量也在那边管。
+            audioTrack->AddSink(m_remoteAudioSink);
+            std::cout << "[PeerLink " << m_peerId.toStdString() << ":" << linkId().toStdString()
+                      << "] 远端音轨已接到本地播放器" << std::endl;
+        } else {
+            // 交给 WebRTC 放的那条(语音)。本回调就在信令线程上,
+            // 正好满足 SetVolume 的线程要求,顺手把当前音量套上。
+            setSourceVolume(audioTrack, volume);
+            std::cout << "[PeerLink " << m_peerId.toStdString() << ":" << linkId().toStdString()
+                      << "] 远端音轨交给 WebRTC 播放,音量 " << volume << std::endl;
+        }
+        return;
+    }
+
+    // 剩下的按视频处理
     if (track->kind() != webrtc::MediaStreamTrackInterface::kVideoKind)
         return;
 
@@ -335,13 +512,13 @@ void PeerLink::setRemoteVideoSink(webrtc::VideoSinkInterface<webrtc::VideoFrame>
 void PeerLink::OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectionState state) {
     switch (state) {
     case webrtc::PeerConnectionInterface::PeerConnectionState::kConnected:
-        emit connected(m_peerId);
+        emit connected(m_peerId, linkId());
         break;
     case webrtc::PeerConnectionInterface::PeerConnectionState::kFailed:
         emitError(QStringLiteral("连接失败"));
         break;
     case webrtc::PeerConnectionInterface::PeerConnectionState::kClosed:
-        emit closed(m_peerId);
+        emit closed(m_peerId, linkId());
         break;
     default:
         break;
@@ -364,6 +541,23 @@ void PeerLink::OnSuccess(webrtc::SessionDescriptionInterface *desc) {
     if (desc == nullptr || m_connection == nullptr) {
         emitError(QStringLiteral("协商返回了空描述"));
         return;
+    }
+
+    // 诊断:把本地 SDP 里和 Opus 有关的行打出来。音频声道问题排查全靠它 ——
+    // fmtp 里有没有 stereo=1,一眼就能看出这条连接的协商是不是立体声
+    // (rtpmap 里的 /2 只是能力声明,不算数 —— 见 WebrtcManager.cpp 的
+    // StereoOpusAudioEncoderFactory 注释)。
+    {
+        std::string sdp;
+        if (desc->ToString(&sdp)) {
+            std::istringstream lines(sdp);
+            std::string line;
+            while (std::getline(lines, line)) {
+                if (line.find("opus") != std::string::npos)
+                    std::cout << "[PeerLink " << m_peerId.toStdString()
+                              << " SDP] " << line << std::endl;
+            }
+        }
     }
 
     // 本地描述必须落下去,后续的 SetRemoteDescription 才有基准。
@@ -390,7 +584,7 @@ void PeerLink::OnSuccess() {
         auto description = m_connection->local_description();
         std::string sdp;
         if (description != nullptr && description->ToString(&sdp))
-            emit offerCreated(m_peerId, QString::fromStdString(sdp));
+            emit offerCreated(m_peerId, linkId(), QString::fromStdString(sdp));
         break;
     }
 
@@ -398,7 +592,7 @@ void PeerLink::OnSuccess() {
         auto description = m_connection->local_description();
         std::string sdp;
         if (description != nullptr && description->ToString(&sdp))
-            emit answerCreated(m_peerId, QString::fromStdString(sdp));
+            emit answerCreated(m_peerId, linkId(), QString::fromStdString(sdp));
         break;
     }
 
@@ -431,5 +625,5 @@ void PeerLink::createAnswer() {
 
 void PeerLink::emitError(const QString &message) {
     std::cerr << "[PeerLink " << m_peerId.toStdString() << "] " << message.toStdString() << std::endl;
-    emit errorOccurred(m_peerId, message);
+    emit errorOccurred(m_peerId, linkId(), message);
 }

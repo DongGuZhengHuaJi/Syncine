@@ -75,6 +75,12 @@ struct Message {
     qint64 position = 0;
 
     // webrtc_*
+    //
+    // link 指明这条信令属于哪条 PeerConnection。
+    // 一个对端现在有两条连接:"voice"(语音)和"media"(视频+电影)。
+    // 两者是各自独立的 SDP/ICE 协商,所以必须分开路由,否则会串。
+    // 服务端只是原样转发这个字段,不解释它。
+    QString link;
     QString sdp;
     QString sdpMid;
     int sdpMLineIndex = 0;
@@ -110,11 +116,13 @@ QString encodePlaybackPosition(qint64 position, bool playing);
 
 QString encodeVideoStatus(bool loaded, const QString &hash, qint64 duration);
 
-QString encodeWebrtcOffer(const QString &to, const QString &sdp);
+// link:"voice" / "media",见 Message::link 的说明
+QString encodeWebrtcOffer(const QString &to, const QString &link, const QString &sdp);
 
-QString encodeWebrtcAnswer(const QString &to, const QString &sdp);
+QString encodeWebrtcAnswer(const QString &to, const QString &link, const QString &sdp);
 
 QString encodeWebrtcIce(const QString &to,
+                        const QString &link,
                         const QString &sdp,
                         const QString &sdpMid,
                         int sdpMLineIndex);

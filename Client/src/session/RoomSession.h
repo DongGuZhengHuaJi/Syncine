@@ -28,6 +28,7 @@ class NetworkManager;
 class RoomSession : public QObject {
     Q_OBJECT
     QML_ELEMENT
+    QML_UNCREATABLE("由 main 创建并注入")
 
     Q_PROPERTY(QString roomId
                READ roomId

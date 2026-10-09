@@ -9,6 +9,8 @@
 #include <QUrl>
 #include <QMediaPlayer>
 #include <QAudioOutput>
+#include <QAudioBuffer>
+#include <QAudioBufferOutput>
 #include <QVideoSink>
 #include <QVideoFrame>
 
@@ -122,6 +124,21 @@ signals:
     // 解码出一帧画面了。推流侧(WebrtcManager)订阅它,把帧转成 WebRTC 格式送出去。
     void videoFrameAvailable(const QVideoFrame &frame);
 
+    // 解码出一帧电影音频了。推流侧订阅它,经 MovieAudioSource 送进 WebRTC。
+    //
+    // 三个要点:
+    //  1. 这是**增益之前**的数据(Qt 直接重采样解码帧,音量是在音频输出上施加的),
+    //     所以推送端调自己的音量不会影响观众听到的大小 —— 这正是我们要的。
+    //  2. 采样格式固定为 48000Hz / 双声道 / Int16,由 m_audioBufferOutput 构造时
+    //     指定,Qt 负责重采样。选 48k 是因为它是 WebRTC Opus 的原生采样率。
+    //     立体声能否真正传到观众端,取决于 media 工厂的编解码器工厂有没有给
+    //     Opus 协商格式加 stereo=1(见 WebrtcManager.cpp 的两个包装工厂,
+    //     缺了解码器那份 sendrecv 列表合并时参数会被丢掉)—— 捕获侧
+    //     单方面给 2 声道是不够的。
+    //  3. 播放/暂停天然跟随 —— 播放器不出声时就不产生 buffer,
+    //     不需要额外的定时器或播放状态判断(这也是用官方 API 而非自行解码的主要好处)。
+    void movieAudioFrameAvailable(const QAudioBuffer &buffer);
+
     // 用户主动跳转(进度条拖动 / ±10s 按钮)。
     void userSeeked(qint64 position);
 
@@ -139,11 +156,23 @@ private:
     // 解码帧到达。由 bindVideoOutput 接到界面那个 sink 上。
     void onVideoFrame(const QVideoFrame &frame);
 
+    // 解码音频到达。接在 m_audioBufferOutput 上,转成对外信号发出去。
+    void onMovieAudioBuffer(const QAudioBuffer &buffer);
+
     // 根据 showingRemote 决定"谁往界面 sink 送帧"。
     void applyVideoSink();
 
     QMediaPlayer *m_player = nullptr;
     QAudioOutput *m_audioOutput = nullptr;
+
+    // 从播放器管线旁路出一路解码后的 PCM,用来推流。
+    // 它**不影响正常出声** —— m_audioOutput 照常播,这一路只是多拿一份数据。
+    //
+    // 为什么必须挂着 m_audioOutput:虽然实测不挂也能拿到 PCM
+    // (qffmpegplaybackengine.cpp 建渲染器的条件是 m_audioOutput || m_audioBufferOutput),
+    // 但挂着房主才听得到声音。想静音请用 m_audioOutput->setMuted(true),
+    // **不要** setAudioOutput(nullptr) —— 那会连本地播放一起废掉。
+    QAudioBufferOutput *m_audioBufferOutput = nullptr;
 
     // 界面那个 VideoOutput 的 sink。QML 在 Component.onCompleted 里交过来。
     // 播放器和远端渲染器都往它送 —— 谁在送由 showingRemote 决定。

@@ -1,0 +1,27 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "qt-6.10",
+      "displayName": "Qt 6.10.2",
+      "description": "官方安装的 Qt 6.10.2。电影音频功能需要 QAudioBufferOutput,该类 Qt 6.8 才引入,所以只能用这个或更高版本。",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/cmake-build-qt610",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_PREFIX_PATH": "$env{HOME}/Qt/6.10.2/gcc_64"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "qt-6.10",
+      "configurePreset": "qt-6.10"
+    }
+  ]
+}

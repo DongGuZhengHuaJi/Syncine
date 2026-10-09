@@ -32,8 +32,9 @@ class RoomSession;
 class SessionController : public QObject {
     Q_OBJECT
     QML_ELEMENT
+    QML_UNCREATABLE("由 main 创建并注入")
 
-    // 有请求在飞(建连中或等待服务端应答),界面据此禁用按钮
+    // 有请求在传输,界面据此禁用按钮
     Q_PROPERTY(bool busy
                READ busy
                NOTIFY busyChanged)

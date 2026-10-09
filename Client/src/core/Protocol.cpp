@@ -146,6 +146,7 @@ std::optional<Message> decode(const QString &text) {
     case MessageType::WebrtcAnswer:
     case MessageType::WebrtcIce:
         message.from = object.value("from").toString();
+        message.link = object.value("link").toString();
         message.sdp = object.value("sdp").toString();
         message.sdpMid = object.value("sdpMid").toString();
         message.sdpMLineIndex = object.value("sdpMLineIndex").toInt();
@@ -235,29 +236,33 @@ QString encodeVideoStatus(bool loaded, const QString &hash, qint64 duration) {
     return serialize(message);
 }
 
-QString encodeWebrtcOffer(const QString &to, const QString &sdp) {
+QString encodeWebrtcOffer(const QString &to, const QString &link, const QString &sdp) {
     QJsonObject message;
     message["type"] = "webrtc_offer";
     message["to"] = to;
+    message["link"] = link;
     message["sdp"] = sdp;
     return serialize(message);
 }
 
-QString encodeWebrtcAnswer(const QString &to, const QString &sdp) {
+QString encodeWebrtcAnswer(const QString &to, const QString &link, const QString &sdp) {
     QJsonObject message;
     message["type"] = "webrtc_answer";
     message["to"] = to;
+    message["link"] = link;
     message["sdp"] = sdp;
     return serialize(message);
 }
 
 QString encodeWebrtcIce(const QString &to,
+                        const QString &link,
                         const QString &sdp,
                         const QString &sdpMid,
                         int sdpMLineIndex) {
     QJsonObject message;
     message["type"] = "webrtc_ice";
     message["to"] = to;
+    message["link"] = link;
     message["sdp"] = sdp;
     message["sdpMid"] = sdpMid;
     message["sdpMLineIndex"] = sdpMLineIndex;

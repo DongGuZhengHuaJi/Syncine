@@ -25,6 +25,32 @@ PlaybackController::PlaybackController(QObject *parent)
     // 将音频输出绑定到播放器
     m_player->setAudioOutput(m_audioOutput);
 
+    // ---- 电影音频的旁路输出 ----
+    //
+    // QAudioBufferOutput 是 Qt 6.8 引入的官方接口:播放器解码的同时
+    // 旁路出一份 PCM 给我们。**构造函数里传的格式就是产出的格式** ——
+    // Qt 内部会用它建一个重采样器,所以我们直接把格式定成 WebRTC 想要的,
+    // 重采样这一步就白送了(见 qffmpegaudiorenderer.cpp 里的 createResampler)。
+    //
+    // 48000Hz 是 WebRTC Opus 的原生采样率,给它别的采样率反而要它自己去转。
+    //
+    // 双声道:电影源本来就带立体声,观众端也期望立体声。但 SDP 里 Opus 的
+    // 立体声不是"这里给 2 声道"就自动有的 —— 必须在 media 工厂的编解码器
+    // 工厂里给 Opus 格式加 stereo=1 参数(见 WebrtcManager.cpp 的
+    // StereoOpusAudioEncoderFactory / StereoOpusAudioDecoderFactory,
+    // 两个都要包:sendrecv 列表合并时参数取解码器那份),否则编码器按
+    // 单声道工作,这里给 2 声道也会被下混成单声道。
+    QAudioFormat movieAudioFormat;
+    movieAudioFormat.setSampleRate(48000);
+    movieAudioFormat.setChannelCount(2);
+    movieAudioFormat.setSampleFormat(QAudioFormat::Int16);
+
+    m_audioBufferOutput = new QAudioBufferOutput(movieAudioFormat, this);
+    m_player->setAudioBufferOutput(m_audioBufferOutput);
+
+    connect(m_audioBufferOutput, &QAudioBufferOutput::audioBufferReceived,
+            this, &PlaybackController::onMovieAudioBuffer);
+
     // 播放状态发生变化
     connect(
         m_player,
@@ -204,6 +230,43 @@ void PlaybackController::onVideoFrame(const QVideoFrame &frame) {
 
     // 向外转发，WebrtcManager捕获
     emit videoFrameAvailable(frame);
+}
+
+void PlaybackController::onMovieAudioBuffer(const QAudioBuffer &buffer) {
+    if (!buffer.isValid())
+        return;
+
+    // 诊断:音频帧比视频密得多(一帧几十毫秒),全打会淹掉日志,
+    // 所以只打开头几次 + 每隔一段。排障时先看这一行有没有出现 ——
+    // 没有就说明"取 PCM"这一环没通,和 WebRTC 那边无关。
+    static int count = 0;
+    if (count < 3 || count % 500 == 0) {
+        const QAudioFormat format = buffer.format();
+
+        // 峰值:分辨"播放器给出来的就是静音"还是"我们没把它送出去"。
+        // 若这里恒为 0,问题在播放器/取 PCM 这一环(比如被静音了);
+        // 若这里非 0 而对端收到 0,问题在 MovieAudioSource/WebRTC 那一段。
+        int peak = 0;
+        if (format.sampleFormat() == QAudioFormat::Int16) {
+            const auto *samples = buffer.constData<int16_t>();
+            const qsizetype total = buffer.sampleCount();
+            for (qsizetype i = 0; i < total; ++i) {
+                const int v = samples[i] < 0 ? -samples[i] : samples[i];
+                if (v > peak)
+                    peak = v;
+            }
+        }
+
+        qDebug() << "[诊断] 电影音频第" << (count + 1) << "帧:"
+                 << buffer.frameCount() << "采样/声道,"
+                 << format.sampleRate() << "Hz,"
+                 << format.channelCount() << "声道,"
+                 << format.sampleFormat() << ", 峰值" << peak;
+    }
+    ++count;
+
+    // Qt根据m_audioBufferOutput的构造参数重采样,这里的格式为 48k/双声道/Int16。
+    emit movieAudioFrameAvailable(buffer);
 }
 
 QVideoSink *PlaybackController::displayVideoSink() const {

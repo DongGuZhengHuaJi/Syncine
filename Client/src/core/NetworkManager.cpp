@@ -35,7 +35,7 @@ NetworkManager::NetworkManager(QObject *parent)
     );
 
     connect(m_webSocket.get(),
-        QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
+        &QWebSocket::errorOccurred,
         this,
         [this](QAbstractSocket::SocketError error) {
             Q_UNUSED(error);

@@ -9,7 +9,14 @@
 #include <QDebug>
 #include <QVideoFrame>
 
+#include "MovieAudioPlayer.h"
+#include "api/audio/create_audio_device_module.h"
+#include "api/audio_codecs/audio_decoder_factory.h"
+#include "api/audio_codecs/audio_encoder_factory.h"
+#include "api/audio_codecs/builtin_audio_decoder_factory.h"
+#include "api/audio_codecs/builtin_audio_encoder_factory.h"
 #include "api/audio_options.h"
+#include "api/environment/environment_factory.h"
 #include "api/make_ref_counted.h"
 #include "rtc_base/checks.h"
 
@@ -30,6 +37,158 @@
 #error "RTC_DCHECK_IS_ON 应为 0:libwebrtc.a 是 Release(is_debug = false)构建,详见 Client/CMakeLists.txt 第 7 节"
 #endif
 
+namespace {
+
+bool startThreadSet(std::unique_ptr<webrtc::Thread> &network,
+                    std::unique_ptr<webrtc::Thread> &worker,
+                    std::unique_ptr<webrtc::Thread> &signaling,
+                    const char *which) {
+    network = webrtc::Thread::CreateWithSocketServer();
+    signaling = webrtc::Thread::Create();
+    worker = webrtc::Thread::Create();
+
+    if (!network->Start() || !signaling->Start() || !worker->Start()) {
+        std::cerr << "[WebrtcManager] " << which << " 线程启动失败" << std::endl;
+        // 线程启动失败，直接关闭
+        network->Stop();
+        signaling->Stop();
+        worker->Stop();
+        network.reset();
+        signaling.reset();
+        worker.reset();
+        return false;
+    }
+    return true;
+}
+
+void stopThreadSet(std::unique_ptr<webrtc::Thread> &network,
+                   std::unique_ptr<webrtc::Thread> &worker,
+                   std::unique_ptr<webrtc::Thread> &signaling) {
+    if (network != nullptr) {
+        network->Stop();
+        network.reset();
+    }
+    if (worker != nullptr) {
+        worker->Stop();
+        worker.reset();
+    }
+    if (signaling != nullptr) {
+        signaling->Stop();
+        signaling.reset();
+    }
+}
+
+// ----------------------------------------------------------------------
+// 立体声 Opus 编解码器工厂包装 —— media 工厂专用
+//
+// 【为什么需要这两个包装】
+//
+// SDP 里 Opus 的"2 声道"和"立体声"是两个概念:rtpmap 的 opus/48000/2
+// 只是"最多 2 声道"的能力声明;真正决定编码器开几个声道的是 fmtp 里的
+// stereo=1 参数(modules/audio_coding/codecs/opus/audio_encoder_opus.cc
+// 的 GetChannelCount:参数不是 "1" 一律按 1 声道编码)。
+//
+// 而内置工厂通告的 Opus 格式**不带** stereo=1(同文件 AppendSupportedEncoders
+// 只写了 minptime 和 useinbandfec)—— 所以用内置工厂协商出来的 Opus 永远
+// 单声道:推立体声 PCM 进去也会被 ACM 按编码器声道数下混(ReMixFrame)。
+//
+// 解法:把 Opus 格式的参数补上 stereo=1,让它进 SDP fmtp(media/base/
+// codec.cc 的 Codec(SdpAudioFormat) 拷贝全部参数)。两端都传,协商结果
+// 就带 stereo=1,编码器按 2 声道工作(webrtc_voice_engine.cc 的
+// UpdateSendCodecSpec:stereo=1 → num_encoded_channels_ = 2)。
+//
+// 【为什么编码器和解码器两个工厂都要包】
+//
+// 电影音轨的 m-line 是 sendrecv,它的 codec 列表是发送、接收两个列表合并
+// 出来的(pc/codec_vendor.cc 的 audio_sendrecv_codecs)。合并用的是
+// NegotiateCodecs(recv 列表, send 列表),而它产出的是
+// `Codec negotiated = ours` —— **参数取的是 recv 列表那份**。
+// 只包编码器工厂时,stereo=1 在 send 列表里,合并时被丢掉,协商结果仍是
+// 单声道 —— 这是实测踩过的坑。所以解码器工厂必须一起包。
+//
+// 【为什么只给 media 工厂】
+//
+// voice 工厂继续用内置工厂:麦克风是单声道,给它协商立体声只会让编码器
+// 白白上混、白花带宽。电影音频才需要立体声,而这两个包装只影响传给它的
+// 那一套工厂 —— 两条连接、两种声道配置,互不干扰。
+//
+// 【顺带的音质参数】
+//
+// maxaveragebitrate:Opus 默认目标码率(约 32kbps)对音乐偏低。电影配乐
+// 值得提到 64kbps,局域网共享带宽不是瓶颈。想再高可以调,范围 6~510kbps
+// (见 audio_encoder_opus.cc 的 CalculateBitrate 钳制)。它同样由
+// recv 列表的参数主导,所以两个包装里都写。
+// ----------------------------------------------------------------------
+
+class StereoOpusAudioEncoderFactory : public webrtc::AudioEncoderFactory {
+public:
+    StereoOpusAudioEncoderFactory()
+        : m_inner(webrtc::CreateBuiltinAudioEncoderFactory()) {
+    }
+
+    std::vector<webrtc::AudioCodecSpec> GetSupportedEncoders() override {
+        std::vector<webrtc::AudioCodecSpec> specs = m_inner->GetSupportedEncoders();
+        for (webrtc::AudioCodecSpec &spec : specs) {
+            if (spec.format.name == "opus") {
+                spec.format.parameters["stereo"] = "1";
+                spec.format.parameters["maxaveragebitrate"] = "64000";
+            }
+        }
+        return specs;
+    }
+
+    std::optional<webrtc::AudioCodecInfo> QueryAudioEncoder(
+        const webrtc::SdpAudioFormat &format) override {
+        // 内置工厂本来就认得 stereo/maxaveragebitrate 参数,直接转发。
+        return m_inner->QueryAudioEncoder(format);
+    }
+
+    std::unique_ptr<webrtc::AudioEncoder> Create(
+        const webrtc::Environment &env,
+        const webrtc::SdpAudioFormat &format,
+        Options options) override {
+        return m_inner->Create(env, format, options);
+    }
+
+private:
+    const webrtc::scoped_refptr<webrtc::AudioEncoderFactory> m_inner;
+};
+
+// 解码器侧的同款包装。见上面"为什么两个工厂都要包"。
+class StereoOpusAudioDecoderFactory : public webrtc::AudioDecoderFactory {
+public:
+    StereoOpusAudioDecoderFactory()
+        : m_inner(webrtc::CreateBuiltinAudioDecoderFactory()) {
+    }
+
+    std::vector<webrtc::AudioCodecSpec> GetSupportedDecoders() override {
+        std::vector<webrtc::AudioCodecSpec> specs = m_inner->GetSupportedDecoders();
+        for (webrtc::AudioCodecSpec &spec : specs) {
+            if (spec.format.name == "opus") {
+                spec.format.parameters["stereo"] = "1";
+                spec.format.parameters["maxaveragebitrate"] = "64000";
+            }
+        }
+        return specs;
+    }
+
+    bool IsSupportedDecoder(const webrtc::SdpAudioFormat &format) override {
+        return m_inner->IsSupportedDecoder(format);
+    }
+
+    std::unique_ptr<webrtc::AudioDecoder> Create(
+        const webrtc::Environment &env,
+        const webrtc::SdpAudioFormat &format,
+        std::optional<webrtc::AudioCodecPairId> codec_pair_id) override {
+        return m_inner->Create(env, format, codec_pair_id);
+    }
+
+private:
+    const webrtc::scoped_refptr<webrtc::AudioDecoderFactory> m_inner;
+};
+
+} // namespace
+
 WebrtcManager::WebrtcManager() {
 }
 
@@ -45,10 +204,24 @@ bool WebrtcManager::initialize(const std::vector<std::string> &stunServers) {
     if (m_initialized)
         return true;
 
-    if (!initializeThreads())
+    // 在 media 工厂初始化前创建 dummyAdm和 Environment
+    m_mediaEnvironment.emplace(webrtc::CreateEnvironment());
+    m_dummyAdm = webrtc::CreateAudioDeviceModule(*m_mediaEnvironment, webrtc::AudioDeviceModule::kDummyAudio);
+    if (m_dummyAdm == nullptr) {
+        std::cerr << "[WebrtcManager] 创建假声卡失败，放弃初始化" << std::endl;
+        m_mediaEnvironment.reset();
         return false;
+    }
 
-    if (!initializeFactory()) {
+    if (!initializeVoiceFactory()) {
+        std::cerr << "[WebrtcManager] 初始化 voice 工厂失败，放弃初始化" << std::endl;
+        return false;
+    }
+
+    if (!initializeMediaFactory()) {
+        std::cerr << "[WebrtcManager] 初始化 media 工厂失败，放弃初始化" << std::endl;
+        m_dummyAdm.release();
+        m_mediaEnvironment.reset();
         destroy();
         return false;
     }
@@ -56,18 +229,21 @@ bool WebrtcManager::initialize(const std::vector<std::string> &stunServers) {
     m_stunServers = stunServers;
     m_initialized = true;
 
-    // 预创建音轨
+    // 预创建各条轨
     if (getOrCreateAudioTrack() == nullptr) {
         std::cerr << "[WebrtcManager] 音轨预创建失败,本次运行将没有语音功能" << std::endl;
     }
-
-    // 预创建视频轨
     if (getOrCreateVideoTrack() == nullptr) {
         std::cerr << "[WebrtcManager] 视频轨预创建失败,本次运行将没有画面共享" << std::endl;
     }
+    if (getOrCreateMovieAudioTrack() == nullptr) {
+        std::cerr << "[WebrtcManager] 电影音轨预创建失败,本次运行将没有电影声音" << std::endl;
+    }
 
-    // 创建共享模式下的接收端渲染器
+    // 预创建共享模式下接收侧的画面渲染器和声音播放器
     m_remoteRenderer = std::make_unique<RemoteVideoRenderer>();
+    m_movieAudioPlayer = std::make_unique<MovieAudioPlayer>();
+    m_movieAudioPlayer->setVolume(m_remoteMovieVolume);
 
     return true;
 }
@@ -75,6 +251,58 @@ bool WebrtcManager::initialize(const std::vector<std::string> &stunServers) {
 // ============================
 // 对端管理
 // ============================
+
+PeerLink *WebrtcManager::createLink(const QString &peerId, LinkKind kind,
+                                    bool createDataChannel) {
+    const bool isVoice = (kind == LinkKind::Voice);
+    webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory =
+        isVoice ? m_voiceFactory : m_mediaFactory;
+
+    if (factory == nullptr) {
+        std::cerr << "[WebrtcManager] "<<(isVoice?"voice":"media")<<" 工厂为空,无法建立连接" << std::endl;
+        return nullptr;
+    }
+
+    webrtc::PeerConnectionInterface::RTCConfiguration config;
+    for (const auto &stunServer : m_stunServers) {
+        webrtc::PeerConnectionInterface::IceServer iceServer;
+        iceServer.urls.push_back(stunServer);
+        config.servers.push_back(iceServer);
+    }
+
+    auto *link = new PeerLink(peerId, kind, factory, config, createDataChannel, this);
+    if (!link->isValid()) {
+        std:: cerr << "[WebrtcManager] "<<(isVoice?"voice":"media")<<" 连接创建失败,已放弃" << std::endl;
+        delete link;
+        return nullptr;
+    }
+
+    // 在 createOffer 之前挂上本地轨,SDP 中才会包含相应的 m=audio/m=video 段。
+    // todo: 完善重新协商逻辑
+    if (isVoice) {
+        if (m_localAudioTrack != nullptr)
+            link->addLocalAudioTrack(m_localAudioTrack);
+        link->setRemoteAudioVolume(m_remoteChatVolume);
+    } else {
+        if (m_localVideoTrack != nullptr)
+            link->addLocalVideoTrack(m_localVideoTrack);
+        if (m_localMovieAudioTrack != nullptr)
+            link->addLocalMovieAudioTrack(m_localMovieAudioTrack);
+
+        // 接收侧:远端画面进共享渲染器
+        if (m_remoteRenderer != nullptr)
+            link->setRemoteVideoSink(m_remoteRenderer.get());
+
+        // 接收侧:远端电影声进我们自己的播放器
+        if (m_movieAudioPlayer != nullptr)
+            link->setRemoteAudioSink(m_movieAudioPlayer.get());
+
+        // 显示关闭 media 连接的播放,让 NullAudioPoller 接管,每 10ms 自动拉取音频数据进入sink
+        link->setPlayoutEnabled(false);
+    }
+
+    return link;
+}
 
 bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataChannel) {
     if (!m_initialized) {
@@ -87,55 +315,52 @@ bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataC
         return false;
     }
 
-    // 幂等:已经建过就直接返回。
+    // 幂等:已存在就直接返回 true,不再重复建两条连接
     if (m_peers.contains(peerId))
         return true;
 
-    // PeerConnection 配置。STUN 服务器列表由上层传入,TURN 服务器暂不支持。
-    webrtc::PeerConnectionInterface::RTCConfiguration config;
-    for (const auto &stunServer : m_stunServers) {
-        webrtc::PeerConnectionInterface::IceServer iceServer;
-        iceServer.urls.push_back(stunServer);
-        config.servers.push_back(iceServer);
-    }
+    PeerLinks links;
+    links.voice = createLink(peerId, LinkKind::Voice, createDataChannel);
+    links.media = createLink(peerId, LinkKind::Media, /*createDataChannel=*/false);
 
-    // 创建新的 PeerLink 实例
-    auto *link = new PeerLink(peerId, m_peerConnectionFactory, config,
-                              createDataChannel, this);
-    if (!link->isValid()) {
-        delete link;
+    if (links.voice == nullptr || links.media == nullptr) {
+        std::cerr << "[WebrtcManager] 对端 " << peerId.toStdString()
+                  << " 的连接建立失败(voice=" << (links.voice ? "ok" : "fail")
+                  << ", media=" << (links.media ? "ok" : "fail") << ")" << std::endl;
+        if (links.voice != nullptr) {
+            links.voice->close();
+            links.voice->deleteLater();
+        }
+        if (links.media != nullptr) {
+            links.media->close();
+            links.media->deleteLater();
+        }
         return false;
     }
 
-    // createOffer前挂载本地音视频轨，否则 SDP 里不会有 m=audio/m=video 段,对端就收不到音视频。
-    if (m_localAudioTrack != nullptr)
-        link->addLocalAudioTrack(m_localAudioTrack);
-
-    if (m_localVideoTrack != nullptr)
-        link->addLocalVideoTrack(m_localVideoTrack);
-
-    // 设置共享模式下接收端解码后使用的sink
-    if (m_remoteRenderer != nullptr)
-        link->setRemoteVideoSink(m_remoteRenderer.get());
-
-
-    m_peers.insert(peerId, link);
+    m_peers.insert(peerId, links);
     std::cout << "[WebrtcManager] 已建立对端连接: " << peerId.toStdString()
-              << "(当前共 " << m_peers.size() << " 条)" << std::endl;
+              << "(两条:voice + media,当前共 " << m_peers.size() << " 个对端)" << std::endl;
     return true;
 }
 
 void WebrtcManager::removePeer(const QString &peerId) {
-    PeerLink *link = m_peers.take(peerId);
-    if (link == nullptr)
-        return;
+    PeerLinks links = m_peers.take(peerId);
 
-    // 先关闭连接再delete，防止析构过程中发生回调
-    link->close();
-    link->deleteLater();
+    // 先关闭连接再 deleteLater，防止析构过程中发生回调
+    if (links.voice != nullptr) {
+        links.voice->close();
+        links.voice->deleteLater();
+    }
+    if (links.media != nullptr) {
+        links.media->close();
+        links.media->deleteLater();
+    }
 
-    std::cout << "[WebrtcManager] 已移除对端连接: " << peerId.toStdString()
-              << "(剩余 " << m_peers.size() << " 条)" << std::endl;
+    if (links.voice != nullptr || links.media != nullptr) {
+        std::cout << "[WebrtcManager] 已移除对端连接: " << peerId.toStdString()
+                  << "(剩余 " << m_peers.size() << " 个对端)" << std::endl;
+    }
 }
 
 void WebrtcManager::closeAllPeers() {
@@ -144,22 +369,11 @@ void WebrtcManager::closeAllPeers() {
         removePeer(id);
 }
 
-PeerLink *WebrtcManager::peer(const QString &peerId) const {
-    return m_peers.value(peerId, nullptr);
-}
-
-void WebrtcManager::setLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track) {
-    m_localAudioTrack = std::move(track);
-
-    if (m_localAudioTrack == nullptr) {
-        emit audioEnabledChanged(false);
-        return;
-    }
-
-    for (PeerLink *link : m_peers)
-        link->addLocalAudioTrack(m_localAudioTrack);
-
-    emit audioEnabledChanged(m_localAudioTrack->enabled());
+PeerLink *WebrtcManager::peer(const QString &peerId, LinkKind kind) const {
+    const auto it = m_peers.constFind(peerId);
+    if (it == m_peers.constEnd())
+        return nullptr;
+    return kind == LinkKind::Voice ? it->voice : it->media;
 }
 
 // ============================
@@ -170,8 +384,8 @@ webrtc::scoped_refptr<webrtc::AudioTrackInterface> WebrtcManager::getOrCreateAud
     if (m_localAudioTrack != nullptr)
         return m_localAudioTrack;
 
-    if (m_peerConnectionFactory == nullptr || !m_initialized) {
-        std::cerr << "[WebrtcManager] 尚未初始化,无法创建音频源" << std::endl;
+    if (m_voiceFactory == nullptr || !m_initialized) {
+        std::cerr << "[WebrtcManager] 尚未初始化或 voice 工厂未创建,无法创建音轨" << std::endl;
         return nullptr;
     }
 
@@ -187,16 +401,14 @@ webrtc::scoped_refptr<webrtc::AudioTrackInterface> WebrtcManager::getOrCreateAud
         // 过滤低频轰鸣(桌面震动、空调)
         options.highpass_filter = true;
 
-        m_audioSource = m_peerConnectionFactory->CreateAudioSource(options);
+        m_audioSource = m_voiceFactory->CreateAudioSource(options);
         if (m_audioSource == nullptr) {
-            std::cerr << "[WebrtcManager] 创建音频源失败(麦克风可能不可用)" << std::endl;
+            std::cerr << "[WebrtcManager] 创建音频源失败" << std::endl;
             return nullptr;
         }
     }
 
-    // 音轨是"把音频源接到 PeerConnection 上"的插头。
-    // 这里建的是原型,每个对端拿它去 AddTrack 时 WebRTC 会各建一条独立的流。
-    m_localAudioTrack = m_peerConnectionFactory->CreateAudioTrack("syncine-mic", m_audioSource.get());
+    m_localAudioTrack = m_voiceFactory->CreateAudioTrack("syncine-mic", m_audioSource.get());
     if (m_localAudioTrack == nullptr) {
         std::cerr << "[WebrtcManager] 创建音轨失败" << std::endl;
         return nullptr;
@@ -220,9 +432,111 @@ void WebrtcManager::setAudioEnabled(bool enabled) {
     track->set_enabled(enabled);
 
     std::cout << "[WebrtcManager] 麦克风已" << (enabled ? "开启" : "关闭")
-              << "(当前 " << m_peers.size() << " 条对端连接)" << std::endl;
+              << "(当前 " << m_peers.size() << " 个对端)" << std::endl;
     emit audioEnabledChanged(enabled);
 }
+
+// ============================
+// 电影音频
+// ============================
+
+bool WebrtcManager::movieAudioEnabled() const {
+    return m_localMovieAudioTrack != nullptr && m_localMovieAudioTrack->enabled();
+}
+
+void WebrtcManager::setMovieAudioEnabled(bool enabled) {
+    if (!getOrCreateMovieAudioTrack()) {
+        emit movieAudioEnabledChanged(false);
+        return;
+    }
+
+    if (m_localMovieAudioTrack->enabled() == enabled)
+        return;
+
+    m_localMovieAudioTrack->set_enabled(enabled);
+
+    std::cout << "[WebrtcManager] 电影音轨已" << (enabled ? "开启" : "关闭")
+              << "(当前 " << m_peers.size() << " 个对端)" << std::endl;
+    emit movieAudioEnabledChanged(enabled);
+}
+
+void WebrtcManager::pushMovieAudioPcm(const int16_t *data, size_t samplesPerChannel,
+                                      int sampleRate, size_t channels) {
+    if (m_movieAudioSource == nullptr) {
+        std:: cerr <<  "[WebrtcManager] 接收侧音频播放器未创建,无法推送 PCM" << std::endl;
+        return;
+    }
+
+    m_movieAudioSource->pushPcm(data, samplesPerChannel, sampleRate, channels);
+}
+
+webrtc::scoped_refptr<webrtc::AudioTrackInterface> WebrtcManager::getOrCreateMovieAudioTrack() {
+    if (m_localMovieAudioTrack != nullptr)
+        return m_localMovieAudioTrack;
+
+    if (m_mediaFactory == nullptr || !m_initialized) {
+        std::cerr << "[WebrtcManager] 尚未初始化或 media 工厂未创建,无法创建音轨" << std::endl;
+        return nullptr;
+    }
+
+    // 实现了 AudioSourceInterface 的 MovieAudioSource,它把 PCM 推给 WebRTC
+    if (m_movieAudioSource == nullptr) {
+        m_movieAudioSource = webrtc::make_ref_counted<MovieAudioSource>();
+    }
+
+    m_localMovieAudioTrack = m_mediaFactory->CreateAudioTrack(
+        "syncine-movie", m_movieAudioSource.get());
+    if (m_localMovieAudioTrack == nullptr) {
+        std::cerr << "[WebrtcManager] 创建电影音轨失败" << std::endl;
+        return nullptr;
+    }
+
+    m_localMovieAudioTrack->set_enabled(false);
+
+    std::cout << "[WebrtcManager] 电影音轨已创建" << std::endl;
+    return m_localMovieAudioTrack;
+}
+
+// ============================
+// 接收端音量
+// ============================
+
+void WebrtcManager::setRemoteMovieVolume(double volume) {
+    volume = qBound(0.0, volume, 1.0);
+
+    // 用差值判断是否相等
+    if (qFuzzyIsNull(m_remoteMovieVolume - volume))
+        return;
+
+    m_remoteMovieVolume = volume;
+
+    // 电影声与 WebRTC 无关,由 MovieAudioPlayer 控制
+    if (m_movieAudioPlayer != nullptr)
+        m_movieAudioPlayer->setVolume(volume);
+
+    emit remoteMovieVolumeChanged(volume);
+}
+
+void WebrtcManager::setRemoteChatVolume(double volume) {
+    volume = qBound(0.0, volume, 1.0);
+
+    if (qFuzzyIsNull(m_remoteChatVolume - volume))
+        return;
+
+    m_remoteChatVolume = volume;
+
+    // 语音音量由 WebRTC 自己的播放控制,所以要遍历所有对端连接,把 volume 传给它们的 PeerLink
+    for (auto it = m_peers.constBegin(); it != m_peers.constEnd(); ++it) {
+        if (it->voice != nullptr)
+            it->voice->setRemoteAudioVolume(volume);
+    }
+
+    emit remoteChatVolumeChanged(volume);
+}
+
+// ============================
+// 视频
+// ============================
 
 void WebrtcManager::pushVideoFrame(const webrtc::VideoFrame &frame) {
     if (m_videoSource == nullptr)
@@ -233,9 +547,9 @@ void WebrtcManager::pushVideoFrame(const webrtc::VideoFrame &frame) {
 
 void WebrtcManager::pushQtVideoFrame(const QVideoFrame &frame) {
     static int n = 0;
-    if (n < 10 || n%300 == 0) {
+    if (n < 3 || n % 300 == 0) {
         qDebug() << "[诊断] pushQtVideoFrame 第" << (n + 1) << "帧,"
-                 << "videoSource =" << (void *)m_videoSource.get();
+                 << "videoSource =" << (void *) m_videoSource.get();
     }
     ++n;
 
@@ -249,7 +563,6 @@ void WebrtcManager::setRemoteVideoSink(QVideoSink *sink) {
     if (m_remoteRenderer == nullptr)
         return;
 
-    // 将播放器的sink传给渲染器,渲染器解码后通过这个sink把帧送给播放器显示
     m_remoteRenderer->setTargetSink(sink);
 }
 
@@ -257,7 +570,6 @@ void WebrtcManager::setRemoteVideoEnabled(bool enabled) {
     if (m_remoteRenderer == nullptr)
         return;
 
-    // 只有作为接收端时才往sink写帧,发送端不写避免回声覆盖本地画面
     m_remoteRenderer->setWritingEnabled(enabled);
 }
 
@@ -265,18 +577,14 @@ webrtc::scoped_refptr<webrtc::VideoTrackInterface> WebrtcManager::getOrCreateVid
     if (m_localVideoTrack != nullptr)
         return m_localVideoTrack;
 
-    if (m_peerConnectionFactory == nullptr || !m_initialized) {
-        std::cerr << "[WebrtcManager] 尚未初始化,无法创建视频轨" << std::endl;
+    if (m_mediaFactory == nullptr || !m_initialized) {
+        std::cerr << "[WebrtcManager] 尚未初始化或 media 工厂未创建,无法创建视频轨" << std::endl;
         return nullptr;
     }
 
-    // 创建视频源，所有track共享同一个源
     m_videoSource = webrtc::scoped_refptr<VideoTrackSource>(new VideoTrackSource());
 
-    // 视频轨是"把视频源接到 PeerConnection 上"的插头
-    // 这里建的是原型,每个对端拿它去 AddTrack 时 WebRTC 会各建一条独立的流。
-    m_localVideoTrack = m_peerConnectionFactory->CreateVideoTrack(m_videoSource,
-                                                                  "syncine-video");
+    m_localVideoTrack = m_mediaFactory->CreateVideoTrack(m_videoSource, "syncine-video");
     if (m_localVideoTrack == nullptr) {
         std::cerr << "[WebrtcManager] 创建视频轨失败" << std::endl;
         return nullptr;
@@ -286,89 +594,22 @@ webrtc::scoped_refptr<webrtc::VideoTrackInterface> WebrtcManager::getOrCreateVid
     return m_localVideoTrack;
 }
 
-void WebrtcManager::destroy() {
-    // 释放顺序是有依赖的,不能随意调整: 对端 → 音轨 → 音频源 → 工厂 → 线程
-    // 理由:
-    //   - 对端要在最前:关连接时 WebRTC 还可能在回调,线程必须还活着
-    //   - 音轨/音频源要在工厂之前:它们内部持有工厂引用,
-    //     工厂先没了它们就指向一块已释放的内存
-    //   - 音轨要在音频源之前:音轨引用音频源,反过来则会留下悬空引用
-    //   - 工厂要在线程之前:工厂内部引用这三根线程,
-    //     先停线程会让工厂里的引用失效
-
-    // 1. 对端连接 —— 必须在停线程之前
-    closeAllPeers();
-
-    // 2. 轨 → 源 → 工厂(顺序同上:引用方先释放)
-    m_localVideoTrack = nullptr;
-    m_localAudioTrack = nullptr;
-    m_videoSource = nullptr;
-    m_audioSource = nullptr;
-
-    // 接收侧渲染器也要在工厂之前放掉:它内部的转换会用到 WebRTC 的类型
-    m_remoteRenderer.reset();
-
-    m_peerConnectionFactory = nullptr;
-
-    // 3. 线程 —— 必须在工厂之后
-    if (m_networkThread != nullptr) {
-        m_networkThread->Stop();
-        m_networkThread.reset();
-    }
-    if (m_workerThread != nullptr) {
-        m_workerThread->Stop();
-        m_workerThread.reset();
-    }
-    if (m_signalingThread != nullptr) {
-        m_signalingThread->Stop();
-        m_signalingThread.reset();
-    }
-
-    m_initialized = false;
-}
-
 // ============================
-// 线程与工厂
+// 工厂与线程
 // ============================
 
-bool WebrtcManager::initializeThreads() {
-    m_networkThread = webrtc::Thread::CreateWithSocketServer();
-    m_signalingThread = webrtc::Thread::Create();
-    m_workerThread = webrtc::Thread::Create();
-
-    if (!m_networkThread->Start()) {
-        std::cerr << "Error starting network thread" << std::endl;
-        m_networkThread->Stop();
-        m_networkThread.reset();
-        return false;
-    }
-    if (!m_signalingThread->Start()) {
-        std::cerr << "Error starting signaling thread" << std::endl;
-        m_networkThread->Stop();
-        m_networkThread.reset();
-        m_signalingThread->Stop();
-        m_signalingThread.reset();
-        return false;
-    }
-    if (!m_workerThread->Start()) {
-        std::cerr << "Error starting worker thread" << std::endl;
-        m_networkThread->Stop();
-        m_networkThread.reset();
-        m_signalingThread->Stop();
-        m_signalingThread.reset();
-        m_workerThread->Stop();
-        m_workerThread.reset();
+bool WebrtcManager::initializeVoiceFactory() {
+    if (!startThreadSet(m_voiceNetworkThread, m_voiceWorkerThread,
+                        m_voiceSignalingThread, "voice")) {
         return false;
     }
 
-    return true;
-}
-
-bool WebrtcManager::initializeFactory() {
-    m_peerConnectionFactory = webrtc::CreatePeerConnectionFactory(
-        m_networkThread.get(),
-        m_workerThread.get(),
-        m_signalingThread.get(),
+    // 真声卡:default_adm 传 nullptr,让 WebRTC 用平台默认设备。
+    // 回声消除、自动增益、噪声抑制都靠它,语音质量全在这里。
+    m_voiceFactory = webrtc::CreatePeerConnectionFactory(
+        m_voiceNetworkThread.get(),
+        m_voiceWorkerThread.get(),
+        m_voiceSignalingThread.get(),
         /*default_adm=*/nullptr,
         webrtc::CreateBuiltinAudioEncoderFactory(),
         webrtc::CreateBuiltinAudioDecoderFactory(),
@@ -378,9 +619,78 @@ bool WebrtcManager::initializeFactory() {
         /*audio_processing=*/nullptr
     );
 
-    if (m_peerConnectionFactory == nullptr) {
-        std::cerr << "Error creating PeerConnectionFactory" << std::endl;
+    if (m_voiceFactory == nullptr) {
+        std::cerr << "[WebrtcManager] 创建 voice 工厂失败" << std::endl;
+        stopThreadSet(m_voiceNetworkThread, m_voiceWorkerThread, m_voiceSignalingThread);
         return false;
     }
     return true;
+}
+
+bool WebrtcManager::initializeMediaFactory() {
+    if (!startThreadSet(m_mediaNetworkThread, m_mediaWorkerThread,
+                        m_mediaSignalingThread, "media")) {
+        return false;
+    }
+
+    m_mediaFactory = webrtc::CreatePeerConnectionFactory(
+        m_mediaNetworkThread.get(),
+        m_mediaWorkerThread.get(),
+        m_mediaSignalingThread.get(),
+        m_dummyAdm,
+        webrtc::make_ref_counted<StereoOpusAudioEncoderFactory>(),
+        webrtc::make_ref_counted<StereoOpusAudioDecoderFactory>(),
+        webrtc::CreateBuiltinVideoEncoderFactory(),
+        webrtc::CreateBuiltinVideoDecoderFactory(),
+        /*audio_mixer=*/nullptr,
+        /*audio_processing=*/nullptr
+    );
+
+    if (m_mediaFactory == nullptr) {
+        std::cerr << "[WebrtcManager] 创建 media 工厂失败" << std::endl;
+        stopThreadSet(m_mediaNetworkThread, m_mediaWorkerThread, m_mediaSignalingThread);
+        return false;
+    }
+    return true;
+}
+
+void WebrtcManager::destroy() {
+    // 释放顺序是有依赖的,不能随意调整: 对端 → 轨/源 → 工厂 → 线程
+    // 理由:
+    //   - 对端要在最前:关连接时 WebRTC 还可能在回调,线程必须还活着
+    //   - 轨/音频源要在工厂之前:它们内部持有工厂引用,
+    //     工厂先没了它们就指向一块已释放的内存
+    //   - 轨要在源之前:轨引用源,反过来则会留下悬空引用
+    //   - 工厂要在线程之前:工厂内部引用这些线程,
+    //     先停线程会让工厂里的引用失效
+
+    // 1. 对端连接 —— 必须在停线程之前
+    closeAllPeers();
+
+    // 接收侧播放器要在工厂之前放掉:它内部持有 WebRTC 的 sink 注册关系
+    m_movieAudioPlayer.reset();
+
+    // 2. 轨 → 源 → 工厂(顺序同上:引用方先释放)
+    m_localVideoTrack = nullptr;
+    m_localAudioTrack = nullptr;
+    m_localMovieAudioTrack = nullptr;
+    m_videoSource = nullptr;
+    m_audioSource = nullptr;
+    m_movieAudioSource = nullptr;
+
+    // 接收侧渲染器也要在工厂之前放掉:它内部的转换会用到 WebRTC 的类型
+    m_remoteRenderer.reset();
+
+    m_voiceFactory = nullptr;
+    m_mediaFactory = nullptr;
+
+    // 3. 线程 —— 必须在工厂之后
+    stopThreadSet(m_voiceNetworkThread, m_voiceWorkerThread, m_voiceSignalingThread);
+    stopThreadSet(m_mediaNetworkThread, m_mediaWorkerThread, m_mediaSignalingThread);
+
+    // 4. 假声卡和环境放最后:工厂已经不再持有它们了
+    m_dummyAdm = nullptr;
+    m_mediaEnvironment.reset();
+
+    m_initialized = false;
 }

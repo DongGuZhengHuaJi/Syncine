@@ -35,6 +35,17 @@ class SignalingChannel : public QObject {
                READ audioEnabled
                NOTIFY audioEnabledChanged)
 
+    // 接收端两条音轨的音量(0.0 ~ 1.0)。QML 的两个滑块绑定这两个属性
+    Q_PROPERTY(double movieVolume
+               READ movieVolume
+               WRITE setMovieVolume
+               NOTIFY movieVolumeChanged)
+
+    Q_PROPERTY(double chatVolume
+               READ chatVolume
+               WRITE setChatVolume
+               NOTIFY chatVolumeChanged)
+
 public:
     SignalingChannel(RoomSession *session,
                      NetworkManager *networkManager,
@@ -47,6 +58,14 @@ public:
 
     bool audioEnabled() const;
 
+    // 接收端音量。和 setAudioEnabled 一样只是转发给 WebrtcManager,
+    // 本类不自己存状态。
+    double movieVolume() const;
+    void setMovieVolume(double volume);
+
+    double chatVolume() const;
+    void setChatVolume(double volume);
+
 signals:
     void errorOccurred(const QString &message);
     // 与某个对端的连接真正打通(ICE 完成),供界面显示状态
@@ -55,19 +74,23 @@ signals:
     // 麦克风实际开关状态。QML 用它驱动按钮显示,不要自己记状态
     void audioEnabledChanged(bool enabled);
 
+    void movieVolumeChanged(double volume);
+    void chatVolumeChanged(double volume);
+
 private slots:
     void onMessage(const QString &text);
 
-    void onOfferCreated(const QString &peerId, const QString &sdp);
-    void onAnswerCreated(const QString &peerId, const QString &sdp);
+    void onOfferCreated(const QString &peerId, const QString &link, const QString &sdp);
+    void onAnswerCreated(const QString &peerId, const QString &link, const QString &sdp);
     void onIceCandidateCreated(const QString &peerId,
+                               const QString &link,
                                const QString &sdp,
                                const QString &sdpMid,
                                int sdpMLineIndex);
 
-    void onPeerConnected(const QString &peerId);
-    void onPeerClosed(const QString &peerId);
-    void onPeerError(const QString &peerId, const QString &message);
+    void onPeerConnected(const QString &peerId, const QString &link);
+    void onPeerClosed(const QString &peerId, const QString &link);
+    void onPeerError(const QString &peerId, const QString &link, const QString &message);
 
     void onRoomEntered();
     void onRoomLeft();
@@ -87,9 +110,14 @@ private:
     NetworkManager *m_networkManager = nullptr;
     WebrtcManager *m_webrtcManager = nullptr;
 
-    // 已经发出过 offer 的对端。用来区分"等待连上"和"该重试"——
+    // 已经发出过 offer 的**连接**(不是对端)。用来区分"等待连上"和"该重试"——
     // 没有它就无法判断一条半开的连接是死了还是还在握手中。
-    QSet<QString> m_offeredPeers;
+    //
+    // 键是 "peerId|link":一个对端有两条连接,各自独立协商、各自可能半开,
+    // 所以必须分开记,否则第二条连接会被当成"已经发过了"而永远不发起。
+    QSet<QString> m_offeredLinks;
+
+    static QString offerKey(const QString &peerId, const QString &link);
 };
 
 #endif //SYNCINE_SIGNALINGCHANNEL_H
