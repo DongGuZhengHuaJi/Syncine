@@ -3,7 +3,7 @@
 //
 
 #include "WebSocketServer.h"
-#include "Logger.h"
+#include "Log.h"
 #include "Session.h"
 #include "LogicSystem.h"
 
@@ -15,29 +15,30 @@ WebSocketServer::WebSocketServer(asio::io_context &ioc, const std::string &addre
 
     m_acceptor.open(endpoint.protocol(), ec);
     if (ec) {
-        Logger::error("Error opening acceptor: " + ec.message());
+        LOG_ERROR("WebSocket") << "Error opening acceptor: " << ec.message();
         return;
     }
 
     m_acceptor.set_option(asio::socket_base::reuse_address(true), ec);
     if (ec) {
-        Logger::error("Error setting socket option: " + ec.message());
+        LOG_ERROR("WebSocket") << "Error setting socket option: " << ec.message();
         return;
     }
 
     m_acceptor.bind(endpoint, ec);
     if (ec) {
-        Logger::error("Error binding acceptor: " + ec.message());
+        LOG_ERROR("WebSocket") << "Error binding acceptor: " << ec.message();
         return;
     }
 
     m_acceptor.listen(asio::socket_base::max_listen_connections, ec);
     if (ec) {
-        Logger::error("Error listening on acceptor: " + ec.message());
+        LOG_ERROR("WebSocket") << "Error listening on acceptor: " << ec.message();
         return;
     }
 
-    Logger::info("WebSocket server initialized on " + address + ":" + std::to_string(port));
+    LOG_INFO("WebSocket") << "WebSocket server initialized on " << address
+                          << ":" << port;
 }
 
 WebSocketServer::~WebSocketServer() {
@@ -49,11 +50,11 @@ void WebSocketServer::run() {
 }
 
 void WebSocketServer::stop() {
-    Logger::info("Stopping WebSocket server...");
+    LOG_INFO("WebSocket") << "Stopping WebSocket server...";
     beast::error_code ec;
     m_acceptor.close(ec);
     if (ec) {
-        Logger::error("Error closing acceptor: " + ec.message());
+        LOG_ERROR("WebSocket") << "Error closing acceptor: " << ec.message();
     }
 
     // 关闭所有连接;先收集 id,避免关闭回调在遍历中修改 m_sessions
@@ -90,7 +91,7 @@ void WebSocketServer::on_accept(beast::error_code ec, asio::ip::tcp::socket sock
         m_sessions[sessionId] = session;
         session->start();
     } else if (ec != asio::error::operation_aborted) {
-        Logger::error("Accept error: " + ec.message());
+        LOG_ERROR("WebSocket") << "Accept error: " << ec.message();
     }
 
     // acceptor 仍打开就继续接受下一个连接

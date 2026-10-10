@@ -3,7 +3,7 @@
 //
 
 #include "Session.h"
-#include "Logger.h"
+#include "Log.h"
 #include "RandomGen.h"
 #include "LogicSystem.h"
 
@@ -19,12 +19,13 @@ Session::~Session() {
 }
 
 void Session::start() {
-    Logger::info("New session started with ID: " + m_id);
+    // 每条连接都会打,放 Debug:房间级的进出在 LogicSystem 那边有 Info
+    LOG_DEBUG("Session") << "New session started with ID: " << m_id;
 
     // 先完成 WebSocket 握手,再发 welcome 并开始收消息
     m_ws->async_accept([this, self = shared_from_this()](beast::error_code ec) {
         if (ec) {
-            Logger::warning("WebSocket handshake failed: " + ec.message());
+            LOG_WARN("Session") << "WebSocket handshake failed: " << ec.message();
             onDisconnected();
             return;
         }
@@ -78,7 +79,7 @@ void Session::do_next_write() {
     m_ws->async_write(asio::buffer(message),
                       [this, self](beast::error_code ec, std::size_t) {
         if (ec) {
-            Logger::warning("Write failed: " + ec.message());
+            LOG_WARN("Session") << "Write failed: " << ec.message();
             onDisconnected();
             return;
         }
@@ -94,7 +95,7 @@ void Session::do_read() {
             if (ec != websocket::error::closed
                 && ec != asio::error::eof
                 && ec != asio::error::operation_aborted) {
-                Logger::warning("Read error: " + ec.message());
+                LOG_WARN("Session") << "Read error: " << ec.message();
             }
             onDisconnected();
             return;
@@ -114,7 +115,7 @@ void Session::onDisconnected() {
     if (m_closed)
         return;
     m_closed = true;
-    Logger::info("Session closed with ID: " + m_id);
+    LOG_DEBUG("Session") << "Session closed with ID: " << m_id;
     if (m_onClose)
         m_onClose(shared_from_this());
 }

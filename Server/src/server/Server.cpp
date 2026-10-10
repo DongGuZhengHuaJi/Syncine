@@ -3,7 +3,7 @@
 //
 
 #include "Server.h"
-#include "Logger.h"
+#include "Log.h"
 #include "Config.h"
 #include "WebSocketServer.h"
 
@@ -17,11 +17,12 @@ Server::~Server() {
 }
 
 void Server::start() {
-    Logger::info("Starting server on " + Config::SERVER_ADDRESS + ":" + std::to_string(Config::SERVER_PORT));
+    LOG_INFO("Server") << "Starting server on " << Config::SERVER_ADDRESS
+                       << ":" << Config::SERVER_PORT;
     m_webSocketServer->run();
 }
 
 void Server::stop() {
-    Logger::info("Stopping server...");
+    LOG_INFO("Server") << "Stopping server...";
     m_webSocketServer->stop();
 }

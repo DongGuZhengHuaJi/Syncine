@@ -15,7 +15,8 @@ add_executable(Server src/main.cpp
         src/network/Session.h
         src/network/Room.cpp
         src/network/Room.h
-        src/tools/Logger.h
+        src/tools/Log.cpp
+        src/tools/Log.h
         src/tools/RandomGen.h
         src/network/LogicSystem.cpp
         src/network/LogicSystem.h

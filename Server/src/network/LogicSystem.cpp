@@ -3,7 +3,7 @@
 //
 
 #include "LogicSystem.h"
-#include "Logger.h"
+#include "Log.h"
 #include "Room.h"
 #include "Session.h"
 
@@ -122,7 +122,7 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
         reply["videoMismatched"] = room->videoMismatched();
         reply["shortestDuration"] = room->shortestDuration();
         session->send(reply.dump());
-        Logger::info("房间创建: " + newRoomId);
+        LOG_INFO("Logic") << "房间创建: " << newRoomId;
         return;
     }
 
@@ -178,7 +178,7 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
         notice["loaded"] = false;
         notice["duration"] = 0;
         targetRoom->broadcast(notice, session);
-        Logger::info("成员加入 " + targetRoomId + ": " + nickname);
+        LOG_INFO("Logic") << "成员加入 " << targetRoomId << ": " << nickname;
         return;
     }
 
@@ -218,7 +218,7 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
         notice["type"] = "room_mode_changed";
         notice["mode"] = mode;
         room->broadcast(notice);
-        Logger::info("房间 " + roomIt->second + " 模式切换: " + mode);
+        LOG_INFO("Logic") << "房间 " << roomIt->second << " 模式切换: " << mode;
         return;
     }
 
@@ -373,14 +373,14 @@ bool LogicSystem::removeMemberFromRoomLocked(const std::shared_ptr<Session> &ses
             m_sessionRooms.erase(memberSession);
         }
         m_rooms.erase(it);
-        Logger::info("房间解散: " + roomId);
+        LOG_INFO("Logic") << "房间解散: " << roomId;
     } else {
         json notice;
         notice["type"] = "member_left";
         notice["clientId"] = session->id();
         notice["nickname"] = nickname;
         room->broadcast(notice); // 离开者已移除,自动只发给剩余成员
-        Logger::info("成员离开 " + roomId + ": " + nickname);
+        LOG_INFO("Logic") << "成员离开 " << roomId << ": " << nickname;
 
         // 离开的成员可能带走了不一致的视频,重新计算
         if (room->updateMismatch()) {
