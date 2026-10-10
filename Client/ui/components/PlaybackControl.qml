@@ -5,13 +5,16 @@ import SyncineApp
 
 // 播放器控制区,两行:
 //   第一行:通栏进度条(和播放器等宽)
-//   第二行:按钮 —— 播放 / ±10s / 时间 / [弹幕输入框] / 弹幕开关 /
+//   第二行:按钮 —— 播放 / ±10s / 时间 / [弹幕输入框] / 画质 / 弹幕开关 /
 //                    电影音量 / 语音音量 / 麦克风 / 宽屏 / 窗口全屏 / 屏幕全屏
 //
-// 本组件不存任何状态:形态、弹幕开关、音量真身都在外部(RoomPage / SignalingChannel),
-// 这里只用信号把用户意图转达出去。
+// 本组件不存任何状态:形态、弹幕开关、音量、画质真身都在外部
+// (RoomPage / SignalingChannel),这里只用信号把用户意图转达出去。
 Rectangle {
     id: root
+
+    // 共享模式下的推送画质可选项。索引即 WebrtcManager::VideoQuality 的值
+    readonly property var videoQualities: ["流畅", "标准", "高清", "原画"]
 
     signal interacted()
     signal danmakuSubmitted(string text)
@@ -25,6 +28,68 @@ Rectangle {
 
     implicitHeight: 74
     color: Style.playerBar
+
+    // 画质选择浮层:贴在画质按钮正上方
+    Popup {
+        id: qualityPopup
+
+        // **坐标基准必须是按钮本身**。Popup 不设 parent 时以"窗口内容项"为基准,
+        // 和按钮的实际位置对不上 —— 浮层会跑到别处,连点击落点也跟着错。
+        // 挂在按钮上之后,x/y 就是最朴素的属性读,不依赖 mapToItem 那种函数式绑定。
+        parent: qualityBtn
+
+        width: 96
+        padding: 0
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        // 右边缘和按钮对齐、底边贴在按钮上方 8px(负的 y 没问题:
+        // Popup 画在窗口浮层上,不会被父项裁剪)
+        x: qualityBtn.width - width
+        y: -height - 8
+
+        background: Rectangle {
+            radius: Style.radius
+            color: "#E6161922"
+            border.width: 1
+            border.color: Style.playerLine
+        }
+
+        contentItem: Column {
+            spacing: 2
+
+            Repeater {
+                model: root.videoQualities
+
+                delegate: Rectangle {
+                    width: qualityPopup.width
+                    height: 30
+                    radius: Style.radiusSmall
+                    color: index === signalingChannel.videoQuality
+                           ? "#2E00AEEC"
+                           : (qualityRow.containsMouse ? "#29FFFFFF" : "transparent")
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: root.videoQualities[index]
+                        font.pixelSize: 13
+                        color: index === signalingChannel.videoQuality
+                               ? Style.accent : Style.playerIcon
+                    }
+
+                    MouseArea {
+                        id: qualityRow
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            signalingChannel.setVideoQuality(index)
+                            qualityPopup.close()
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     Rectangle {
         anchors.left: parent.left
@@ -172,6 +237,20 @@ Rectangle {
             }
 
             Item { Layout.fillWidth: true }
+
+            // ── 推送画质 ────────────────────────────
+            // 只有共享模式下的房主在推流,所以只有他能设。
+            // 观众看不到这个按钮 —— 他们看到的画质由房主决定。
+            ControlButton {
+                id: qualityBtn
+                visible: roomSession.roomMode === RoomSession.Share && roomSession.isHost
+                // 切出共享模式时按钮会藏起来,浮层要跟着收掉,否则会留在屏幕上
+                onVisibleChanged: if (!visible) qualityPopup.close()
+                // 纯属性读(不要写成函数调用):绑定要跟着 videoQualityChanged 走
+                text: root.videoQualities[signalingChannel.videoQuality]
+                tip: "推送画质"
+                onClicked: qualityPopup.opened ? qualityPopup.close() : qualityPopup.open()
+            }
 
             // ── 弹幕开关 ────────────────────────────
             Button {

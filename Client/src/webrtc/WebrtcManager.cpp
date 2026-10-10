@@ -186,6 +186,49 @@ private:
     const webrtc::scoped_refptr<webrtc::AudioDecoderFactory> m_inner;
 };
 
+// 画质档位 → 编码参数。
+//
+// 只调两个旋钮:**码率上限**和**帧率上限**,分辨率不动 ——
+// 让编码器按码率自己降(过载时它本来就会先降分辨率),
+// 比我们猜一个缩放系数更准。
+//
+// 关于"原画":WebRTC 里**不设上限不等于无限**。没设时它会用自己按分辨率算的
+// 默认上限(video/config/encoder_stream_factory.cc 的 GetMaxDefaultVideoBitrateKbps:
+// 540p 以上一律 2500kbps)——那比"高清"还低,所以"原画"必须显式给一个高上限,
+// 真正的天花板交给带宽估计决定。
+struct VideoQualityPreset {
+    int maxBitrateBps = 0;   // 0 = 用 WebRTC 默认上限
+    double maxFramerate = 0; // 0 = 不限制
+};
+
+VideoQualityPreset presetForQuality(WebrtcManager::VideoQuality quality) {
+    switch (quality) {
+    case WebrtcManager::VideoQuality::Smooth:
+        // 流畅:320~480p 观感,帧率留 24(电影本身也就 24)
+        return {800'000, 24.0};
+    case WebrtcManager::VideoQuality::Standard:
+        // 标准:720p 观感
+        return {2'000'000, 30.0};
+    case WebrtcManager::VideoQuality::Hd:
+        // 高清:1080p 观感。已经高于 WebRTC 的默认天花板(2.5Mbps)
+        return {4'000'000, 30.0};
+    case WebrtcManager::VideoQuality::Original:
+        // 原画:上限抬到很高,由网络决定能跑多少;帧率不限制
+        return {10'000'000, 0.0};
+    }
+    return {10'000'000, 0.0};
+}
+
+QString qualityName(WebrtcManager::VideoQuality quality) {
+    switch (quality) {
+    case WebrtcManager::VideoQuality::Smooth: return QStringLiteral("流畅");
+    case WebrtcManager::VideoQuality::Standard: return QStringLiteral("标准");
+    case WebrtcManager::VideoQuality::Hd: return QStringLiteral("高清");
+    case WebrtcManager::VideoQuality::Original: return QStringLiteral("原画");
+    }
+    return {};
+}
+
 } // namespace
 
 WebrtcManager::WebrtcManager() {
@@ -285,8 +328,12 @@ PeerLink *WebrtcManager::createLink(const QString &peerId, LinkKind kind,
             link->addLocalAudioTrack(m_localAudioTrack);
         link->setRemoteAudioVolume(m_remoteChatVolume);
     } else {
-        if (m_localVideoTrack != nullptr)
+        if (m_localVideoTrack != nullptr) {
             link->addLocalVideoTrack(m_localVideoTrack);
+            // 新连接套上当前画质档位(观众可能是在房主改过档位之后才进来的)
+            const VideoQualityPreset preset = presetForQuality(m_videoQuality);
+            link->applyVideoQuality(preset.maxBitrateBps, preset.maxFramerate);
+        }
         if (m_localMovieAudioTrack != nullptr)
             link->addLocalMovieAudioTrack(m_localMovieAudioTrack);
 
@@ -444,6 +491,41 @@ void WebrtcManager::setAudioEnabled(bool enabled) {
 
 bool WebrtcManager::movieAudioEnabled() const {
     return m_localMovieAudioTrack != nullptr && m_localMovieAudioTrack->enabled();
+}
+
+void WebrtcManager::setLocalVideoEnabled(bool enabled) {
+    if (!getOrCreateVideoTrack()) {
+        // 没有视频轨(初始化失败)时不用报错:调用方是"按模式门控"的逻辑,
+        // 拿不到轨就是没得发,静默即可
+        return;
+    }
+
+    if (m_localVideoTrack->enabled() == enabled)
+        return;
+
+    m_localVideoTrack->set_enabled(enabled);
+
+    // 切模式时才会走这里,频率很低,放 Info
+    LOG_INFO("WebRTC") << "推送视频已" << (enabled ? "开启" : "关闭") << "(当前"
+                       << m_peers.size() << "个对端)";
+}
+
+void WebrtcManager::setVideoQuality(VideoQuality quality) {
+    if (m_videoQuality == quality && !m_peers.isEmpty())
+        return;
+
+    m_videoQuality = quality;
+
+    const VideoQualityPreset preset = presetForQuality(quality);
+    for (auto it = m_peers.constBegin(); it != m_peers.constEnd(); ++it) {
+        if (it.value().media != nullptr)
+            it.value().media->applyVideoQuality(preset.maxBitrateBps,
+                                                preset.maxFramerate);
+    }
+
+    LOG_INFO("WebRTC") << "推送画质设为" << qualityName(quality)
+                       << "(码率上限" << (preset.maxBitrateBps / 1000) << "kbps)";
+    emit videoQualityChanged(quality);
 }
 
 void WebrtcManager::setMovieAudioEnabled(bool enabled) {

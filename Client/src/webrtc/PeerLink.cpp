@@ -11,6 +11,8 @@
 #include "WebrtcManager.h"
 #include "core/Log.h"
 
+#include "rtc_base/thread.h"
+
 namespace {
 
 // 给一条音轨设音量。
@@ -278,6 +280,9 @@ void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterf
     }
 
     m_localVideoTrack = track;
+    // sender 要留着:画质档位(码率/帧率上限)只能通过它设置
+    m_videoSender = sender.value();
+    pushVideoQuality(); // 新连接先把当前档位套上
 
     LOG_INFO("PeerLink") << m_peerId << "已挂载本地视频轨";
 }
@@ -378,6 +383,10 @@ void PeerLink::OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface>
 
     // 数据通道打通后输出
     LOG_INFO("PeerLink") << m_peerId << "收到数据通道:" << channel->label();
+
+    // 协商完成后再设一次画质:AddTrack 之后立刻设有时还太早
+    pushVideoQuality();
+
     emit connected(m_peerId, linkId());
 }
 
@@ -608,6 +617,65 @@ void PeerLink::createAnswer() {
     webrtc::PeerConnectionInterface::RTCOfferAnswerOptions options;
     m_pendingOperation = PendingOperation::SetLocalAnswer;
     m_connection->CreateAnswer(this, options);
+}
+
+void PeerLink::applyVideoQuality(int maxBitrateBps, double maxFramerate) {
+    m_videoMaxBitrateBps = maxBitrateBps;
+    m_videoMaxFramerate = maxFramerate;
+    pushVideoQuality();
+}
+
+void PeerLink::pushVideoQuality() {
+    if (m_videoSender == nullptr || m_connection == nullptr)
+        return;
+
+    // SetParameters 要求在信令线程上调用。BlockingCall 在"本来就在该线程"时
+    // 会直接执行,不会自锁,所以这里不用自己判断线程。
+    webrtc::Thread *signaling = m_connection->signaling_thread();
+    if (signaling == nullptr)
+        return;
+
+    signaling->BlockingCall([this]() {
+        webrtc::RtpParameters parameters = m_videoSender->GetParameters();
+        if (parameters.encodings.empty())
+            return;
+
+        // 只有一路编码(不做 simulcast),所以改 encodings[0] 即可。
+        //
+        // 三个旋钮的含义:
+        //   max_bitrate_bps  码率上限。**是上限不是固定值** —— 实际码率仍由
+        //                    拥塞控制在这个上限内自适应。
+        //   max_framerate    帧率上限。观影场景很划算:电影本来 24fps,
+        //                    网络差时降到 15 肉眼几乎无感,码率却能省一半。
+        //   分辨率           不在这里设 —— 让编码器按码率自己降(过载时它会
+        //                    先降分辨率),比我们猜一个缩放系数更准。
+        webrtc::RtpEncodingParameters &encoding = parameters.encodings[0];
+
+        if (m_videoMaxBitrateBps > 0)
+            encoding.max_bitrate_bps = m_videoMaxBitrateBps;
+        else
+            encoding.max_bitrate_bps.reset();
+
+        if (m_videoMaxFramerate > 0)
+            encoding.max_framerate = m_videoMaxFramerate;
+        else
+            encoding.max_framerate.reset();
+
+        const webrtc::RTCError error = m_videoSender->SetParameters(parameters);
+        if (!error.ok()) {
+            LOG_WARN("PeerLink") << m_peerId << "设置推送画质失败:" << error.message();
+            return;
+        }
+
+        LOG_INFO("PeerLink") << m_peerId << "推送画质已设置: 码率上限"
+                             << (m_videoMaxBitrateBps > 0
+                                     ? QString::number(m_videoMaxBitrateBps / 1000) + "kbps"
+                                     : QStringLiteral("默认"))
+                             << "帧率上限"
+                             << (m_videoMaxFramerate > 0
+                                     ? QString::number(m_videoMaxFramerate) + "fps"
+                                     : QStringLiteral("默认"));
+    });
 }
 
 void PeerLink::emitError(const QString &message) {

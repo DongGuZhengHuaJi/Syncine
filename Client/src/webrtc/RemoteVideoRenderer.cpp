@@ -109,6 +109,23 @@ void RemoteVideoRenderer::deliverPendingFrame() {
     QVideoFrameFormat format(QSize(width, height),
                              QVideoFrameFormat::Format_YUV420P);
 
+    // 旋转是**元数据**不是像素:发送端只是把"该转多少度"塞进 WebRTC 帧,
+    // 谁来渲染谁负责应用。我们手工组装 QVideoFrame 时要把它写回去 ——
+    // 不写的话,竖拍(带旋转元数据)的视频房主看到的是正的、观众看到的是横的。
+    switch (frame->rotation()) {
+    case webrtc::kVideoRotation_90:
+        format.setRotation(QtVideo::Rotation::Clockwise90);
+        break;
+    case webrtc::kVideoRotation_180:
+        format.setRotation(QtVideo::Rotation::Clockwise180);
+        break;
+    case webrtc::kVideoRotation_270:
+        format.setRotation(QtVideo::Rotation::Clockwise270);
+        break;
+    default:
+        break; // kVideoRotation_0:保持默认
+    }
+
     QVideoFrame qtFrame(format);
     if (!qtFrame.map(QVideoFrame::WriteOnly))
         return;

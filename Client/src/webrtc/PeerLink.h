@@ -13,6 +13,7 @@
 
 #include "api/peer_connection_interface.h"
 #include "api/media_stream_interface.h"
+#include "api/rtp_sender_interface.h"
 #include "api/video/video_sink_interface.h"
 #include "rtc_base/synchronization/mutex.h"
 
@@ -85,6 +86,14 @@ public:
     // 设置远端视频轨的渲染器。由 WebrtcManager 注入,生命周期比本对象长。
     void setRemoteVideoSink(webrtc::VideoSinkInterface<webrtc::VideoFrame> *sink);
 
+    // ---- 推送画质(共享模式下由房主设定)----
+    //
+    // maxBitrateBps / maxFramerate 传 0 表示这一项不设限。
+    // 注意这只是**上限**:实际码率仍由拥塞控制在这个上限内跑,
+    // "不设限"也不等于无限 —— 那样拿到的是 WebRTC 的默认上限(540p 以上约 2.5Mbps)。
+    // 可随时调用(界面线程),内部会投递到信令线程。
+    void applyVideoQuality(int maxBitrateBps, double maxFramerate);
+
     // 显式调用 setPlayoutEnabled(false)，让 NullAudioPoller 每隔约 10 毫秒请求一次音频数据
     void setPlayoutEnabled(bool enabled);
 
@@ -154,6 +163,8 @@ private:
     // 应答方专用:收到远端 offer 后生成本地 answer
     void createAnswer();
     void emitError(const QString &message);
+    // 把当前画质档位写进视频 sender 的参数(内部会切到信令线程)
+    void pushVideoQuality();
 
     QString m_peerId;
     LinkKind m_kind;
@@ -162,6 +173,12 @@ private:
     webrtc::scoped_refptr<webrtc::AudioTrackInterface> m_localAudioTrack;
     webrtc::scoped_refptr<webrtc::VideoTrackInterface> m_localVideoTrack;
     webrtc::scoped_refptr<webrtc::AudioTrackInterface> m_localMovieAudioTrack;
+
+    // 视频轨对应的 sender。画质档位(码率/帧率上限)只能通过它设置 ——
+    // AddTrack 的返回值以前是丢掉的,所以要单独留着。
+    webrtc::scoped_refptr<webrtc::RtpSenderInterface> m_videoSender;
+    int m_videoMaxBitrateBps = 0;    // 0 = 不设上限(用 WebRTC 默认)
+    double m_videoMaxFramerate = 0;  // 0 = 不设上限
 
     // 对端的视频轨
     webrtc::scoped_refptr<webrtc::VideoTrackInterface> m_remoteVideoTrack;

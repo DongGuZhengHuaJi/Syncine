@@ -50,6 +50,11 @@ SignalingChannel::SignalingChannel(RoomSession *session,
             this, &SignalingChannel::movieVolumeChanged);
     connect(m_webrtcManager, &WebrtcManager::remoteChatVolumeChanged,
             this, &SignalingChannel::chatVolumeChanged);
+
+    connect(m_webrtcManager, &WebrtcManager::videoQualityChanged, this,
+            [this](WebrtcManager::VideoQuality quality) {
+                emit videoQualityChanged(static_cast<int>(quality));
+            });
 }
 
 // ============================
@@ -81,6 +86,21 @@ void SignalingChannel::setMovieVolume(double volume) {
         return;
 
     m_webrtcManager->setRemoteMovieVolume(volume);
+}
+
+int SignalingChannel::videoQuality() const {
+    return m_webrtcManager != nullptr
+               ? static_cast<int>(m_webrtcManager->videoQuality())
+               : 3; // 原画
+}
+
+void SignalingChannel::setVideoQuality(int quality) {
+    if (m_webrtcManager == nullptr)
+        return;
+
+    const int clamped = qBound(0, quality, 3);
+    m_webrtcManager->setVideoQuality(
+        static_cast<WebrtcManager::VideoQuality>(clamped));
 }
 
 double SignalingChannel::chatVolume() const {

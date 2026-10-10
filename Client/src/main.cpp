@@ -65,8 +65,17 @@ int main(int argc, char *argv[]) {
     // WebrtcManager 只管收帧并送出/渲染。胶水贴在这唯一一个装配点上。
 
     // 发送:本地解码帧 → WebRTC(会做 Qt 格式 → I420 的转换)
+    //
+    // **按模式门控**:只有共享模式才推视频。同步/网链模式下每个人看的都是
+    // 自己的本地文件,这一路推出去没人会渲染(接收端会直接丢弃),
+    // 但发送端已经付了"逐行搬运 + 编码 + 上行带宽"的钱。
+    //
+    // 挡在 push 之前而不是只关轨道,是因为 Qt 帧 → I420 那次逐行转换是纯 CPU
+    // 开销,放在门控里面一起省掉。轨道本身的开关见下面的 updateVideoEnabled。
     QObject::connect(&playbackController, &PlaybackController::videoFrameAvailable,
-                     &app, [&webrtcManager](const QVideoFrame &f) {
+                     &app, [&webrtcManager, &roomSession](const QVideoFrame &f) {
+                         if (roomSession.roomMode() != RoomSession::RoomMode::Share)
+                             return;
                          webrtcManager.pushQtVideoFrame(f);
                      });
 
@@ -93,6 +102,20 @@ int main(int argc, char *argv[]) {
                      &app, updateMovieAudioEnabled);
     QObject::connect(&roomSession, &RoomSession::roomModeChanged,
                      &app, updateMovieAudioEnabled);
+
+    // 视频轨的开关:同理,只在共享模式下开着。
+    //
+    // 注意 WebRTC 的语义:set_enabled(false) 不是"什么都不发",而是改发黑帧
+    // (保持流不断,接收端不会以为流结束了)。真正省下带宽的是上面那处
+    // "不再喂帧"——两件事配合才是完整的门控。
+    auto updateVideoEnabled = [&roomSession, &webrtcManager] {
+        webrtcManager.setLocalVideoEnabled(
+            roomSession.roomMode() == RoomSession::RoomMode::Share);
+    };
+
+    QObject::connect(&roomSession, &RoomSession::roomModeChanged,
+                     &app, updateVideoEnabled);
+    updateVideoEnabled(); // 启动时对齐一次(默认同步模式 → 关)
 
     // 「电影音量」是**一个**值,要同时管住两个出声的地方:
     //

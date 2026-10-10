@@ -147,6 +147,36 @@ public:
     // 不该渲染,否则会盖掉本地画面、并维持回声环(见 PlaybackController::applyVideoSink)。
     void setRemoteVideoEnabled(bool enabled);
 
+    // ---- 推送端视频 ----
+    //
+    // 视频轨和电影音轨一样,在 initialize() 预创建、建连时立刻挂上,
+    // 保证它恒定存在于 SDP 里(加轨会触发重新协商,而 PeerLink 只处理初始协商)。
+    // 非共享模式用 setLocalVideoEnabled(false) 关掉,不必动 SDP。
+    //
+    // 注意 WebRTC 的语义:VideoTrack::set_enabled(false) 并不是"什么都不发",
+    // 而是改用黑帧顶上(保持流不断)。所以真正省下带宽的是上游不再喂帧 ——
+    // 见 main.cpp 里那处按模式门控的 pushQtVideoFrame。
+    void setLocalVideoEnabled(bool enabled);
+
+    bool localVideoEnabled() const {
+        return m_localVideoTrack != nullptr && m_localVideoTrack->enabled();
+    }
+
+    // 推送画质档位(共享模式下由房主设置)
+    enum class VideoQuality {
+        Smooth,   // 流畅
+        Standard, // 标准
+        Hd,       // 高清
+        Original, // 原画
+    };
+    Q_ENUM(VideoQuality)
+
+    void setVideoQuality(VideoQuality quality);
+
+    VideoQuality videoQuality() const {
+        return m_videoQuality;
+    }
+
     // ---- 电影音频 ----
     //
     // 数据不是来自声卡,而是 PlaybackController 用 QAudioBufferOutput 从
@@ -204,6 +234,9 @@ signals:
 
     // 电影音轨的开关状态。同 audioEnabledChanged,由 QML 驱动显示。
     void movieAudioEnabledChanged(bool enabled);
+
+    // 推送画质档位(共享模式下房主改了档位)
+    void videoQualityChanged(VideoQuality quality);
 
     // 接收端两条音轨的音量。QML 的两个滑块绑这个。
     void remoteMovieVolumeChanged(double volume);
@@ -277,6 +310,9 @@ private:
     // 接收端音量。只由 Qt 主线程读写(音量滑块 + Q_PROPERTY),不存在竞争。
     double m_remoteMovieVolume = 1.0;
     double m_remoteChatVolume = 1.0;
+
+    // 当前推送画质。默认原画(不额外设限)
+    VideoQuality m_videoQuality = VideoQuality::Original;
 
     // 接收侧:WebRTC 帧 → QVideoFrame → QVideoSink。
     // 所有对端共用一个 —— 房间里同时只显示一路视频。

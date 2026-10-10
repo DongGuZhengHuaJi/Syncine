@@ -46,6 +46,15 @@ class SignalingChannel : public QObject {
                WRITE setChatVolume
                NOTIFY chatVolumeChanged)
 
+    // 推送画质档位(共享模式下由房主设置)。
+    // 用 int 而不是枚举,是为了不让 QML 去认 WebrtcManager 的类型:
+    // 0=流畅 1=标准 2=高清 3=原画,顺序和 WebrtcManager::VideoQuality 一致。
+    // 界面要显示文字请用 videoQualityName()。
+    Q_PROPERTY(int videoQuality
+               READ videoQuality
+               WRITE setVideoQuality
+               NOTIFY videoQualityChanged)
+
 public:
     SignalingChannel(RoomSession *session,
                      NetworkManager *networkManager,
@@ -66,6 +75,18 @@ public:
     double chatVolume() const;
     void setChatVolume(double volume);
 
+    // 推送画质。越界值会被夹到合法范围。
+    //
+    // **必须带 Q_INVOKABLE**:它同时是 Q_PROPERTY 的 WRITE 访问器,但 QML 里
+    // `signalingChannel.setVideoQuality(1)` 这种**方法调用**要求它是可调用的
+    // 槽/可调用方法 —— 只当属性 setter 的话 QML 会直接抛
+    // "Property 'setVideoQuality' ... is not a function",而且点了没反应、
+    // 连对话框都不会关(异常中断了后面的语句)。
+    // 属性赋值 `signalingChannel.videoQuality = 1` 不写 Q_INVOKABLE 也能用,
+    // 但界面上两种写法都可能出现,索性都支持。
+    int videoQuality() const;
+    Q_INVOKABLE void setVideoQuality(int quality);
+
 signals:
     void errorOccurred(const QString &message);
     // 与某个对端的连接真正打通(ICE 完成),供界面显示状态
@@ -76,6 +97,7 @@ signals:
 
     void movieVolumeChanged(double volume);
     void chatVolumeChanged(double volume);
+    void videoQualityChanged(int quality);
 
 private slots:
     void onMessage(const QString &text);
