@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 class Room;
 class Session;
 
@@ -41,6 +43,14 @@ private:
 
     void replyError(const std::shared_ptr<Session> &session,
                     const std::string &code, const std::string &message);
+    // 当前条目变了就广播一条 playlist_switched —— 各端据此重新解析"这一条从哪儿来"
+    void broadcastPlaylistSwitched(const std::shared_ptr<Room> &room,
+                                   const std::string &itemId);
+    // 播放列表相关消息的统一下发口。共享模式下只发给房主:
+    // 条目全是房主本机的文件,观众拿到也没有意义
+    void sendPlaylistMessage(const std::shared_ptr<Room> &room, const nlohmann::json &message);
+    // 同步模式下把各条目的匹配状态(未匹配/已匹配/不同步)推给所有人
+    void broadcastPlaylistStatus(const std::shared_ptr<Room> &room);
     // 要求调用方持有 m_roomsMutex
     bool removeMemberFromRoomLocked(const std::shared_ptr<Session> &session);
 

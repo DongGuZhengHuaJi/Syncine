@@ -4,11 +4,11 @@
 
 #include "VideoTrackSource.h"
 
-#include <cstdio>
-
 #include <QDebug>
 #include <QVideoFrame>
 #include <QVideoFrameFormat>
+
+#include "core/Log.h"
 
 #include "api/video/i420_buffer.h"
 #include "libyuv/convert.h"
@@ -75,11 +75,9 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
         static bool warned = false;
         if (!warned) {
             warned = true;
-            std::fprintf(stderr,
-                         "[VideoTrackSource] 不支持的像素格式 %d —— 这一路视频不会发送。"
-                         "需要为它补一条到 libyuv 的映射。\n",
-                         static_cast<int>(mapped.surfaceFormat().pixelFormat()));
-            std::fflush(stderr);
+            LOG_ERROR("VideoSource") << "不支持的像素格式"
+                                     << static_cast<int>(mapped.surfaceFormat().pixelFormat())
+                                     << "—— 这一路视频不会发送。需要为它补一条到 libyuv 的映射。";
         }
         return;
     }
@@ -103,7 +101,7 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
     // 可能和以前不同(见 CMakePresets 里的迁移说明)。
     static int diagCount = 0;
     if (diagCount < 3 || diagCount % 300 == 0) {
-        qDebug() << "[诊断] 源帧: pixelFormat=" << mapped.surfaceFormat().pixelFormat()
+        LOG_TRACE("VideoSource") << "源帧: pixelFormat=" << mapped.surfaceFormat().pixelFormat()
                  << " handleType=" << mapped.handleType()
                  << " 平面数=" << mapped.planeCount()
                  << " 尺寸=" << width << "x" << height
@@ -119,7 +117,7 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
             const long long actualUvOffset = mapped.bits(1) - mapped.bits(0);
             const long long assumedUvOffset =
                 static_cast<long long>(mapped.bytesPerLine(0)) * height;
-            qDebug() << "[诊断] UV 偏移: 实际=" << actualUvOffset
+            LOG_TRACE("VideoSource") << "UV 偏移: 实际=" << actualUvOffset
                      << " libyuv会推算成=" << assumedUvOffset
                      << (actualUvOffset == assumedUvOffset ? "(一致)" : "(!! 不一致,会读错 !!)");
         }
@@ -236,8 +234,7 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
         static bool warned = false;
         if (!warned) {
             warned = true;
-            std::fprintf(stderr, "[VideoTrackSource] 帧格式转换失败,返回 %d\n", ret);
-            std::fflush(stderr);
+            LOG_ERROR("VideoSource") << "帧格式转换失败,返回" << ret;
         }
         return;
     }
@@ -271,9 +268,7 @@ void VideoTrackSource::AddOrUpdateSink(webrtc::VideoSinkInterface<webrtc::VideoF
     // 所以按指针去重,否则计数会越加越多。
     if (m_registeredSinks.insert(sink).second) {
         ++m_sinkCount;
-        std::fprintf(stderr, "[VideoTrackSource] 编码器已接入,当前订阅者 = %d\n",
-                     m_sinkCount);
-        std::fflush(stderr);
+        LOG_INFO("VideoSource") << "编码器已接入,当前订阅者 =" << m_sinkCount;
     }
 
     m_broadcaster.AddOrUpdateSink(sink, wants);

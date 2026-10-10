@@ -118,7 +118,7 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
         reply["roomName"] = room->roomName();
         reply["mode"] = room->mode();
         reply["members"] = room->membersArray();
-        reply["state"] = room->stateJson();
+        reply["state"] = room->stateJson(); // 建房的人就是房主,列表给全
         reply["videoMismatched"] = room->videoMismatched();
         reply["shortestDuration"] = room->shortestDuration();
         session->send(reply.dump());
@@ -165,7 +165,9 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
         reply["roomName"] = targetRoom->roomName();
         reply["mode"] = targetRoom->mode();
         reply["members"] = targetRoom->membersArray();
-        reply["state"] = targetRoom->stateJson();
+        // 共享模式下播放列表是房主自己的文件清单,观众不参与,给空列表
+        reply["state"] = targetRoom->stateJson(targetRoom->mode() != "share"
+                                               || targetRoom->isHost(session));
         reply["videoMismatched"] = targetRoom->videoMismatched();
         reply["shortestDuration"] = targetRoom->shortestDuration();
         session->send(reply.dump());
@@ -178,6 +180,11 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
         notice["loaded"] = false;
         notice["duration"] = 0;
         targetRoom->broadcast(notice, session);
+
+        // 新成员一条文件都还没有 —— 同步模式下所有条目的"已匹配"都要退回"未匹配",
+        // 得让所有人重算一次
+        broadcastPlaylistStatus(targetRoom);
+
         LOG_INFO("Logic") << "成员加入 " << targetRoomId << ": " << nickname;
         return;
     }
@@ -218,7 +225,68 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
         notice["type"] = "room_mode_changed";
         notice["mode"] = mode;
         room->broadcast(notice);
+
+        // 播放列表是**按模式各存一份**的 —— 换模式等于换了一份列表,
+        // 得把新的那份推下去(否则界面上还显示着上一个模式的条目)
+        json changed;
+        changed["type"] = "playlist_changed";
+        changed["items"] = room->playlistJson();
+        changed["currentIndex"] = room->currentIndex();
+        sendPlaylistMessage(room, changed); // 共享模式只发给房主,其余模式广播
+
+        if (mode == "share") {
+            // 共享模式下观众不参与列表:他们必须拿到"空列表 + 无当前条目",
+            // 否则界面上会一直留着上一个模式的旧列表
+            json cleared;
+            cleared["type"] = "playlist_changed";
+            cleared["items"] = json::array();
+            cleared["currentIndex"] = -1;
+
+            // 顺带把观众的播放器也卸掉 —— 他们看不到列表,当前条目自然也没了
+            json unloaded;
+            unloaded["type"] = "playlist_switched";
+            unloaded["itemId"] = "";
+            unloaded["currentIndex"] = -1;
+
+            if (const auto host = room->hostSession()) {
+                room->broadcast(cleared, host);
+                room->broadcast(unloaded, host);
+            } else {
+                room->broadcast(cleared);
+                room->broadcast(unloaded);
+            }
+        }
+
+        broadcastPlaylistSwitched(room, room->currentItemId());
+        broadcastPlaylistStatus(room);
+
         LOG_INFO("Logic") << "房间 " << roomIt->second << " 模式切换: " << mode;
+        return;
+    }
+
+    // 同步模式下成员上报"这一条我这台机器上有没有文件"
+    if (type == "playlist_status") {
+        auto roomIt = m_sessionRooms.find(session);
+        if (roomIt == m_sessionRooms.end()) {
+            replyError(session, "not_in_room", "你不在房间里");
+            return;
+        }
+        auto it = m_rooms.find(roomIt->second);
+        if (it == m_rooms.end()) {
+            replyError(session, "not_in_room", "你不在房间里");
+            return;
+        }
+        const auto room = it->second;
+
+        // 只有同步模式有"匹配"这回事。别的模式收到就当没看见 ——
+        // 可能是刚切完模式、客户端还没来得及停发,不值得报错打扰用户
+        if (room->mode() == "local") {
+            room->setMemberFile(session->id(),
+                                message.value("itemId", ""),
+                                message.value("hasFile", false),
+                                message.value("hash", ""));
+            broadcastPlaylistStatus(room);
+        }
         return;
     }
 
@@ -287,6 +355,105 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
         return;
     }
 
+    // ── 播放列表 ──────────────────────────────────────────
+    //
+    // 列表是房间共享的一份("我们接下来要看这几部"),条目的**本地文件路径不在里面** ——
+    // 各人自己把 itemId 映射到自己机器上的文件。所以服务端只做三件事:
+    // 存条目、维护"当前是第几条"、把变化广播出去。
+    if (type == "playlist_add" || type == "playlist_remove" || type == "playlist_switch") {
+        auto roomIt = m_sessionRooms.find(session);
+        if (roomIt == m_sessionRooms.end()) {
+            replyError(session, "not_in_room", "你不在房间里");
+            return;
+        }
+        auto it = m_rooms.find(roomIt->second);
+        if (it == m_rooms.end()) {
+            replyError(session, "not_in_room", "你不在房间里");
+            return;
+        }
+        const auto room = it->second;
+        const bool isHostSession = room->isHost(session);
+
+        if (type == "playlist_add") {
+            // 共享模式下只有房主能加:别人的本地文件房主没有,加进来谁也播不了
+            if (room->mode() == "share" && !isHostSession) {
+                replyError(session, "not_host", "共享模式下只有房主能添加视频");
+                return;
+            }
+
+            PlaylistEntry entry;
+            entry.itemId = message.value("itemId", "");
+            entry.title = message.value("title", "");
+            entry.url = message.value("url", "");
+            entry.duration = message.value("duration", 0LL);
+            entry.addedBy = session->id();
+
+            if (entry.itemId.empty() || entry.title.empty()) {
+                replyError(session, "bad_request", "播放列表条目缺少 itemId 或标题");
+                return;
+            }
+
+            // itemId 由客户端生成(UUID),服务端只保证不重复
+            for (const PlaylistEntry &existing : room->playlist()) {
+                if (existing.itemId == entry.itemId) {
+                    replyError(session, "duplicate_item", "这个条目已经在播放列表里了");
+                    return;
+                }
+            }
+
+            const bool becameCurrent = room->addEntry(entry);
+
+            // 广播给**所有人**(包括添加者):他也要拿服务端的权威列表,不做本地乐观插入
+            json changed;
+            changed["type"] = "playlist_changed";
+            changed["items"] = room->playlistJson();
+            changed["currentIndex"] = room->currentIndex();
+            sendPlaylistMessage(room, changed);
+
+            // 列表本来是空的 → 这一条成了当前条目,各端要据此去加载
+            if (becameCurrent)
+                broadcastPlaylistSwitched(room, room->currentItemId());
+
+            LOG_INFO("Logic") << "播放列表添加: " << roomIt->second << " ← " << entry.title;
+            return;
+        }
+
+        // 删除和切集都只有房主能做 —— 和切模式一样,房间级的动作
+        if (!isHostSession) {
+            replyError(session, "not_host", "只有房主能整理播放列表");
+            return;
+        }
+
+        const std::string itemId = message.value("itemId", "");
+        const std::string beforeId = room->currentItemId();
+
+        if (type == "playlist_remove") {
+            if (!room->removeEntry(itemId)) {
+                replyError(session, "item_not_found", "播放列表里没有这个条目");
+                return;
+            }
+
+            json changed;
+            changed["type"] = "playlist_changed";
+            changed["items"] = room->playlistJson();
+            changed["currentIndex"] = room->currentIndex();
+            sendPlaylistMessage(room, changed);
+
+            LOG_INFO("Logic") << "播放列表移除: " << roomIt->second << " ← " << itemId;
+        } else {
+            if (!room->switchTo(itemId)) {
+                replyError(session, "item_not_found", "播放列表里没有这个条目");
+                return;
+            }
+            LOG_INFO("Logic") << "播放列表切集: " << roomIt->second << " → " << itemId;
+        }
+
+        // 当前条目变了才广播切换(删掉的正好是当前那条时也会走到这里)
+        if (room->currentItemId() != beforeId)
+            broadcastPlaylistSwitched(room, room->currentItemId());
+        return;
+    }
+
     if (type == "chat" || type == "playback" || type == "playback_position") {
         auto roomIt = m_sessionRooms.find(session);
         if (roomIt == m_sessionRooms.end()) {
@@ -347,6 +514,46 @@ void LogicSystem::replyError(const std::shared_ptr<Session> &session,
     session->send(reply.dump());
 }
 
+void LogicSystem::broadcastPlaylistSwitched(const std::shared_ptr<Room> &room,
+                                            const std::string &itemId) {
+    json switched;
+    switched["type"] = "playlist_switched";
+    switched["itemId"] = itemId;
+    switched["currentIndex"] = room->currentIndex();
+    sendPlaylistMessage(room, switched);
+}
+
+void LogicSystem::sendPlaylistMessage(const std::shared_ptr<Room> &room,
+                                      const json &message) {
+    // 共享模式下播放列表只有房主有:条目是他本机的文件,别人既看不到也用不上。
+    // 同步/网链模式则是房间共享的一份,发给所有人。
+    if (room->mode() == "share") {
+        if (const auto host = room->hostSession())
+            host->send(message.dump());
+        return;
+    }
+    room->broadcast(message);
+}
+
+void LogicSystem::broadcastPlaylistStatus(const std::shared_ptr<Room> &room) {
+    // "匹配"只在同步模式有意义:共享模式只有房主有文件,网链模式大家读同一个 URL
+    if (room->mode() != "local")
+        return;
+
+    json statuses = json::array();
+    for (const PlaylistEntry &entry : room->playlist()) {
+        statuses.push_back({
+            {"itemId", entry.itemId},
+            {"status", room->itemStatus(entry.itemId)},
+        });
+    }
+
+    json message;
+    message["type"] = "playlist_status";
+    message["items"] = statuses;
+    sendPlaylistMessage(room, message);
+}
+
 bool LogicSystem::removeMemberFromRoomLocked(const std::shared_ptr<Session> &session) {
     auto roomIt = m_sessionRooms.find(session);
     if (roomIt == m_sessionRooms.end())
@@ -364,6 +571,10 @@ bool LogicSystem::removeMemberFromRoomLocked(const std::shared_ptr<Session> &ses
     const std::string nickname = room->nicknameOf(session);
     room->removeMember(session);
 
+    // 走掉的人对播放列表的上报也要一起清掉 —— 否则"全员都加载了"会把
+    // 已经离开的人也算进去,状态永远是错的
+    room->dropMemberFiles(session->id());
+
     if (room->isEmpty() || wasHost) {
         // 房主离开:解散房间,通知剩余成员
         json notice;
@@ -380,6 +591,10 @@ bool LogicSystem::removeMemberFromRoomLocked(const std::shared_ptr<Session> &ses
         notice["clientId"] = session->id();
         notice["nickname"] = nickname;
         room->broadcast(notice); // 离开者已移除,自动只发给剩余成员
+
+        // 少了一个人,匹配状态要重算(可能从"未匹配"变成"已匹配")
+        broadcastPlaylistStatus(room);
+
         LOG_INFO("Logic") << "成员离开 " << roomId << ": " << nickname;
 
         // 离开的成员可能带走了不一致的视频,重新计算

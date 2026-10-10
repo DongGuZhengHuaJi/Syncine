@@ -4,12 +4,12 @@
 
 #include "PeerLink.h"
 
-#include <iostream>
 #include <optional>
 #include <sstream>
 #include <string>
 
 #include "WebrtcManager.h"
+#include "core/Log.h"
 
 namespace {
 
@@ -85,8 +85,8 @@ PeerLink::PeerLink(const QString &peerId,
         init.ordered = true;
         auto channel = m_connection->CreateDataChannelOrError("syncine-probe", &init);
         if (!channel.ok()) {
-            std::cerr << "[PeerLink " << m_peerId.toStdString()
-                      << "] 创建数据通道失败: " << channel.error().message() << std::endl;
+            LOG_ERROR("PeerLink") << m_peerId << "创建数据通道失败:"
+                                  << channel.error().message();
         }
     }
 }
@@ -124,8 +124,7 @@ void PeerLink::createOffer() {
         return;
     }
     if (m_pendingOperation != PendingOperation::None) {
-        std::cerr << "[PeerLink " << m_peerId.toStdString()
-                  << "] 上一次协商还没结束,忽略重复的 createOffer" << std::endl;
+        LOG_WARN("PeerLink") << m_peerId << "上一次协商还没结束,忽略重复的 createOffer";
         return;
     }
 
@@ -227,9 +226,8 @@ void PeerLink::addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterf
         return;
 
     if (m_kind != LinkKind::Voice) {
-        std::cerr << "[PeerLink " << m_peerId.toStdString() << ":"
-                  << linkId().toStdString() << "] 麦克风音轨只能在 voice 连接上挂载,已忽略"
-                  << std::endl;
+        LOG_WARN("PeerLink") << (m_peerId + ":" + linkId())
+                             << "麦克风音轨只能在 voice 连接上挂载,已忽略";
         return;
     }
 
@@ -246,14 +244,13 @@ void PeerLink::addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterf
     // "这是语音那条"。取值必须和 kChatStreamId 一致。
     auto sender = m_connection->AddTrack(track, {kChatStreamId});
     if (!sender.ok()) {
-        std::cerr << "[PeerLink " << m_peerId.toStdString()
-                  << "] 添加音轨失败: " << sender.error().message() << std::endl;
+        LOG_ERROR("PeerLink") << m_peerId << "添加音轨失败:" << sender.error().message();
         return;
     }
 
     m_localAudioTrack = track;
 
-    std::cout << "[PeerLink " << m_peerId.toStdString() << "] 已挂载本地音轨" << std::endl;
+    LOG_INFO("PeerLink") << m_peerId << "已挂载本地音轨";
 }
 
 void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterface> track) {
@@ -261,9 +258,8 @@ void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterf
         return;
 
     if (m_kind != LinkKind::Media) {
-        std::cerr << "[PeerLink " << m_peerId.toStdString() << ":"
-                  << linkId().toStdString() << "] 视频轨只能在 media 连接挂载,已忽略"
-                  << std::endl;
+        LOG_WARN("PeerLink") << (m_peerId + ":" + linkId())
+                             << "视频轨只能在 media 连接挂载,已忽略";
         return;
     }
 
@@ -277,14 +273,13 @@ void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterf
     // 在createOffer之前挂视频轨,SDP中会包含相应的m=video段
     auto sender = m_connection->AddTrack(track, {"syncine-video"});
     if (!sender.ok()) {
-        std::cerr << "[PeerLink " << m_peerId.toStdString()
-                  << "] 添加视频轨失败: " << sender.error().message() << std::endl;
+        LOG_ERROR("PeerLink") << m_peerId << "添加视频轨失败:" << sender.error().message();
         return;
     }
 
     m_localVideoTrack = track;
 
-    std::cout << "[PeerLink " << m_peerId.toStdString() << "] 已挂载本地视频轨" << std::endl;
+    LOG_INFO("PeerLink") << m_peerId << "已挂载本地视频轨";
 }
 
 void PeerLink::addLocalMovieAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track) {
@@ -292,9 +287,8 @@ void PeerLink::addLocalMovieAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackI
         return;
 
     if (m_kind != LinkKind::Media) {
-        std::cerr << "[PeerLink " << m_peerId.toStdString() << ":"
-                  << linkId().toStdString() << "] 电影音轨只能在 media 连接挂载,已忽略"
-                  << std::endl;
+        LOG_WARN("PeerLink") << (m_peerId + ":" + linkId())
+                             << "电影音轨只能在 media 连接挂载,已忽略";
         return;
     }
 
@@ -306,14 +300,13 @@ void PeerLink::addLocalMovieAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackI
     // stream id 用 kMovieStreamId —— 接收端就是靠它把这条轨认成"电影"的。
     auto sender = m_connection->AddTrack(track, {kMovieStreamId});
     if (!sender.ok()) {
-        std::cerr << "[PeerLink " << m_peerId.toStdString()
-                  << "] 添加电影音轨失败: " << sender.error().message() << std::endl;
+        LOG_ERROR("PeerLink") << m_peerId << "添加电影音轨失败:" << sender.error().message();
         return;
     }
 
     m_localMovieAudioTrack = track;
 
-    std::cout << "[PeerLink " << m_peerId.toStdString() << "] 已挂载本地电影音轨" << std::endl;
+    LOG_INFO("PeerLink") << m_peerId << "已挂载本地电影音轨";
 }
 
 void PeerLink::setAudioMuted(bool muted) {
@@ -384,8 +377,7 @@ void PeerLink::OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface>
         return;
 
     // 数据通道打通后输出
-    std::cout << "[PeerLink " << m_peerId.toStdString() << "] 收到数据通道: "
-              << channel->label() << std::endl;
+    LOG_INFO("PeerLink") << m_peerId << "收到数据通道:" << channel->label();
     emit connected(m_peerId, linkId());
 }
 
@@ -402,7 +394,7 @@ void PeerLink::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnect
         emitError(QStringLiteral("ICE 连接失败(双方可能不在同一网络)"));
         break;
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionDisconnected:
-        std::cout << "[PeerLink " << m_peerId.toStdString() << "] ICE 断开" << std::endl;
+        LOG_WARN("PeerLink") << m_peerId << "ICE 断开";
         break;
     default:
         break;
@@ -445,10 +437,10 @@ void PeerLink::OnTrack(webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> tr
     // 把能用来"认出这是哪条轨"的线索都打出来,排障用。
     // 注意 track->id() 是 WebRTC 随机生成的 UUID,认不出是谁;
     // 不过现在也不需要认了 —— 轨是从哪条连接来的,它就是什么。
-    std::cout << "[PeerLink " << m_peerId.toStdString() << ":" << linkId().toStdString()
-              << "] 收到远端媒体轨: " << track->kind()
-              << " (mid=" << transceiver->mid().value_or("<无>")
-              << ", streams=[" << describeStreams(receiver) << "])" << std::endl;
+    LOG_INFO("PeerLink") << (m_peerId + ":" + linkId()) << "收到远端媒体轨:"
+                         << track->kind()
+                         << "(mid=" << transceiver->mid().value_or("<无>")
+                         << ", streams=[" << describeStreams(receiver) << "])";
 
     // ---- 音频轨 ----
     //
@@ -470,14 +462,13 @@ void PeerLink::OnTrack(webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> tr
             // 自己播的那条(电影):把轨接到我们的 sink 上,由 MovieAudioPlayer
             // 解码后的 PCM 喂给 QAudioSink。音量也在那边管。
             audioTrack->AddSink(m_remoteAudioSink);
-            std::cout << "[PeerLink " << m_peerId.toStdString() << ":" << linkId().toStdString()
-                      << "] 远端音轨已接到本地播放器" << std::endl;
+            LOG_INFO("PeerLink") << (m_peerId + ":" + linkId()) << "远端音轨已接到本地播放器";
         } else {
             // 交给 WebRTC 放的那条(语音)。本回调就在信令线程上,
             // 正好满足 SetVolume 的线程要求,顺手把当前音量套上。
             setSourceVolume(audioTrack, volume);
-            std::cout << "[PeerLink " << m_peerId.toStdString() << ":" << linkId().toStdString()
-                      << "] 远端音轨交给 WebRTC 播放,音量 " << volume << std::endl;
+            LOG_DEBUG("PeerLink") << (m_peerId + ":" + linkId())
+                                  << "远端音轨交给 WebRTC 播放,音量" << volume;
         }
         return;
     }
@@ -494,15 +485,13 @@ void PeerLink::OnTrack(webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> tr
 
     // 检查是否有视频渲染器
     if (m_remoteVideoSink == nullptr) {
-        std::cout << "[PeerLink " << m_peerId.toStdString()
-                  << "] 收到视频轨,但没有渲染器可接(推流接收未启用)" << std::endl;
+        LOG_WARN("PeerLink") << m_peerId << "收到视频轨,但没有渲染器可接(推流接收未启用)";
         return;
     }
 
     // 将远端视频轨接到渲染器上
     m_remoteVideoTrack->AddOrUpdateSink(m_remoteVideoSink, webrtc::VideoSinkWants{});
-    std::cout << "[PeerLink " << m_peerId.toStdString()
-              << "] 远端视频已接到渲染器" << std::endl;
+    LOG_INFO("PeerLink") << m_peerId << "远端视频已接到渲染器";
 }
 
 void PeerLink::setRemoteVideoSink(webrtc::VideoSinkInterface<webrtc::VideoFrame> *sink) {
@@ -530,9 +519,8 @@ void PeerLink::OnStandardizedIceConnectionChange(webrtc::PeerConnectionInterface
 
 void PeerLink::OnIceCandidateError(const std::string &address, int port, const std::string &url,
                                    int error_code, const std::string &error_text) {
-    std::cerr << "[PeerLink " << m_peerId.toStdString() << "] ICE candidate 出错: "
-              << url << " " << error_code << " " << error_text
-              << " (地址 " << address << ":" << port << ")" << std::endl;
+    LOG_ERROR("PeerLink") << m_peerId << "ICE candidate 出错:" << url << error_code
+                          << error_text << "(地址" << address << ":" << port << ")";
 }
 
 // ---- CreateOffer / CreateAnswer 返回 ----
@@ -554,8 +542,7 @@ void PeerLink::OnSuccess(webrtc::SessionDescriptionInterface *desc) {
             std::string line;
             while (std::getline(lines, line)) {
                 if (line.find("opus") != std::string::npos)
-                    std::cout << "[PeerLink " << m_peerId.toStdString()
-                              << " SDP] " << line << std::endl;
+                    LOG_TRACE("PeerLink") << m_peerId << "SDP:" << line;
             }
         }
     }
@@ -624,6 +611,6 @@ void PeerLink::createAnswer() {
 }
 
 void PeerLink::emitError(const QString &message) {
-    std::cerr << "[PeerLink " << m_peerId.toStdString() << "] " << message.toStdString() << std::endl;
+    LOG_ERROR("PeerLink") << m_peerId << message;
     emit errorOccurred(m_peerId, linkId(), message);
 }

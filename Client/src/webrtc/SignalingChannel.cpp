@@ -4,8 +4,7 @@
 
 #include "SignalingChannel.h"
 
-#include <iostream>
-
+#include "core/Log.h"
 #include "core/NetworkManager.h"
 #include "session/RoomSession.h"
 #include "webrtc/WebrtcManager.h"
@@ -61,7 +60,7 @@ void SignalingChannel::setAudioEnabled(bool enabled) {
     if (m_webrtcManager == nullptr)
         return;
 
-    std::cout << "[SignalingChannel] setAudioEnabled: " << (enabled ? "true" : "false") << std::endl;
+    LOG_DEBUG("Signaling") << "setAudioEnabled:" << enabled;
     m_webrtcManager->setAudioEnabled(enabled);
 }
 
@@ -268,8 +267,7 @@ void SignalingChannel::onMessage(const QString &text) {
         if (link == nullptr) {
             // 收到了一个我们不认识的 answer —— 说明它对应的 offer 不是我们发的,
             // 或者连接已经被拆了。静默忽略,不新建连接(否则会凭空多出一条)。
-            std::cerr << "[信令] 忽略来自未知连接的回答: " << from.toStdString()
-                      << ":" << message->link.toStdString() << std::endl;
+            LOG_WARN("Signaling") << "忽略来自未知连接的回答:" << from << ":" << message->link;
             return;
         }
 
@@ -304,25 +302,21 @@ void SignalingChannel::onMessage(const QString &text) {
 // ============================
 
 void SignalingChannel::onPeerConnected(const QString &peerId, const QString &link) {
-    std::cout << "[信令] 与对端 " << peerId.toStdString()
-              << " 的 " << link.toStdString() << " 连接已建立" << std::endl;
+    LOG_INFO("Signaling") << "与对端" << peerId << "的" << link << "连接已建立";
     emit peerConnected(peerId);
 }
 
 void SignalingChannel::onPeerClosed(const QString &peerId, const QString &link) {
     // 两条连接各自会发这个信号 —— 一条断了不代表对端没了,所以这里不
     // 直接对外报"对端断开",只记日志。真正判断对端是否还在,看成员表。
-    std::cout << "[信令] 对端 " << peerId.toStdString()
-              << " 的 " << link.toStdString() << " 连接已关闭" << std::endl;
+    LOG_DEBUG("Signaling") << "对端" << peerId << "的" << link << "连接已关闭";
 }
 
 void SignalingChannel::onPeerError(const QString &peerId, const QString &link,
                                    const QString &message) {
     // 连接级错误(ICE 失败、协商失败)不弹给用户:网状网里一个人掉线
     // 不该打断其他人。只报给上层,由它决定怎么处理。
-    std::cerr << "[信令] 对端 " << peerId.toStdString() << " 的 "
-              << link.toStdString() << " 连接出错: "
-              << message.toStdString() << std::endl;
+    LOG_ERROR("Signaling") << "对端" << peerId << "的" << link << "连接出错:" << message;
     emit errorOccurred(message);
 }
 

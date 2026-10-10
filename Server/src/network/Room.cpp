@@ -95,6 +95,14 @@ std::shared_ptr<Session> Room::findSession(const std::string &clientId) const {
     return nullptr;
 }
 
+std::shared_ptr<Session> Room::hostSession() const {
+    for (const Member &member : m_members) {
+        if (member.isHost)
+            return member.session;
+    }
+    return nullptr;
+}
+
 void Room::setMemberVideo(const std::shared_ptr<Session> &session, bool loaded,
                           const std::string &hash, long long duration) {
     for (Member &member : m_members) {
@@ -195,11 +203,165 @@ json Room::membersArray() const {
     return array;
 }
 
-json Room::stateJson() const {
-    return {
+json Room::stateJson(bool includePlaylist) const {
+    const Playlist &list = currentPlaylist();
+    json state = {
         {"playing", m_playing},
         {"position", m_position},
     };
+
+    // 播放列表随房间状态一起下发:新成员入房就能看到队列和"现在放到哪一条",
+    // 不需要另开一条同步路径。共享模式下的观众拿空列表(见头文件说明)。
+    state["playlist"] = includePlaylist ? playlistJson() : json::array();
+    state["currentIndex"] = includePlaylist ? list.currentIndex : -1;
+    return state;
+}
+
+// ============================
+// 播放列表
+// ============================
+
+Playlist &Room::currentPlaylist() {
+    return m_playlists[m_mode];
+}
+
+const Playlist &Room::currentPlaylist() const {
+    // 只读路径不建表:这个模式还没被写过的话,返回一个空列表
+    static const Playlist kEmpty;
+    const auto it = m_playlists.find(m_mode);
+    return it != m_playlists.end() ? it->second : kEmpty;
+}
+
+const std::vector<PlaylistEntry> &Room::playlist() const {
+    return currentPlaylist().entries;
+}
+
+int Room::currentIndex() const {
+    return currentPlaylist().currentIndex;
+}
+
+std::string Room::currentItemId() const {
+    const Playlist &list = currentPlaylist();
+    if (list.currentIndex < 0 || list.currentIndex >= static_cast<int>(list.entries.size()))
+        return {};
+    return list.entries[list.currentIndex].itemId;
+}
+
+bool Room::addEntry(const PlaylistEntry &entry) {
+    Playlist &list = currentPlaylist();
+    list.entries.push_back(entry);
+    list.files[entry.itemId]; // 建一个空的上报表,后面成员逐个往里填
+
+    // 这个模式的列表还没有"当前条目"(本来是空的)→ 第一条自动成为当前。
+    // 否则添加只是往队列后面排队,不打断正在放的片子。
+    if (list.currentIndex < 0) {
+        list.currentIndex = static_cast<int>(list.entries.size()) - 1;
+        return true;
+    }
+    return false;
+}
+
+bool Room::removeEntry(const std::string &itemId) {
+    Playlist &list = currentPlaylist();
+    for (auto it = list.entries.begin(); it != list.entries.end(); ++it) {
+        if (it->itemId != itemId)
+            continue;
+
+        const int removedIndex = static_cast<int>(std::distance(list.entries.begin(), it));
+        list.entries.erase(it);
+        list.files.erase(itemId);
+
+        if (list.entries.empty()) {
+            list.currentIndex = -1;
+        } else if (removedIndex < list.currentIndex) {
+            --list.currentIndex;
+        } else if (removedIndex == list.currentIndex
+                   && list.currentIndex >= static_cast<int>(list.entries.size())) {
+            // 删掉的正好是当前条目:顺延到下一条(已经是最后一条就退回新的最后一条)
+            list.currentIndex = static_cast<int>(list.entries.size()) - 1;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool Room::switchTo(const std::string &itemId) {
+    Playlist &list = currentPlaylist();
+    for (size_t i = 0; i < list.entries.size(); ++i) {
+        if (list.entries[i].itemId != itemId)
+            continue;
+        list.currentIndex = static_cast<int>(i);
+        return true;
+    }
+    return false;
+}
+
+void Room::setMemberFile(const std::string &clientId, const std::string &itemId,
+                         bool hasFile, const std::string &hash) {
+    currentPlaylist().files[itemId][clientId] = MemberFile{hasFile, hash};
+}
+
+void Room::dropMemberFiles(const std::string &clientId) {
+    for (auto &[mode, list] : m_playlists) {
+        for (auto &[itemId, reporters] : list.files)
+            reporters.erase(clientId);
+    }
+}
+
+std::string Room::itemStatus(const std::string &itemId) const {
+    const Playlist &list = currentPlaylist();
+
+    if (m_members.empty())
+        return "missing";
+
+    const auto itemIt = list.files.find(itemId);
+    bool haveHash = false;
+    std::string commonHash;
+
+    // 逐成员看:还差一个没文件就是"未匹配";都有文件再比内容哈希
+    for (const Member &member : m_members) {
+        const std::string clientId = member.session->id();
+
+        bool hasFile = false;
+        std::string hash;
+        if (itemIt != list.files.end()) {
+            const auto reportIt = itemIt->second.find(clientId);
+            if (reportIt != itemIt->second.end()) {
+                hasFile = reportIt->second.hasFile;
+                hash = reportIt->second.hash;
+            }
+        }
+
+        if (!hasFile)
+            return "missing";
+
+        if (!hash.empty()) {
+            if (!haveHash) {
+                commonHash = hash;
+                haveHash = true;
+            } else if (hash != commonHash) {
+                return "mismatch";
+            }
+        }
+    }
+
+    return "matched";
+}
+
+json Room::playlistJson() const {
+    json array = json::array();
+    for (const PlaylistEntry &entry : currentPlaylist().entries) {
+        array.push_back({
+            {"itemId", entry.itemId},
+            {"title", entry.title},
+            {"url", entry.url},
+            {"duration", entry.duration},
+            {"addedBy", entry.addedBy},
+            // 匹配状态由服务端聚合(它才知道所有成员的情况),客户端直接用
+            {"status", itemStatus(entry.itemId)},
+        });
+    }
+    return array;
 }
 
 void Room::broadcast(const json &message, const std::shared_ptr<Session> &except) {

@@ -246,6 +246,10 @@ qt_add_executable(Syncine
         src/main.cpp
 
         # core:传输 + 协议(不认识房间,也不认识播放器)
+        src/core/Log.cpp
+        src/core/Log.h
+        src/core/MediaHash.cpp
+        src/core/MediaHash.h
         src/core/NetworkManager.cpp
         src/core/NetworkManager.h
         src/core/Protocol.cpp
@@ -261,6 +265,8 @@ qt_add_executable(Syncine
         # session:房间与会话
         src/session/MemberModel.cpp
         src/session/MemberModel.h
+        src/session/PlaylistModel.cpp
+        src/session/PlaylistModel.h
         src/session/RoomSession.cpp
         src/session/RoomSession.h
         src/session/SessionController.cpp
@@ -332,6 +338,12 @@ qt_add_qml_module(Syncine
         ui/components/MessageDialog.qml
         ui/components/AppTextField.qml
         ui/components/ModeButton.qml
+        ui/components/AppIcon.qml
+        ui/components/ControlButton.qml
+        ui/components/VolumeButton.qml
+        ui/components/DanmakuBar.qml
+        ui/components/DanmakuLayer.qml
+        ui/components/FunctionPanel.qml
         ui/components/VideoPlayer.qml
         ui/components/PlaybackControl.qml
         ui/components/PlaybackSeekControl.qml

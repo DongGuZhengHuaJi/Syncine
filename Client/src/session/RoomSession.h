@@ -16,12 +16,14 @@
 
 #include <QObject>
 #include <QString>
+#include <QUrl>
 
 #include <qqmlintegration.h>
 
 #include "core/Protocol.h"
 #include "core/RoomTypes.h"
 #include "session/MemberModel.h"
+#include "session/PlaylistModel.h"
 
 class NetworkManager;
 
@@ -59,6 +61,11 @@ class RoomSession : public QObject {
                READ members
                CONSTANT)
 
+    // 播放列表(房间共享的队列 + 本机自己的文件映射),同上
+    Q_PROPERTY(PlaylistModel *playlist
+               READ playlist
+               CONSTANT)
+
     Q_PROPERTY(bool videoMismatched
                READ videoMismatched
                NOTIFY videoMismatchChanged)
@@ -68,9 +75,13 @@ class RoomSession : public QObject {
                NOTIFY videoMismatchChanged)
 
 public:
-    // 三种观影模式:本地文件 / 房主共享媒体流 / 网链
+    // 三种观影模式:同步 / 房主共享媒体流 / 网链
+    //
+    // 同步模式 = 大家各自都有同一部片子(以前叫"本地模式"),播放状态实时同步。
+    // 线路格式仍是 "local" —— 服务端不认识"同步"这个词,改名只改客户端这一侧,
+    // 映射集中在 modeToWire / modeFromWire 两个函数里。
     enum class RoomMode {
-        Local,
+        Sync,
         Share,
         Url
     };
@@ -94,8 +105,14 @@ public:
     RoomMode roomMode() const;
     bool isHost() const;
     MemberModel *members() const;
+    PlaylistModel *playlist() const;
     bool videoMismatched() const;
     qint64 shortestDuration() const;
+
+    // 某条目在本机对应的文件路径(空 = 没有)。PlaybackSync 解析播放源时用
+    QString localFileFor(const QString &itemId) const;
+    // 某条目的网链地址(空 = 这一条没有 URL)
+    QString urlFor(const QString &itemId) const;
 
     // 除自己之外的成员是否都已加载视频(本地模式门禁用)
     bool allOthersLoaded() const;
@@ -111,6 +128,21 @@ public:
     // ---- QML 调用的房间内操作 ----
     Q_INVOKABLE void setRoomMode(RoomMode mode);
     Q_INVOKABLE void sendChat(const QString &text);
+
+    // ---- 播放列表(QML 调用) ----
+    //
+    // 本地文件路径不进协议:addLocalFile / assignLocalFile 只把路径记在本地
+    // (itemId → 本机文件),服务端只收到条目的标题。
+    // 本地模式下每个人都要为自己那条选一次文件,共享模式下只有房主的映射有意义。
+    // 注意参数是 QUrl 而不是 QString:QML 的 FileDialog.selectedFile 是 url 类型,
+    // 传 QString 会被转成 "file:///..." 字符串,后续当路径用(读文件、算哈希)
+    // 全部失效 —— 媒体加载失败、匹配状态永远"未匹配"就是这么来的。
+    // 让 QML 原样传 QUrl,C++ 里 toLocalFile() 拿干净路径。
+    Q_INVOKABLE void addLocalFile(const QUrl &fileUrl);
+    Q_INVOKABLE void addUrl(const QString &url, const QString &title);
+    Q_INVOKABLE void assignLocalFile(const QString &itemId, const QUrl &fileUrl);
+    Q_INVOKABLE void removeFromPlaylist(const QString &itemId);
+    Q_INVOKABLE void switchTo(const QString &itemId);
 
     // ---- 供 PlaybackSync 调用 ----
     void sendPlayback(PlaybackAction action, qint64 position);
@@ -141,6 +173,11 @@ signals:
     void chatReceived(const QString &from, const QString &text);
     void playbackCommandReceived(RoomSession::PlaybackAction action, qint64 position);
 
+    // 当前条目变了(或者原本的条目刚被指定了本机文件)—— 各端据此重新解析
+    // "这一条从哪儿来":本地/共享房主去读本地文件,网链读 url,观众什么都不做。
+    // itemId 为空表示当前没有条目(列表空了),此时应该把播放器卸载掉。
+    void playlistSwitched(const QString &itemId);
+
     // 收到房主的位置广播(不是命令 —— 只用于更新界面,不驱动本地播放器)
     void playbackPositionReceived(qint64 position, bool playing);
 
@@ -155,6 +192,11 @@ private:
     void handlePlayback(const Protocol::Message &message);
     void handleVideoStatus(const Protocol::Message &message);
     void handleVideoMismatch(const Protocol::Message &message);
+    void handlePlaylistChanged(const Protocol::Message &message);
+    void handlePlaylistSwitched(const Protocol::Message &message);
+    void handlePlaylistStatus(const Protocol::Message &message);
+    // 上报"这一条我这台机器上有没有文件"(只有同步模式发,服务端靠它算匹配状态)
+    void reportPlaylistFile(const QString &itemId, const QString &path);
 
     // 成员表变化后统一重算派生量,避免每个分支各写一遍 emit
     void refreshDerivedState();
@@ -168,13 +210,14 @@ private:
 
     NetworkManager *m_networkManager = nullptr;
     MemberModel *m_members = nullptr;
+    PlaylistModel *m_playlist = nullptr;
 
     QString m_roomId;
     QString m_roomName;
     QString m_clientId;
     bool m_inRoom = false;
     bool m_isHost = false;
-    RoomMode m_roomMode = RoomMode::Local;
+    RoomMode m_roomMode = RoomMode::Sync;
     bool m_videoMismatched = false;
     qint64 m_shortestDuration = 0;
 };

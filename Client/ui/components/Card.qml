@@ -1,25 +1,19 @@
 import QtQuick
 import SyncineApp
 
+// 白卡片:一整块白底 + 1px 边框,没有阴影。
+//
+// 2026-10-10 去掉了原来那层偏移 8px 的投影 —— 浅色扁平风里
+// 投影是"AI 味"的主要来源,边框已经足够把卡片和页面底分开。
 Item {
     id: root
 
     default property alias content: bodyContent.data
     property int padding: Style.cardPadding
     property color backgroundColor: Style.card
-    property bool shadowed: true
 
     implicitWidth: bodyContent.childrenRect.width + padding * 2
     implicitHeight: bodyContent.childrenRect.height + padding * 2
-
-    Rectangle {
-        visible: root.shadowed
-        anchors.fill: body
-        anchors.topMargin: 8
-        radius: Style.radius
-        color: "#1B2434"
-        opacity: 0.05
-    }
 
     Rectangle {
         id: body

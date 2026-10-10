@@ -10,7 +10,7 @@ Item {
         anchors.margins: 24
         width: statusRow.implicitWidth + 28
         height: 32
-        radius: 16
+        radius: Style.radius
         color: Style.card
         border.width: 1
         border.color: Style.border
@@ -46,7 +46,7 @@ Item {
             anchors.horizontalCenter: parent.horizontalCenter
             width: 88
             height: 88
-            radius: 24
+            radius: 8
             color: Style.accent
 
             Canvas {
@@ -78,12 +78,12 @@ Item {
 
         Item { width: 1; height: 12 }
 
-        Label {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: "与好友一起,同步每一帧"
-            font.pixelSize: 16
-            color: Style.textSecondary
-        }
+        // Label {
+        //     anchors.horizontalCenter: parent.horizontalCenter
+        //     text: "与好友一起,同步每一帧"
+        //     font.pixelSize: 16
+        //     color: Style.textSecondary
+        // }
 
         Item { width: 1; height: 52 }
 
@@ -95,10 +95,9 @@ Item {
                 id: createCard
                 width: 268
                 height: 164
-                radius: 22
-                color: Style.accent
-                scale: createArea.containsMouse ? 1.03 : 1.0
-                Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                radius: 6
+                // 悬停只改颜色,不做缩放 —— 缩放在桌面端反而显得飘
+                color: createArea.containsMouse ? Style.accentHover : Style.accent
 
                 Column {
                     anchors.centerIn: parent
@@ -108,7 +107,7 @@ Item {
                         anchors.horizontalCenter: parent.horizontalCenter
                         width: 44
                         height: 44
-                        radius: 22
+                        radius: 6
                         color: "#33FFFFFF"
 
                         Rectangle {
@@ -162,12 +161,10 @@ Item {
                 id: joinCard
                 width: 268
                 height: 164
-                radius: 22
+                radius: 6
                 color: Style.card
-                border.width: joinArea.containsMouse ? 2 : 1
+                border.width: 1
                 border.color: joinArea.containsMouse ? Style.accent : Style.border
-                scale: joinArea.containsMouse ? 1.03 : 1.0
-                Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
 
                 Column {
                     anchors.centerIn: parent
@@ -177,7 +174,7 @@ Item {
                         anchors.horizontalCenter: parent.horizontalCenter
                         width: 44
                         height: 44
-                        radius: 22
+                        radius: 6
                         color: Style.accentSoft
 
                         Canvas {
@@ -233,12 +230,12 @@ Item {
 
         Item { width: 1; height: 44 }
 
-        Label {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: "免费 · 无需注册 · 即开即用"
-            font.pixelSize: 12
-            color: Style.textSecondary
-            opacity: 0.7
-        }
+        // Label {
+        //     anchors.horizontalCenter: parent.horizontalCenter
+        //     text: "免费 · 无需注册 · 即开即用"
+        //     font.pixelSize: 12
+        //     color: Style.textSecondary
+        //     opacity: 0.7
+        // }
     }
 }

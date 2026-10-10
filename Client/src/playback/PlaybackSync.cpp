@@ -73,6 +73,10 @@ PlaybackSync::PlaybackSync(RoomSession *session,
             this, &PlaybackSync::onRoomChanged);
     connect(m_session, &RoomSession::left,
             this, &PlaybackSync::onRoomChanged);
+
+    // 房间的"当前条目"变了 —— 播放源由这里决定,是唯一会调用 load/unload 的地方
+    connect(m_session, &RoomSession::playlistSwitched,
+            this, &PlaybackSync::onPlaylistSwitched);
     connect(m_session, &RoomSession::entered,
             this, [this]() {
                 // 进房之前可能就已经加载好视频了,补报一次,
@@ -183,7 +187,7 @@ PlaybackSync::BlockReason PlaybackSync::blockReason() const {
 
     // 只有本地模式需要"全员加载完才能播":
     // 共享/网链模式下视频由房主提供,不存在成员各加载各的
-    if (m_session->roomMode() != RoomSession::RoomMode::Local)
+    if (m_session->roomMode() != RoomSession::RoomMode::Sync)
         return BlockReason::None;
 
     if (!m_playback->hasLoaded())
@@ -247,7 +251,7 @@ void PlaybackSync::onRoomChanged() {
     //   本地模式           → 自己的画面(每人各自加载各自的文件)
     //   共享/网链 + 房主   → 自己的画面(房主就是推流的那一方)
     //   共享/网链 + 非房主 → 远端画面(房主推过来的)
-    const bool isLocal = (m_session->roomMode() == RoomSession::RoomMode::Local);
+    const bool isLocal = (m_session->roomMode() == RoomSession::RoomMode::Sync);
     m_showRemote = !isLocal && !m_session->isHost();
 
     m_playback->setShowingRemote(m_showRemote);
@@ -255,11 +259,67 @@ void PlaybackSync::onRoomChanged() {
     // 观众端的时长来自房主的 video_status(成员表里就有)
     m_syncedDuration = hostDuration();
 
+    // 模式变了,"这一条从哪儿来"也跟着变:本地/共享读本地文件,网链读 URL。
+    // 重新解析一次当前条目(没有当前条目时是空串,等价于卸载)
+    applyPlaylistItem(m_session->playlist()->currentItemId());
+
     emit durationChanged();
     emit seekableChanged();
     emit positionChanged();
     emit playingChanged();
     emit gateChanged();
+}
+
+void PlaybackSync::onPlaylistSwitched(const QString &itemId) {
+    if (m_session == nullptr || m_playback == nullptr)
+        return;
+
+    // 切集不自动播:位置归零、停在暂停,由用户按播放(和"换了部片子"的直觉一致)
+    m_syncedPosition = 0;
+    m_syncedPlaying = false;
+    emit positionChanged();
+    emit playingChanged();
+
+    applyPlaylistItem(itemId);
+    emit gateChanged();
+}
+
+void PlaybackSync::applyPlaylistItem(const QString &itemId) {
+    if (itemId.isEmpty()) {
+        // 列表空了:把播放器卸载掉,画面回到"请先加载视频"
+        m_playback->unload();
+        return;
+    }
+
+    const RoomSession::RoomMode mode = m_session->roomMode();
+
+    // 共享模式的观众不加载任何东西 —— 画面是房主推过来的,
+    // 本地文件在他们机器上根本不存在
+    if (mode == RoomSession::RoomMode::Share && !m_session->isHost()) {
+        m_playback->unload();
+        return;
+    }
+
+    if (mode == RoomSession::RoomMode::Url) {
+        const QString url = m_session->urlFor(itemId);
+        if (url.isEmpty()) {
+            m_playback->unload();
+            return;
+        }
+        m_playback->load(QUrl(url));
+        return;
+    }
+
+    // 本地模式 / 共享模式的房主:读本机文件映射
+    const QString path = m_session->localFileFor(itemId);
+    if (path.isEmpty()) {
+        // 还没给这一条指定本机文件 —— 清空播放器,门禁会挡住播放,
+        // 界面提示"请选择文件"
+        m_playback->unload();
+        return;
+    }
+
+    m_playback->load(QUrl::fromLocalFile(path));
 }
 
 void PlaybackSync::onPositionTimer() {
@@ -270,7 +330,7 @@ void PlaybackSync::onPositionTimer() {
     // 其余时刻这个定时器空转,开销可忽略。
     if (!m_session->inRoom() || !m_session->isHost())
         return;
-    if (m_session->roomMode() == RoomSession::RoomMode::Local)
+    if (m_session->roomMode() == RoomSession::RoomMode::Sync)
         return;
     if (!m_playback->playing())
         return;

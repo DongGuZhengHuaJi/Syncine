@@ -12,6 +12,8 @@
 #include <QVideoFrameFormat>
 #include <QVideoSink>
 
+#include "core/Log.h"
+
 #include "api/video/i420_buffer.h"
 
 RemoteVideoRenderer::RemoteVideoRenderer(QObject *parent)
@@ -59,9 +61,7 @@ void RemoteVideoRenderer::OnDiscardedFrame() {
     // 编码器丢弃了某一帧(通常是网络拥塞时降帧率)。
     // 界面上表现为轻微卡顿,不需要特殊处理 —— 但要能看见发生了。
     if (++m_discardedCount % 30 == 1) {
-        std::fprintf(stderr, "[RemoteVideoRenderer] 已丢弃 %d 帧(拥塞)\n",
-                     m_discardedCount);
-        std::fflush(stderr);
+        LOG_DEBUG("RemoteVideo") << "已丢弃" << m_discardedCount << "帧(拥塞)";
     }
 }
 
@@ -85,9 +85,8 @@ void RemoteVideoRenderer::deliverPendingFrame() {
     // [诊断] 定期打一次,看是"收不到"还是"收到了但没显示"
     static int seen = 0;
     if (seen < 10) {
-        std::fprintf(stderr, "[诊断] RemoteVideoRenderer 渲染第 %d 帧, targetSink = %p\n",
-                     seen + 1, (void *)m_targetSink);
-        std::fflush(stderr);
+        LOG_TRACE("RemoteVideo") << "渲染第" << (seen + 1)
+                                 << "帧, targetSink =" << (void *) m_targetSink;
     }
     ++seen;
 
@@ -147,8 +146,6 @@ void RemoteVideoRenderer::deliverPendingFrame() {
     m_targetSink->setVideoFrame(qtFrame);
 
     if (m_frameCount++ == 0) {
-        std::fprintf(stderr, "[RemoteVideoRenderer] 收到第一帧远端画面: %dx%d\n",
-                     width, height);
-        std::fflush(stderr);
+        LOG_INFO("RemoteVideo") << "收到第一帧远端画面:" << width << "x" << height;
     }
 }

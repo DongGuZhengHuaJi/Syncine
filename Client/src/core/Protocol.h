@@ -30,6 +30,9 @@ enum class MessageType {
     RoomModeChanged,
     VideoStatus,
     VideoMismatch,
+    PlaylistChanged,    // 列表内容变了(增/删);带完整列表 + currentIndex
+    PlaylistSwitched,   // 当前条目变了;各端据此重新解析"这一条从哪儿来"
+    PlaylistStatus,     // 各条目的匹配状态(服务端聚合后下发)
 
     // WebRTC 信令
     WebrtcOffer,
@@ -56,6 +59,11 @@ struct Message {
     QList<Member> members;
     bool videoMismatched = false;
     qint64 shortestDuration = 0;
+
+    // playlist_changed / playlist_switched / state.playlist
+    QList<PlaylistEntry> playlist;
+    int currentIndex = -1;
+    QString itemId;
 
     // member_joined / member_left(clientId + 下面这几个字段)
     QString nickname;
@@ -115,6 +123,22 @@ QString encodePlayback(const QString &action, qint64 position);
 QString encodePlaybackPosition(qint64 position, bool playing);
 
 QString encodeVideoStatus(bool loaded, const QString &hash, qint64 duration);
+
+// ---- 播放列表 ----
+// itemId 由客户端生成(UUID),服务端只保证不重复。
+// 本地文件路径**不进协议** —— 那是各人自己的事(见 docs/playlist-design.md)
+QString encodePlaylistAdd(const QString &itemId,
+                          const QString &title,
+                          const QString &url,
+                          qint64 duration);
+
+QString encodePlaylistRemove(const QString &itemId);
+
+QString encodePlaylistSwitch(const QString &itemId);
+
+// 同步模式下成员上报"这一条我这台机器上有没有文件"。
+// hash 由 MediaHash::forFile 算,和 video_status 用的是同一套算法
+QString encodePlaylistStatus(const QString &itemId, bool hasFile, const QString &hash);
 
 // link:"voice" / "media",见 Message::link 的说明
 QString encodeWebrtcOffer(const QString &to, const QString &link, const QString &sdp);

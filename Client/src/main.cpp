@@ -8,6 +8,7 @@
 
 #include "rtc_base/logging.h"
 
+#include "core/Log.h"
 #include "core/NetworkManager.h"
 #include "playback/PlaybackController.h"
 #include "playback/PlaybackSync.h"
@@ -18,6 +19,12 @@
 
 int main(int argc, char *argv[]) {
     QGuiApplication app(argc, argv);
+
+    // 日志最先打开:后面每个对象构造时打的日志都要落进文件。
+    // 默认输出到 ~/.local/share/Syncine/logs/,
+    // 级别用 SYNCINE_LOG_LEVEL 调(trace/debug/info/warn/error),
+    // 目录用 SYNCINE_LOG_DIR 覆盖。
+    Log::init(QStringLiteral("syncine"));
 
     // 诊断开关:设了 SYNCINE_WEBRTC_LOG=1 才打开 WebRTC 自己的日志。
     //
@@ -87,6 +94,22 @@ int main(int argc, char *argv[]) {
     QObject::connect(&roomSession, &RoomSession::roomModeChanged,
                      &app, updateMovieAudioEnabled);
 
+    // 「电影音量」是**一个**值,要同时管住两个出声的地方:
+    //
+    //   本地模式 / 共享模式的房主 → 声音来自本机播放器(m_audioOutput)
+    //   共享模式的观众           → 声音来自房主推过来的那条电影音轨(MovieAudioPlayer)
+    //
+    // 对用户来说都是"电影的音量",不该因为身处哪个模式就分成两个控件 ——
+    // 界面上只有一个滑条(绑在 SignalingChannel.movieVolume 上),所以在这里
+    // 把它扇出到本机播放器。缺了这行,本地模式下拖滑条是没反应的(听的是自己的播放器,
+    // 而滑条改的是远端音轨那个音量)。
+    auto applyMovieVolume = [&playbackController, &signalingChannel] {
+        playbackController.setVolume(signalingChannel.movieVolume());
+    };
+    QObject::connect(&signalingChannel, &SignalingChannel::movieVolumeChanged,
+                     &app, applyMovieVolume);
+    applyMovieVolume(); // 启动先对齐一次(默认 1.0)
+
     // 接收:把渲染器的落点交给 PlaybackController 保管。
     //
     // **不能**在这里直接 setRemoteVideoSink(playbackController.displayVideoSink()) ——
@@ -98,7 +121,7 @@ int main(int argc, char *argv[]) {
 
     QObject::connect(&signalingChannel, &SignalingChannel::errorOccurred, &app,
                      [](const QString &message) {
-                         qWarning() << "信令:" << message;
+                         LOG_WARN("Signaling") << message;
                      });
 
     engine.rootContext()->setContextProperty("networkManager", &networkManager);
@@ -112,5 +135,7 @@ int main(int argc, char *argv[]) {
         "qrc:/qt/qml/SyncineApp/ui/Main.qml"
     )));
 
-    return app.exec();
+    const int exitCode = app.exec();
+    Log::shutdown();
+    return exitCode;
 }

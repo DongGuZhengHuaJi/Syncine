@@ -247,5 +247,8 @@ RoomSnapshot SessionController::snapshotFrom(const Protocol::Message &message) c
     snapshot.position = message.position;
     snapshot.videoMismatched = message.videoMismatched;
     snapshot.shortestDuration = message.shortestDuration;
+    // 播放列表随 state 一起下发 —— 漏了这两行,入房的人会看到一个空列表
+    snapshot.playlist = message.playlist;
+    snapshot.currentIndex = message.currentIndex;
     return snapshot;
 }

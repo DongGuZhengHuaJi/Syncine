@@ -4,12 +4,11 @@
 
 #include "WebrtcManager.h"
 
-#include <iostream>
-
 #include <QDebug>
 #include <QVideoFrame>
 
 #include "MovieAudioPlayer.h"
+#include "core/Log.h"
 #include "api/audio/create_audio_device_module.h"
 #include "api/audio_codecs/audio_decoder_factory.h"
 #include "api/audio_codecs/audio_encoder_factory.h"
@@ -48,7 +47,7 @@ bool startThreadSet(std::unique_ptr<webrtc::Thread> &network,
     worker = webrtc::Thread::Create();
 
     if (!network->Start() || !signaling->Start() || !worker->Start()) {
-        std::cerr << "[WebrtcManager] " << which << " 线程启动失败" << std::endl;
+        LOG_ERROR("WebRTC") << which << "线程启动失败";
         // 线程启动失败，直接关闭
         network->Stop();
         signaling->Stop();
@@ -208,19 +207,19 @@ bool WebrtcManager::initialize(const std::vector<std::string> &stunServers) {
     m_mediaEnvironment.emplace(webrtc::CreateEnvironment());
     m_dummyAdm = webrtc::CreateAudioDeviceModule(*m_mediaEnvironment, webrtc::AudioDeviceModule::kDummyAudio);
     if (m_dummyAdm == nullptr) {
-        std::cerr << "[WebrtcManager] 创建假声卡失败，放弃初始化" << std::endl;
+        LOG_ERROR("WebRTC") << "创建假声卡失败,放弃初始化";
         m_mediaEnvironment.reset();
         return false;
     }
 
     if (!initializeVoiceFactory()) {
-        std::cerr << "[WebrtcManager] 初始化 voice 工厂失败，放弃初始化" << std::endl;
+        LOG_ERROR("WebRTC") << "初始化 voice 工厂失败,放弃初始化";
         return false;
     }
 
     if (!initializeMediaFactory()) {
-        std::cerr << "[WebrtcManager] 初始化 media 工厂失败，放弃初始化" << std::endl;
-        m_dummyAdm.release();
+        LOG_ERROR("WebRTC") << "初始化 media 工厂失败,放弃初始化";
+        m_dummyAdm = nullptr;
         m_mediaEnvironment.reset();
         destroy();
         return false;
@@ -228,19 +227,21 @@ bool WebrtcManager::initialize(const std::vector<std::string> &stunServers) {
 
     m_stunServers = stunServers;
     m_initialized = true;
+    LOG_INFO("WebRTC") << "WebRTC 初始化成功";
 
     // 预创建各条轨
     if (getOrCreateAudioTrack() == nullptr) {
-        std::cerr << "[WebrtcManager] 音轨预创建失败,本次运行将没有语音功能" << std::endl;
+        LOG_WARN("WebRTC") << "推流语音轨预创建失败,本次运行将无法共享麦克风声音";
     }
     if (getOrCreateVideoTrack() == nullptr) {
-        std::cerr << "[WebrtcManager] 视频轨预创建失败,本次运行将没有画面共享" << std::endl;
+        LOG_WARN("WebRTC") << "推流视频轨预创建失败,本次运行将无法共享视频画面";
     }
     if (getOrCreateMovieAudioTrack() == nullptr) {
-        std::cerr << "[WebrtcManager] 电影音轨预创建失败,本次运行将没有电影声音" << std::endl;
+        LOG_WARN("WebRTC") << "推流音频轨预创建失败,本次运行将没有共享视频声音";
     }
 
     // 预创建共享模式下接收侧的画面渲染器和声音播放器
+    // todo: 实现音画同步
     m_remoteRenderer = std::make_unique<RemoteVideoRenderer>();
     m_movieAudioPlayer = std::make_unique<MovieAudioPlayer>();
     m_movieAudioPlayer->setVolume(m_remoteMovieVolume);
@@ -259,7 +260,7 @@ PeerLink *WebrtcManager::createLink(const QString &peerId, LinkKind kind,
         isVoice ? m_voiceFactory : m_mediaFactory;
 
     if (factory == nullptr) {
-        std::cerr << "[WebrtcManager] "<<(isVoice?"voice":"media")<<" 工厂为空,无法建立连接" << std::endl;
+        LOG_ERROR("WebRTC") << (isVoice ? "voice" : "media") << "工厂为空,无法建立连接";
         return nullptr;
     }
 
@@ -272,7 +273,7 @@ PeerLink *WebrtcManager::createLink(const QString &peerId, LinkKind kind,
 
     auto *link = new PeerLink(peerId, kind, factory, config, createDataChannel, this);
     if (!link->isValid()) {
-        std:: cerr << "[WebrtcManager] "<<(isVoice?"voice":"media")<<" 连接创建失败,已放弃" << std::endl;
+        LOG_ERROR("WebRTC") << (isVoice ? "voice" : "media") << "连接创建失败,已放弃";
         delete link;
         return nullptr;
     }
@@ -306,12 +307,12 @@ PeerLink *WebrtcManager::createLink(const QString &peerId, LinkKind kind,
 
 bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataChannel) {
     if (!m_initialized) {
-        std::cerr << "[WebrtcManager] 尚未初始化,无法建立对端连接" << std::endl;
+        LOG_ERROR("WebRTC") << "尚未初始化,无法建立对端连接";
         return false;
     }
 
     if (peerId.isEmpty()) {
-        std::cerr << "[WebrtcManager] 对端 ID 为空,无法建立连接" << std::endl;
+        LOG_WARN("WebRTC") << "对端 ID 为空,无法建立连接";
         return false;
     }
 
@@ -324,9 +325,9 @@ bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataC
     links.media = createLink(peerId, LinkKind::Media, /*createDataChannel=*/false);
 
     if (links.voice == nullptr || links.media == nullptr) {
-        std::cerr << "[WebrtcManager] 对端 " << peerId.toStdString()
-                  << " 的连接建立失败(voice=" << (links.voice ? "ok" : "fail")
-                  << ", media=" << (links.media ? "ok" : "fail") << ")" << std::endl;
+        LOG_ERROR("WebRTC") << "对端" << peerId << "的连接建立失败(voice:"
+                            << (links.voice ? "ok" : "fail")
+                            << "media:" << (links.media ? "ok" : "fail") << ")";
         if (links.voice != nullptr) {
             links.voice->close();
             links.voice->deleteLater();
@@ -339,8 +340,8 @@ bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataC
     }
 
     m_peers.insert(peerId, links);
-    std::cout << "[WebrtcManager] 已建立对端连接: " << peerId.toStdString()
-              << "(两条:voice + media,当前共 " << m_peers.size() << " 个对端)" << std::endl;
+    LOG_INFO("WebRTC") << "已建立对端连接:" << peerId << "(两条:voice + media,当前共"
+                       << m_peers.size() << "个对端)";
     return true;
 }
 
@@ -358,8 +359,8 @@ void WebrtcManager::removePeer(const QString &peerId) {
     }
 
     if (links.voice != nullptr || links.media != nullptr) {
-        std::cout << "[WebrtcManager] 已移除对端连接: " << peerId.toStdString()
-                  << "(剩余 " << m_peers.size() << " 个对端)" << std::endl;
+        LOG_INFO("WebRTC") << "已移除对端连接:" << peerId << "(剩余" << m_peers.size()
+                           << "个对端)";
     }
 }
 
@@ -385,7 +386,7 @@ webrtc::scoped_refptr<webrtc::AudioTrackInterface> WebrtcManager::getOrCreateAud
         return m_localAudioTrack;
 
     if (m_voiceFactory == nullptr || !m_initialized) {
-        std::cerr << "[WebrtcManager] 尚未初始化或 voice 工厂未创建,无法创建音轨" << std::endl;
+        LOG_ERROR("WebRTC") << "尚未初始化或 voice 工厂未创建,无法创建音轨";
         return nullptr;
     }
 
@@ -403,19 +404,20 @@ webrtc::scoped_refptr<webrtc::AudioTrackInterface> WebrtcManager::getOrCreateAud
 
         m_audioSource = m_voiceFactory->CreateAudioSource(options);
         if (m_audioSource == nullptr) {
-            std::cerr << "[WebrtcManager] 创建音频源失败" << std::endl;
+            LOG_ERROR("WebRTC") << "创建音频源失败";
             return nullptr;
         }
     }
 
     m_localAudioTrack = m_voiceFactory->CreateAudioTrack("syncine-mic", m_audioSource.get());
     if (m_localAudioTrack == nullptr) {
-        std::cerr << "[WebrtcManager] 创建音轨失败" << std::endl;
+        LOG_ERROR("WebRTC") << "创建音轨失败";
         return nullptr;
     }
 
     m_localAudioTrack->set_enabled(false);
 
+    LOG_INFO("WebRTC") << "推流语音轨已创建";
     return m_localAudioTrack;
 }
 
@@ -431,8 +433,8 @@ void WebrtcManager::setAudioEnabled(bool enabled) {
 
     track->set_enabled(enabled);
 
-    std::cout << "[WebrtcManager] 麦克风已" << (enabled ? "开启" : "关闭")
-              << "(当前 " << m_peers.size() << " 个对端)" << std::endl;
+    LOG_INFO("WebRTC") << "麦克风已" << (enabled ? "开启" : "关闭") << "(当前"
+                       << m_peers.size() << "个对端)";
     emit audioEnabledChanged(enabled);
 }
 
@@ -455,15 +457,16 @@ void WebrtcManager::setMovieAudioEnabled(bool enabled) {
 
     m_localMovieAudioTrack->set_enabled(enabled);
 
-    std::cout << "[WebrtcManager] 电影音轨已" << (enabled ? "开启" : "关闭")
-              << "(当前 " << m_peers.size() << " 个对端)" << std::endl;
+    // 这条跟着播放/暂停走,频率不低,放 Debug
+    LOG_DEBUG("WebRTC") << "电影音轨已" << (enabled ? "开启" : "关闭") << "(当前"
+                        << m_peers.size() << "个对端)";
     emit movieAudioEnabledChanged(enabled);
 }
 
 void WebrtcManager::pushMovieAudioPcm(const int16_t *data, size_t samplesPerChannel,
                                       int sampleRate, size_t channels) {
     if (m_movieAudioSource == nullptr) {
-        std:: cerr <<  "[WebrtcManager] 接收侧音频播放器未创建,无法推送 PCM" << std::endl;
+        LOG_WARN("WebRTC") << "接收侧音频播放器未创建,无法推送 PCM";
         return;
     }
 
@@ -475,7 +478,7 @@ webrtc::scoped_refptr<webrtc::AudioTrackInterface> WebrtcManager::getOrCreateMov
         return m_localMovieAudioTrack;
 
     if (m_mediaFactory == nullptr || !m_initialized) {
-        std::cerr << "[WebrtcManager] 尚未初始化或 media 工厂未创建,无法创建音轨" << std::endl;
+        LOG_ERROR("WebRTC") << "尚未初始化或 media 工厂未创建,无法创建音轨";
         return nullptr;
     }
 
@@ -487,13 +490,13 @@ webrtc::scoped_refptr<webrtc::AudioTrackInterface> WebrtcManager::getOrCreateMov
     m_localMovieAudioTrack = m_mediaFactory->CreateAudioTrack(
         "syncine-movie", m_movieAudioSource.get());
     if (m_localMovieAudioTrack == nullptr) {
-        std::cerr << "[WebrtcManager] 创建电影音轨失败" << std::endl;
+        LOG_ERROR("WebRTC") << "创建电影音轨失败";
         return nullptr;
     }
 
     m_localMovieAudioTrack->set_enabled(false);
 
-    std::cout << "[WebrtcManager] 电影音轨已创建" << std::endl;
+    LOG_INFO("WebRTC") << "推流音频轨已创建";
     return m_localMovieAudioTrack;
 }
 
@@ -548,8 +551,8 @@ void WebrtcManager::pushVideoFrame(const webrtc::VideoFrame &frame) {
 void WebrtcManager::pushQtVideoFrame(const QVideoFrame &frame) {
     static int n = 0;
     if (n < 3 || n % 300 == 0) {
-        qDebug() << "[诊断] pushQtVideoFrame 第" << (n + 1) << "帧,"
-                 << "videoSource =" << (void *) m_videoSource.get();
+        LOG_TRACE("WebRTC") << "pushQtVideoFrame 第" << (n + 1) << "帧, videoSource ="
+                            << (void *) m_videoSource.get();
     }
     ++n;
 
@@ -578,7 +581,7 @@ webrtc::scoped_refptr<webrtc::VideoTrackInterface> WebrtcManager::getOrCreateVid
         return m_localVideoTrack;
 
     if (m_mediaFactory == nullptr || !m_initialized) {
-        std::cerr << "[WebrtcManager] 尚未初始化或 media 工厂未创建,无法创建视频轨" << std::endl;
+        LOG_ERROR("WebRTC") << "尚未初始化或 media 工厂未创建,无法创建视频轨";
         return nullptr;
     }
 
@@ -586,11 +589,11 @@ webrtc::scoped_refptr<webrtc::VideoTrackInterface> WebrtcManager::getOrCreateVid
 
     m_localVideoTrack = m_mediaFactory->CreateVideoTrack(m_videoSource, "syncine-video");
     if (m_localVideoTrack == nullptr) {
-        std::cerr << "[WebrtcManager] 创建视频轨失败" << std::endl;
+        LOG_ERROR("WebRTC") << "创建视频轨失败";
         return nullptr;
     }
 
-    std::cout << "[WebrtcManager] 视频轨已创建" << std::endl;
+    LOG_INFO("WebRTC") << "推流视频轨已创建";
     return m_localVideoTrack;
 }
 
@@ -620,7 +623,7 @@ bool WebrtcManager::initializeVoiceFactory() {
     );
 
     if (m_voiceFactory == nullptr) {
-        std::cerr << "[WebrtcManager] 创建 voice 工厂失败" << std::endl;
+        LOG_ERROR("WebRTC") << "创建 voice 工厂失败";
         stopThreadSet(m_voiceNetworkThread, m_voiceWorkerThread, m_voiceSignalingThread);
         return false;
     }
@@ -647,7 +650,7 @@ bool WebrtcManager::initializeMediaFactory() {
     );
 
     if (m_mediaFactory == nullptr) {
-        std::cerr << "[WebrtcManager] 创建 media 工厂失败" << std::endl;
+        LOG_ERROR("WebRTC") << "创建 media 工厂失败";
         stopThreadSet(m_mediaNetworkThread, m_mediaWorkerThread, m_mediaSignalingThread);
         return false;
     }

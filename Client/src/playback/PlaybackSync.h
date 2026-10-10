@@ -106,9 +106,12 @@ private slots:
     void onMediaChanged();
     void onRoomChanged();
     void onPositionTimer();
+    void onPlaylistSwitched(const QString &itemId);
 
 private:
     void pushVideoStatus();
+    // 按当前模式解析某一条的播放源并加载;没有可用的源就把播放器卸载掉
+    void applyPlaylistItem(const QString &itemId);
     void updateSyncedState(qint64 position, bool playing);
     // 从成员表里取房主的视频时长(观众端的 duration 来源)
     qint64 hostDuration() const;

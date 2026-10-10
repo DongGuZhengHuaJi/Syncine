@@ -9,11 +9,12 @@
 #include <QAudioDevice>
 #include <QAudioFormat>
 #include <QAudioSink>
-#include <QDebug>
 #include <QIODevice>
 #include <QMediaDevices>
 #include <QMutex>
 #include <QMutexLocker>
+
+#include "core/Log.h"
 
 namespace {
 
@@ -148,15 +149,14 @@ void MovieAudioPlayer::startSink() {
 
     QAudioDevice device = QMediaDevices::defaultAudioOutput();
     if (device.isNull()) {
-        qWarning() << "[MovieAudioPlayer] 没有可用的音频输出设备,电影声将无处播放";
+        LOG_WARN("MovieAudio") << "没有可用的音频输出设备,电影声将无处播放";
         return;
     }
 
     if (!device.isFormatSupported(format)) {
         // 不是致命错误:QAudioSink 会自己转。但采样率/声道对不上时
         // 音调和速度会不对,所以还是喊一声。
-        qWarning() << "[MovieAudioPlayer] 输出设备不直接支持 48kHz 单声道,"
-                   << "交由 Qt 转换(可能有细微音质损失)";
+        LOG_WARN("MovieAudio") << "输出设备不直接支持 48kHz 单声道,交由 Qt 转换(可能有细微音质损失)";
     }
 
     m_sink = std::make_unique<QAudioSink>(device, format, this);
@@ -167,12 +167,12 @@ void MovieAudioPlayer::startSink() {
     //  所以下面把状态和错误码打出来,启动失败时能一眼看出来。)
     m_sink->start(m_device.get());
 
-    qDebug() << "[MovieAudioPlayer] 已启动:"
+    LOG_INFO("MovieAudio") << "已启动:"
              << kSampleRate << "Hz" << kChannels << "声道, 缓冲"
              << kSinkBufferMs << "ms, 设备:" << device.description()
-             << ", 音量" << m_sink->volume()
-             << ", 状态" << static_cast<int>(m_sink->state()) // 状态0正常
-             << ", 错误" << static_cast<int>(m_sink->error());
+             << "音量" << m_sink->volume()
+             << "状态" << static_cast<int>(m_sink->state()) // 状态0正常
+             << "错误" << static_cast<int>(m_sink->error());
 }
 
 void MovieAudioPlayer::setVolume(double volume) {
@@ -215,7 +215,7 @@ void MovieAudioPlayer::OnData(const void *audio_data,
     if (bits_per_sample != 16 || sample_rate != kSampleRate
         || number_of_channels != kChannels) {
         if (m_droppedCount == 0) {
-            qWarning() << "[MovieAudioPlayer] 收到的音频格式不符合预期,已丢弃:"
+            LOG_WARN("MovieAudio") << "收到的音频格式不符合预期,已丢弃:"
                        << bits_per_sample << "bit" << sample_rate << "Hz"
                        << number_of_channels << "声道";
         }
@@ -241,12 +241,12 @@ void MovieAudioPlayer::OnData(const void *audio_data,
                 peak = v;
         }
 
-        qDebug() << "[MovieAudioPlayer] 第" << (m_frameCount + 1) << "帧: 峰值" << peak
-                 << ", 队列积压" << m_device->queuedBytes() << "字节"
-                 << ", 音量" << volume()
-                 << ", sink 状态" << (m_sink ? static_cast<int>(m_sink->state()) : -1)
-                 << ", sink 错误" << (m_sink ? static_cast<int>(m_sink->error()) : -1)
-                 << ", 丢帧" << m_device->droppedForLag();
+        LOG_TRACE("MovieAudio") << "第" << (m_frameCount + 1) << "帧: 峰值" << peak
+                 << "队列积压" << m_device->queuedBytes() << "字节"
+                 << "音量" << volume()
+                 << "sink 状态" << (m_sink ? static_cast<int>(m_sink->state()) : -1)
+                 << "sink 错误" << (m_sink ? static_cast<int>(m_sink->error()) : -1)
+                 << "丢帧" << m_device->droppedForLag();
     }
     ++m_frameCount;
 }

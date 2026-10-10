@@ -28,6 +28,9 @@ MessageType typeFromString(const QString &type) {
         {"room_mode_changed", MessageType::RoomModeChanged},
         {"video_status", MessageType::VideoStatus},
         {"video_mismatch", MessageType::VideoMismatch},
+        {"playlist_changed", MessageType::PlaylistChanged},
+        {"playlist_switched", MessageType::PlaylistSwitched},
+        {"playlist_status", MessageType::PlaylistStatus},
         {"webrtc_offer", MessageType::WebrtcOffer},
         {"webrtc_answer", MessageType::WebrtcAnswer},
         {"webrtc_ice", MessageType::WebrtcIce},
@@ -49,6 +52,26 @@ Member memberFromJson(const QJsonObject &object) {
     member.loaded = object.value("loaded").toBool(false);
     member.duration = int64Of(object, "duration");
     return member;
+}
+
+PlaylistEntry playlistEntryFromJson(const QJsonObject &object) {
+    PlaylistEntry entry;
+    entry.itemId = object.value("itemId").toString();
+    entry.title = object.value("title").toString();
+    entry.url = object.value("url").toString();
+    entry.duration = int64Of(object, "duration");
+    entry.addedBy = object.value("addedBy").toString();
+    entry.status = object.value("status").toString();
+    return entry;
+}
+
+QList<PlaylistEntry> playlistFromJson(const QJsonValue &value) {
+    QList<PlaylistEntry> entries;
+    const QJsonArray array = value.toArray();
+    entries.reserve(array.size());
+    for (const QJsonValue &item : array)
+        entries.append(playlistEntryFromJson(item.toObject()));
+    return entries;
 }
 
 QString serialize(const QJsonObject &object) {
@@ -100,6 +123,10 @@ std::optional<Message> decode(const QString &text) {
         message.hasState = !state.isEmpty();
         message.playing = state.value("playing").toBool();
         message.position = int64Of(state, "position");
+        message.playlist = playlistFromJson(state.value("playlist"));
+        message.currentIndex = state.contains("currentIndex")
+                                   ? state.value("currentIndex").toInt(-1)
+                                   : -1;
         break;
     }
 
@@ -140,6 +167,22 @@ std::optional<Message> decode(const QString &text) {
     case MessageType::VideoMismatch:
         message.videoMismatched = object.value("mismatched").toBool(false);
         message.shortestDuration = int64Of(object, "shortestDuration");
+        break;
+
+    case MessageType::PlaylistChanged:
+        message.playlist = playlistFromJson(object.value("items"));
+        message.currentIndex = object.value("currentIndex").toInt(-1);
+        break;
+
+    case MessageType::PlaylistSwitched:
+        message.itemId = object.value("itemId").toString();
+        message.currentIndex = object.value("currentIndex").toInt(-1);
+        break;
+
+    case MessageType::PlaylistStatus:
+        // 服务端聚合后下发的形式:items[] 里每条只有 itemId + status。
+        // 复用 PlaylistEntry 承载(其余字段为空),客户端只取这两个
+        message.playlist = playlistFromJson(object.value("items"));
         break;
 
     case MessageType::WebrtcOffer:
@@ -233,6 +276,46 @@ QString encodeVideoStatus(bool loaded, const QString &hash, qint64 duration) {
     message["loaded"] = loaded;
     message["hash"] = loaded ? hash : QString();
     message["duration"] = loaded ? duration : 0;
+    return serialize(message);
+}
+
+QString encodePlaylistAdd(const QString &itemId,
+                          const QString &title,
+                          const QString &url,
+                          qint64 duration) {
+    QJsonObject message;
+    message["type"] = "playlist_add";
+    message["itemId"] = itemId;
+    message["title"] = title;
+    // url / duration 是可选信息,空着就不发,省得服务端存一堆空字段
+    if (!url.isEmpty())
+        message["url"] = url;
+    if (duration > 0)
+        message["duration"] = duration;
+    return serialize(message);
+}
+
+QString encodePlaylistRemove(const QString &itemId) {
+    QJsonObject message;
+    message["type"] = "playlist_remove";
+    message["itemId"] = itemId;
+    return serialize(message);
+}
+
+QString encodePlaylistSwitch(const QString &itemId) {
+    QJsonObject message;
+    message["type"] = "playlist_switch";
+    message["itemId"] = itemId;
+    return serialize(message);
+}
+
+QString encodePlaylistStatus(const QString &itemId, bool hasFile, const QString &hash) {
+    QJsonObject message;
+    message["type"] = "playlist_status";
+    message["itemId"] = itemId;
+    message["hasFile"] = hasFile;
+    if (hasFile)
+        message["hash"] = hash;
     return serialize(message);
 }
 

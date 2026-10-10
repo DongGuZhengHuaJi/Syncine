@@ -5,8 +5,9 @@
 #include "MovieAudioSource.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <optional>
+
+#include "core/Log.h"
 
 #include "api/rtp_packet_infos.h"
 
@@ -20,9 +21,8 @@ void MovieAudioSource::AddSink(webrtc::AudioTrackSinkInterface *sink) {
     // 这里有日志很重要:WebRTC 是在 AddTrack 时把自己的发送适配器挂进来的。
     // 如果这行**从未出现**,说明挂载没发生 —— 那么 pushPcm 会扇出给一个空表,
     // 数据就此消失(对端只会收到 WebRTC 自己产生的静音)。
-    std::printf("[MovieAudioSource] WebRTC 已挂入发送适配器 %p(当前 %zu 个)\n",
-                static_cast<void *>(sink), m_sinks.size());
-    std::fflush(stdout);
+    LOG_INFO("MovieAudio") << "WebRTC 已挂入发送适配器" << static_cast<void *>(sink)
+                           << "(当前" << m_sinks.size() << "个)";
 }
 
 void MovieAudioSource::RemoveSink(webrtc::AudioTrackSinkInterface *sink) {
@@ -79,9 +79,8 @@ void MovieAudioSource::pushPcm(const int16_t *data, size_t samplesPerChannel,
             if (v > peak)
                 peak = v;
         }
-        std::printf("[MovieAudioSource] 第 %d 次推送: 扇出给 %zu 个 sink, 峰值 %d\n",
-                    pushCount + 1, m_sinks.size(), peak);
-        std::fflush(stdout);
+        LOG_TRACE("MovieAudio") << "第" << (pushCount + 1) << "次推送: 扇出给"
+                                << m_sinks.size() << "个 sink, 峰值" << peak;
     }
     ++pushCount;
 

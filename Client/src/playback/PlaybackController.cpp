@@ -14,7 +14,9 @@
 // 只为了转发"远端渲染器该往哪个 sink 写"这一条信息。
 // 本类不知道 WebRTC 的任何细节 —— 那是 WebrtcManager 的事。
 #include "webrtc/WebrtcManager.h"
-#include <QDebug>
+
+#include "core/Log.h"
+#include "core/MediaHash.h"
 
 PlaybackController::PlaybackController(QObject *parent)
     : QObject(parent)
@@ -182,22 +184,12 @@ QString PlaybackController::hash() const {
         return QString();
 
     const QUrl source = m_player->source();
-    QByteArray data;
-    if (source.isLocalFile()) {
-        // 内容哈希:512KB
-        QFile file(source.toLocalFile());
-        if (!file.open(QIODevice::ReadOnly))
-            return QString();
-        data = file.read(512 * 1024);
-        data.append(QByteArray::number(file.size()));
-    } else {
-        // 非本地源暂以 URL 代替
-        data = source.toString().toUtf8();
-    }
+    // 算法在 MediaHash 里,和播放列表上报 playlist_status 用的是同一份 ——
+    // 两处不一致的话,"同不同步"的判断就会互相打架
+    if (source.isLocalFile())
+        return MediaHash::forFile(source.toLocalFile());
 
-    const QByteArray hashData =
-        QCryptographicHash::hash(data, QCryptographicHash::Sha256);
-    return QString(hashData.toHex());
+    return MediaHash::forText(source.toString());
 }
 
 
@@ -223,8 +215,8 @@ void PlaybackController::onVideoFrame(const QVideoFrame &frame) {
     // 诊断:前 10 帧 + 每 300 帧打印一次
     static int count = 0;
     if (count < 10 || count % 300 == 0) {
-        qDebug() << "[诊断] onVideoFrame 第" << (count + 1) << "帧"
-                 << frame.width() << "x" << frame.height();
+        LOG_TRACE("Playback") << "onVideoFrame 第" << (count + 1) << "帧"
+                              << frame.width() << "x" << frame.height();
     }
     ++count;
 
@@ -257,7 +249,7 @@ void PlaybackController::onMovieAudioBuffer(const QAudioBuffer &buffer) {
             }
         }
 
-        qDebug() << "[诊断] 电影音频第" << (count + 1) << "帧:"
+        LOG_TRACE("Playback") << "电影音频第" << (count + 1) << "帧:"
                  << buffer.frameCount() << "采样/声道,"
                  << format.sampleRate() << "Hz,"
                  << format.channelCount() << "声道,"
@@ -297,7 +289,7 @@ void PlaybackController::bindVideoOutput(QVideoSink *sink) {
     if (m_webrtcManager != nullptr)
         m_webrtcManager->setRemoteVideoSink(m_outputSink);
 
-    qDebug() << "视频输出端已绑定:" << sink;
+    LOG_DEBUG("Playback") << "视频输出端已绑定:" << sink;
     emit displayVideoSinkChanged();
 }
 
@@ -336,7 +328,7 @@ void PlaybackController::applyVideoSink() {
         if (m_webrtcManager != nullptr)
             m_webrtcManager->setRemoteVideoEnabled(true);
 
-        qDebug() << "[诊断] applyVideoSink: 显示远端,播放器已脱钩";
+        LOG_DEBUG("Playback") << "applyVideoSink: 显示远端,播放器已脱钩";
     } else {
         // 显示本地画面,播放器往 sink 送帧
         m_player->setVideoSink(m_outputSink);
@@ -345,8 +337,8 @@ void PlaybackController::applyVideoSink() {
         if (m_webrtcManager != nullptr)
             m_webrtcManager->setRemoteVideoEnabled(false);
 
-        qDebug() << "[诊断] applyVideoSink: 显示本地,播放器 →" << m_outputSink
-                 << " 实际生效:" << m_player->videoSink();
+        LOG_DEBUG("Playback") << "applyVideoSink: 显示本地,播放器 →" << m_outputSink
+                              << "实际生效:" << m_player->videoSink();
     }
 }
 
@@ -361,7 +353,7 @@ void PlaybackController::load(const QUrl &source)
     if (!source.isValid())
         return;
 
-    qDebug() << "Loading media:" << source;
+    LOG_INFO("Playback") << "加载媒体:" << source;
 
     m_player->setSource(source);
     emit sourceChanged();
