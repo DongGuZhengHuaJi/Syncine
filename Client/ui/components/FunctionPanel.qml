@@ -20,6 +20,8 @@ Rectangle {
     signal commentSubmitted(string text)
     // 用户要往播放列表里加东西 → 由 RoomPage 弹文件选择框
     signal addRequested()
+    // 网链模式加条目要粘链接、挑画质 → 由 RoomPage 弹那个两页的窗口
+    signal urlAddRequested()
     // 要给某一条指定本机文件(本地模式下每人补自己的那一份)
     signal localFileRequested(string itemId)
 
@@ -272,10 +274,18 @@ Rectangle {
             // 网链模式大家读的是同一个 URL,都不存在"你有没有这一条"
             readonly property bool showsMatching: roomSession.roomMode === RoomSession.Sync
 
-            function subtitleFor(dur, url) {
+            // 网链模式:加条目要粘链接、挑画质,交给 RoomPage 的弹窗
+            // (同步模式还是走"选本地文件"的对话框)
+            readonly property bool isUrlMode: roomSession.roomMode === RoomSession.Url
+
+            function subtitleFor(dur, url, isLive, quality) {
                 const parts = []
-                parts.push(dur > 0 ? Style.formatTime(dur) : "--:--")
+                // 直播没有时长:标"直播"
+                parts.push(isLive ? "直播" : (dur > 0 ? Style.formatTime(dur) : "--:--"))
                 parts.push(url !== "" ? "网链" : "本地文件")
+                // 档位:0 = 最高(不显示,免得每条都拖一句"最高画质")
+                if (url !== "" && quality > 0)
+                    parts.push(quality + "P")
                 return parts.join(" · ")
             }
 
@@ -329,7 +339,15 @@ Rectangle {
                         anchors.margins: -6
                         cursorShape: root.canAddToPlaylist ? Qt.PointingHandCursor
                                                            : Qt.ArrowCursor
-                        onClicked: if (root.canAddToPlaylist) root.addRequested()
+                        onClicked: {
+                            if (!root.canAddToPlaylist)
+                                return
+                            // 网链模式:弹"粘链接 + 选画质"的窗口;其它模式:选本机文件
+                            if (playlistTab.isUrlMode)
+                                root.urlAddRequested()
+                            else
+                                root.addRequested()
+                        }
                     }
                 }
             }
@@ -346,7 +364,12 @@ Rectangle {
 
                 delegate: Item {
                     width: playlistList.width
-                    height: 54
+
+                    // 显示错误信息的属性
+                    readonly property bool showError: playlistTab.isUrlMode && isCurrent
+                                                      && playbackSync.downloadStage === "failed"
+
+                    height: 54 + (showError ? errorColumn.implicitHeight + 14 : 0)
 
                     Rectangle {
                         anchors.fill: parent
@@ -363,8 +386,13 @@ Rectangle {
                         acceptedButtons: Qt.NoButton
                     }
 
+                    // 行内容固定在顶部 54px:失败时下面还要摊开错误信息,
+                    // 不能让这一行跟着整块高度一起居中
                     RowLayout {
-                        anchors.fill: parent
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        height: 54
                         anchors.leftMargin: 10
                         anchors.rightMargin: 14
                         spacing: 8
@@ -400,7 +428,7 @@ Rectangle {
                                 spacing: 6
 
                                 Text {
-                                    text: playlistTab.subtitleFor(duration, url)
+                                    text: playlistTab.subtitleFor(duration, url, live, quality)
                                     font.pixelSize: 11
                                     color: Style.textFaint
                                 }
@@ -412,6 +440,33 @@ Rectangle {
                                     font.pixelSize: 11
                                     color: playlistTab.statusColor(status)
                                 }
+                            }
+                        }
+
+                        // 网链模式:当前条目的准备状态(解析中/下载中 42%/合并中/失败)
+                        Text {
+                            visible: playlistTab.isUrlMode && isCurrent
+                                     && playbackSync.downloadStageText !== ""
+                            Layout.alignment: Qt.AlignVCenter
+                            text: playbackSync.downloadStageText
+                            font.pixelSize: 11
+                            color: playbackSync.downloadStage === "failed"
+                                   ? Style.danger : Style.textFaint
+                        }
+
+                        // 失败时给一个重试(每个人下自己的那份,所以谁都能点)
+                        Text {
+                            visible: playlistTab.isUrlMode && isCurrent
+                                     && playbackSync.downloadStage === "failed"
+                            Layout.alignment: Qt.AlignVCenter
+                            text: "重试"
+                            font.pixelSize: 12
+                            color: Style.accent
+                            MouseArea {
+                                anchors.fill: parent
+                                anchors.margins: -6
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: playbackSync.retryCurrentItem()
                             }
                         }
 
@@ -478,6 +533,34 @@ Rectangle {
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: roomSession.removeFromPlaylist(itemId)
                             }
+                        }
+                    }
+
+                    Column {
+                        id: errorColumn
+                        visible: showError
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.topMargin: 50
+                        anchors.leftMargin: 14
+                        anchors.rightMargin: 14
+                        spacing: 4
+
+                        Text {
+                            width: parent.width
+                            text: playbackSync.downloadError
+                            wrapMode: Text.Wrap
+                            font.pixelSize: 11
+                            color: Style.danger
+                        }
+
+                        Text {
+                            width: parent.width
+                            text: "如果反复失败,试试更新 yt-dlp(命令见 tools/README.md)"
+                            wrapMode: Text.Wrap
+                            font.pixelSize: 11
+                            color: Style.textFaint
                         }
                     }
                 }

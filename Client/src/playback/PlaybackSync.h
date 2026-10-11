@@ -29,6 +29,7 @@
 #include "session/RoomSession.h"
 
 class PlaybackController;
+class UrlDownloader;
 
 class PlaybackSync : public QObject {
     Q_OBJECT
@@ -61,6 +62,35 @@ class PlaybackSync : public QObject {
                READ seekable
                NOTIFY seekableChanged)
 
+    // ---- 网链模式的准备进度(给界面显示) ----
+    // 解析中 / 下载中 / 合并中 / 就绪 / 失败。共享模式和同步模式下恒为空。
+    Q_PROPERTY(QString downloadStage
+               READ downloadStage
+               NOTIFY downloadStateChanged)
+
+    Q_PROPERTY(int downloadProgress
+               READ downloadProgress
+               NOTIFY downloadStateChanged)
+
+    Q_PROPERTY(QString downloadDetail
+               READ downloadDetail
+               NOTIFY downloadStateChanged)
+
+    Q_PROPERTY(QString downloadError
+               READ downloadError
+               NOTIFY downloadStateChanged)
+
+    // 状态的中文文案("解析中…"/"下载中 42% · 8.2MB/s"/"合并中…"/"下载失败")。
+    // 放在 C++ 里是为了让播放器提示和列表条目用的是同一份文案,不会两处各写一遍。
+    Q_PROPERTY(QString downloadStageText
+               READ downloadStageText
+               NOTIFY downloadStateChanged)
+
+    // 当前条目是不是直播源。界面用它把进度条/时间换成"直播"标识。
+    Q_PROPERTY(bool live
+               READ live
+               NOTIFY liveChanged)
+
 public:
     // 门禁不放行的原因。只给语义,具体文案留给 QML(界面的事归界面)
     enum class BlockReason {
@@ -72,11 +102,22 @@ public:
 
     PlaybackSync(RoomSession *session,
                  PlaybackController *playback,
+                 UrlDownloader *urlDownloader,
                  QObject *parent = nullptr);
     ~PlaybackSync() override = default;
 
     bool canPlay() const;
     BlockReason blockReason() const;
+
+    QString downloadStage() const;
+    int downloadProgress() const;
+    QString downloadDetail() const;
+    QString downloadError() const;
+    QString downloadStageText() const;
+    bool live() const;
+
+    // 网链模式:重新准备当前条目(解析或下载失败后点"重试")
+    Q_INVOKABLE void retryCurrentItem();
 
     // ---- 统一状态 ----
     qint64 duration() const;
@@ -97,6 +138,8 @@ signals:
     void positionChanged();
     void playingChanged();
     void seekableChanged();
+    void downloadStateChanged();
+    void liveChanged();
 
 private slots:
     void onLocalPlayingChanged();
@@ -107,17 +150,29 @@ private slots:
     void onRoomChanged();
     void onPositionTimer();
     void onPlaylistSwitched(const QString &itemId);
+    // 网链模式:解析出直链(路径 A,秒开)或开始下载合并(路径 B)
+    void onUrlProbed();
+    void onUrlReady(const QString &filePath);
 
 private:
     void pushVideoStatus();
     // 按当前模式解析某一条的播放源并加载;没有可用的源就把播放器卸载掉
     void applyPlaylistItem(const QString &itemId);
+    // 网链模式:准备某一条(解析 → 直链播放 或 下载合并)
+    void prepareUrlItem(const QString &itemId);
+    // 清掉上一个条目的临时文件(不做持久缓存)
+    void cleanupPreparedItem();
     void updateSyncedState(qint64 position, bool playing);
     // 从成员表里取房主的视频时长(观众端的 duration 来源)
     qint64 hostDuration() const;
 
     RoomSession *m_session = nullptr;
     PlaybackController *m_playback = nullptr;
+    UrlDownloader *m_urlDownloader = nullptr;
+
+    // 网链模式:正在准备(解析/下载)的条目,和已经准备好、临时文件还在的条目
+    QString m_preparingItemId;
+    QString m_preparedItemId;
 
     // 正在执行远端命令 —— 这期间播放器产生的变化都算"远端造成的",
     // 不是用户操作,不能再广播回去(否则 A→B→A 无限回声)

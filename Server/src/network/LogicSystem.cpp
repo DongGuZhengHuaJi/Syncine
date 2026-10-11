@@ -386,6 +386,8 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
             entry.title = message.value("title", "");
             entry.url = message.value("url", "");
             entry.duration = message.value("duration", 0LL);
+            entry.live = message.value("live", false);
+            entry.quality = message.value("quality", 0);
             entry.addedBy = session->id();
 
             if (entry.itemId.empty() || entry.title.empty()) {

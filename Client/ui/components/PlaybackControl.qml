@@ -160,19 +160,31 @@ Rectangle {
                 Layout.rightMargin: 4
                 spacing: 2
 
+                // 直播:没有总时长,也没有可拖的时间轴 —— 直接标出来
                 Text {
+                    visible: playbackSync.live
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "● 直播"
+                    color: Style.accent
+                    font.pixelSize: 12
+                }
+
+                Text {
+                    visible: !playbackSync.live
                     text: Style.formatTime(playbackSync.position)
                     color: Style.playerIcon
                     font.pixelSize: 12
                 }
 
                 Text {
+                    visible: !playbackSync.live
                     text: "/"
                     color: Style.playerIconDim
                     font.pixelSize: 12
                 }
 
                 Text {
+                    visible: !playbackSync.live
                     text: Style.formatTime(playbackSync.duration)
                     color: Style.playerIconDim
                     font.pixelSize: 12

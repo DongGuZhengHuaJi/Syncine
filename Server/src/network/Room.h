@@ -29,6 +29,13 @@ struct PlaylistEntry {
     std::string url;      // 可选,网链模式的源
     long long duration = 0; // 加载过一次之后才知道(video_status 回报),0 表示未知
     std::string addedBy;  // 添加者的 clientId
+    // 直播:没有时长、不能下载合并(没有"下完"这一刻),各端都靠 QMediaPlayer
+    // 直接拉流。服务端只存这个标志并转发,不解释它。
+    bool live = false;
+    // 画质档位(高度上限,0 = 最高)。**条目级**而不是个人偏好:各人各自下载
+    // 自己那份,档位不一致会导致内容哈希不同、被判"不同步"。
+    // 服务端同样只存转发,不解释它。
+    int quality = 0;
 };
 
 // 某成员对某条目"我这台机器上有没有对应文件"的上报(只有同步模式用得上):

@@ -101,9 +101,31 @@ PlaybackController::PlaybackController(QObject *parent)
         [this](QMediaPlayer::Error,
                const QString &errorString) {
 
+            LOG_WARN("Playback") << "播放器报错:" << errorString;
             emit errorOccurred(errorString);
         }
     );
+
+    // 播放状态变化。**网络流(尤其是直播)卡顿只有从这里看得出来**:
+    // StalledMedia = 等数据等停了(网络的锅),BufferingMedia = 在重新缓冲。
+    // 没有这条日志的话,"卡了"只能靠猜。放 Debug:正常播放时它很安静,
+    // 只在状态真的变时才打一行。
+    connect(m_player, &QMediaPlayer::mediaStatusChanged, this,
+            [](QMediaPlayer::MediaStatus status) {
+                const char *text = nullptr;
+                switch (status) {
+                case QMediaPlayer::NoMedia: text = "无媒体"; break;
+                case QMediaPlayer::LoadingMedia: text = "加载中"; break;
+                case QMediaPlayer::LoadedMedia: text = "已加载"; break;
+                case QMediaPlayer::StalledMedia: text = "卡住了(等数据)"; break;
+                case QMediaPlayer::BufferingMedia: text = "缓冲中"; break;
+                case QMediaPlayer::BufferedMedia: text = "缓冲够用"; break;
+                case QMediaPlayer::EndOfMedia: text = "播完了"; break;
+                case QMediaPlayer::InvalidMedia: text = "媒体无效"; break;
+                }
+                if (text != nullptr)
+                    LOG_DEBUG("Playback") << "播放状态:" << text;
+            });
 }
 
 

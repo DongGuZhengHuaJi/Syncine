@@ -3,6 +3,7 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QTimer>
 #include <QUrl>
 #include <QVideoFrame>
 
@@ -10,6 +11,8 @@
 
 #include "core/Log.h"
 #include "core/NetworkManager.h"
+#include "core/Toolchain.h"
+#include "core/UrlDownloader.h"
 #include "playback/PlaybackController.h"
 #include "playback/PlaybackSync.h"
 #include "session/RoomSession.h"
@@ -43,12 +46,25 @@ int main(int argc, char *argv[]) {
     PlaybackController playbackController;
     WebrtcManager webrtcManager;
 
+    // 外部命令行工具(yt-dlp / ffmpeg)的定位与自检。只在网链模式用得上,
+    // 但启动时就把结果记进日志 —— "为什么下载失败"最常见的原因就是它俩没就位。
+    Toolchain toolchain;
+
     // ---- 房间与会话 ----
     RoomSession roomSession(&networkManager);
     SessionController sessionController(&networkManager, &roomSession);
 
+    // ---- 网链模式:把链接变成能播的媒体 ----
+    //
+    // 两个实例,互不干扰:
+    //   playbackDownloader —— 跟着房间的"当前条目"走,由 PlaybackSync 驱动
+    //   uiDownloader       —— 加条目时"粘贴链接 → 看标题/时长"用,界面直接调
+    // 共用一个的话,一边在解析时另一边就被挡掉了。
+    UrlDownloader playbackDownloader(&toolchain);
+    UrlDownloader uiDownloader(&toolchain);
+
     // ---- 播放同步:唯一同时持有「房间」和「播放器」的地方 ----
-    PlaybackSync playbackSync(&roomSession, &playbackController);
+    PlaybackSync playbackSync(&roomSession, &playbackController, &playbackDownloader);
 
     // ---- WebRTC 信令:房间 <-> WebRTC 状态机 ----
     SignalingChannel signalingChannel(&roomSession, &networkManager, &webrtcManager);
@@ -153,6 +169,13 @@ int main(int argc, char *argv[]) {
     engine.rootContext()->setContextProperty("sessionController", &sessionController);
     engine.rootContext()->setContextProperty("playbackSync", &playbackSync);
     engine.rootContext()->setContextProperty("signalingChannel", &signalingChannel);
+    // 界面用的下载器:只负责"加条目"时的解析(标题/时长/能不能直链)
+    engine.rootContext()->setContextProperty("urlDownloader", &uiDownloader);
+
+    // 外部工具链(yt-dlp / ffmpeg)。先让它去自检 —— 版本探测是异步的
+    // (yt-dlp 是 PyInstaller 包,启动要几百毫秒),不会卡住界面。
+    QTimer::singleShot(1200, &toolchain, &Toolchain::detect);
+    engine.rootContext()->setContextProperty("toolchain", &toolchain);
 
     engine.load(QUrl(QStringLiteral(
         "qrc:/qt/qml/SyncineApp/ui/Main.qml"

@@ -146,6 +146,13 @@ Item {
         id: messageDialog
     }
 
+    // 网链模式加条目:选来源 → 粘链接 + 挑画质。
+    // 声明在这里而不是 FunctionPanel 里:Popup 的坐标以"声明它的那个 Item"为基准,
+    // 挂在 336 宽的面板里会偏到侧栏上(见 AddVideoDialog 里的说明)
+    AddVideoDialog {
+        id: addVideoDialog
+    }
+
     FileDialog {
         id: fileDialog
 
@@ -196,6 +203,7 @@ Item {
 
         // 服务端断开(或被动离开)时,弹回上一页
         function onLeft() {
+            addVideoDialog.close()   // 房间都没了,开着的加条目窗口不该留着
             if (leaving)
                 return
             const win = root.Window.window
@@ -364,48 +372,6 @@ Item {
                 }
             }
         }
-
-        Row {
-            anchors.right: parent.right
-            anchors.rightMargin: 14
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: 8
-
-            Button {
-                id: loadVideoBtn
-                width: 85
-                height: 30
-                hoverEnabled: true
-
-                contentItem: Row {
-                    anchors.centerIn: parent
-                    spacing: 5
-
-                    AppIcon {
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: 14
-                        height: 14
-                        name: "folder-plus"
-                        color: "#FFFFFF"
-                    }
-
-                    Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: "加载视频"
-                        font.pixelSize: 13
-                        color: "#FFFFFF"
-                    }
-                }
-
-                background: Rectangle {
-                    radius: Style.radiusSmall
-                    color: loadVideoBtn.pressed ? Style.accentPressed
-                         : (loadVideoBtn.hovered ? Style.accentHover : Style.accent)
-                }
-
-                onClicked: root.requestNewItem()
-            }
-        }
     }
 
     // 顶栏里的房间号也要能复制
@@ -480,6 +446,7 @@ Item {
                 messages: messageModel
                 onCommentSubmitted: (text) => root.sendMessage(text)
                 onAddRequested: root.requestNewItem()
+                onUrlAddRequested: addVideoDialog.open()
                 onLocalFileRequested: (itemId) => root.requestLocalFile(itemId)
             }
         }
@@ -510,8 +477,23 @@ Item {
             return ""
         }
 
-        if (mode === RoomSession.Url)
-            return "网链模式 · 开发中"
+        if (mode === RoomSession.Url) {
+            // 工具都没就位的话,后面全是白搭 —— 先说清缺什么
+            if (!toolchain.ready)
+                return "网链模式工具未就绪:" + toolchain.statusText
+
+            // 这一条正在准备(解析链接 / 下载 / 合并)
+            if (playbackSync.downloadStageText !== "")
+                return playbackSync.downloadStageText
+
+            // 门禁:网链模式也要全员就绪才能开播
+            if (playbackSync.blockReason === PlaybackSync.LocalNotLoaded)
+                return "正在准备这一条…"
+            if (playbackSync.blockReason === PlaybackSync.OthersNotLoaded)
+                return "等待其他成员准备就绪…"
+
+            return ""   // 就绪了就别挡着画面
+        }
 
         return ""
     }

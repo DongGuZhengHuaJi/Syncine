@@ -357,6 +357,8 @@ json Room::playlistJson() const {
             {"url", entry.url},
             {"duration", entry.duration},
             {"addedBy", entry.addedBy},
+            {"live", entry.live},
+            {"quality", entry.quality},
             // 匹配状态由服务端聚合(它才知道所有成员的情况),客户端直接用
             {"status", itemStatus(entry.itemId)},
         });

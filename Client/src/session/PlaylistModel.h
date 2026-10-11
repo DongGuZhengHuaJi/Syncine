@@ -53,6 +53,8 @@ public:
         IsCurrentRole,
         HasLocalFileRole,
         StatusRole,      // 服务端聚合的匹配状态,见 PlaylistEntry::status
+        LiveRole,        // 是不是直播源
+        QualityRole,     // 画质档位(高度上限,0 = 最高)
     };
     Q_ENUM(Role)
 
@@ -82,8 +84,11 @@ public:
     const QList<PlaylistEntry> &entries() const;
     int currentIndex() const;
     QString currentItemId() const;
+    bool currentIsLive() const;
     bool currentReady() const;
     QString localFile(const QString &itemId) const;
+    // 某一条的画质档位(PlaybackSync 要用它拼 yt-dlp 的格式表达式)
+    int qualityOf(const QString &itemId) const;
     // 条目是否存在
     bool contains(const QString &itemId) const;
 

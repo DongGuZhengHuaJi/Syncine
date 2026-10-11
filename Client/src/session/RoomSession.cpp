@@ -252,7 +252,7 @@ void RoomSession::addLocalFile(const QUrl &fileUrl) {
     m_playlist->setLocalFile(itemId, path);
 
     send(Protocol::encodePlaylistAdd(itemId, QFileInfo(path).fileName(),
-                                     QString(), 0));
+                                     QString(), 0, /*live=*/false, /*quality=*/0));
     reportPlaylistFile(itemId, path);
 }
 
@@ -275,14 +275,15 @@ void RoomSession::reportPlaylistFile(const QString &itemId, const QString &path)
     send(Protocol::encodePlaylistStatus(itemId, !hash.isEmpty(), hash));
 }
 
-void RoomSession::addUrl(const QString &url, const QString &title) {
+void RoomSession::addUrl(const QString &url, const QString &title, bool live,
+                         qint64 durationMs, int quality) {
     if (!m_inRoom || url.isEmpty())
         return;
 
     const QString itemId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     send(Protocol::encodePlaylistAdd(itemId,
                                      title.isEmpty() ? url : title,
-                                     url, 0));
+                                     url, durationMs, live, quality));
 }
 
 void RoomSession::assignLocalFile(const QString &itemId, const QUrl &fileUrl) {

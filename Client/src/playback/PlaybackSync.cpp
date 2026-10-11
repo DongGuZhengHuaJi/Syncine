@@ -4,6 +4,11 @@
 
 #include "PlaybackSync.h"
 
+#include <QFile>
+
+#include "core/Log.h"
+#include "core/MediaHash.h"
+#include "core/UrlDownloader.h"
 #include "playback/PlaybackController.h"
 
 namespace {
@@ -32,13 +37,27 @@ private:
 
 PlaybackSync::PlaybackSync(RoomSession *session,
                            PlaybackController *playback,
+                           UrlDownloader *urlDownloader,
                            QObject *parent)
     : QObject(parent),
       m_session(session),
-      m_playback(playback) {
+      m_playback(playback),
+      m_urlDownloader(urlDownloader) {
 
     if (m_session == nullptr || m_playback == nullptr)
         return;
+
+    // ---- 网链模式:解析/下载的结果 ----
+    if (m_urlDownloader != nullptr) {
+        connect(m_urlDownloader, &UrlDownloader::probed,
+                this, &PlaybackSync::onUrlProbed);
+        connect(m_urlDownloader, &UrlDownloader::ready,
+                this, &PlaybackSync::onUrlReady);
+        connect(m_urlDownloader, &UrlDownloader::stateChanged,
+                this, &PlaybackSync::downloadStateChanged);
+        connect(m_urlDownloader, &UrlDownloader::failed, this,
+                [this](const QString &) { emit downloadStateChanged(); });
+    }
 
     // ---- 本地播放器 -> 房间 ----
     connect(m_playback, &PlaybackController::playingChanged,
@@ -85,6 +104,29 @@ PlaybackSync::PlaybackSync(RoomSession *session,
                 onRoomChanged();
             });
 
+    // ---- 直播掉线重连 ----
+    // 这里自动重新解析一遍再加载,延迟 3 秒避免疯狂重试。
+    connect(m_playback, &PlaybackController::errorOccurred, this,
+            [this](const QString &message) {
+                if (m_session == nullptr || !m_session->inRoom())
+                    return;
+                if (m_session->roomMode() != RoomSession::RoomMode::Url || !live())
+                    return;
+
+                LOG_WARN("Playback") << "直播流出错,3 秒后重连:" << message;
+                QTimer::singleShot(3000, this, [this]() {
+                    if (m_session == nullptr || !m_session->inRoom())
+                        return;
+                    if (m_session->roomMode() != RoomSession::RoomMode::Url || !live())
+                        return;
+
+                    // 清掉"已就绪"标记,让 prepareUrlItem 重新走一遍解析
+                    m_preparedItemId.clear();
+                    m_preparingItemId.clear();
+                    prepareUrlItem(m_session->playlist()->currentItemId());
+                });
+            });
+
     // 房主周期性广播位置(观众端进度条的数据源)
     m_positionTimer.setInterval(500);
     connect(&m_positionTimer, &QTimer::timeout,
@@ -122,6 +164,68 @@ bool PlaybackSync::seekable() const {
         return m_syncedDuration > 0;      // 知道时长就能拖进度条
 
     return m_playback != nullptr && m_playback->seekable();
+}
+
+// 网链模式的准备进度。其它模式下下载器是空闲的,这几个值自然是空的。
+QString PlaybackSync::downloadStage() const {
+    return m_urlDownloader != nullptr ? m_urlDownloader->stage() : QString();
+}
+
+int PlaybackSync::downloadProgress() const {
+    return m_urlDownloader != nullptr ? m_urlDownloader->progress() : -1;
+}
+
+QString PlaybackSync::downloadDetail() const {
+    return m_urlDownloader != nullptr ? m_urlDownloader->detailText() : QString();
+}
+
+QString PlaybackSync::downloadError() const {
+    return m_urlDownloader != nullptr ? m_urlDownloader->errorText() : QString();
+}
+
+bool PlaybackSync::live() const {
+    if (m_session == nullptr)
+        return false;
+    return m_session->playlist()->currentIsLive();
+}
+
+QString PlaybackSync::downloadStageText() const
+{
+    if (m_urlDownloader == nullptr)
+        return {};
+
+    const QString stage = m_urlDownloader->stage();
+    if (stage == QLatin1String("probing"))
+        return QStringLiteral("解析中…");
+    if (stage == QLatin1String("downloading")) {
+        const int progress = m_urlDownloader->progress();
+        const QString detail = m_urlDownloader->detailText();
+        if (progress < 0)
+            return QStringLiteral("下载中…"); // 总大小未知
+        return QStringLiteral("下载中 %1%").arg(progress)
+               + (detail.isEmpty() ? QString() : QStringLiteral(" · ") + detail);
+    }
+    if (stage == QLatin1String("merging"))
+        return QStringLiteral("合并音视频中…");
+    if (stage == QLatin1String("failed"))
+        return QStringLiteral("下载失败");
+    return {};
+}
+
+void PlaybackSync::retryCurrentItem() {
+    if (m_session == nullptr)
+        return;
+
+    const QString itemId = m_session->playlist()->currentItemId();
+    if (itemId.isEmpty())
+        return;
+
+    LOG_INFO("Playback") << "重试当前条目";
+    // 先掐掉可能在跑的那次(失败后通常已经结束;取消是对"下载卡住"的兜底)
+    if (m_urlDownloader != nullptr)
+        m_urlDownloader->cancel();
+    m_preparedItemId.clear();
+    prepareUrlItem(itemId);
 }
 
 // ============================
@@ -185,13 +289,20 @@ PlaybackSync::BlockReason PlaybackSync::blockReason() const {
     if (m_session == nullptr || m_playback == nullptr)
         return BlockReason::None;
 
-    // 只有本地模式需要"全员加载完才能播":
-    // 共享/网链模式下视频由房主提供,不存在成员各加载各的
-    if (m_session->roomMode() != RoomSession::RoomMode::Sync)
+    // 同步模式和网链模式都要"全员就绪才能播":
+    //   同步模式 = 每个人都把本地文件加载好
+    //   网链模式 = 每个人各自把链接解析/下载好(可能要等几分钟)
+    // 只有共享模式不需要:视频是房主一路推过来的,观众没有"加载"这回事
+    if (m_session->roomMode() == RoomSession::RoomMode::Share)
         return BlockReason::None;
 
     if (!m_playback->hasLoaded())
         return BlockReason::LocalNotLoaded;
+
+    // 直播**不等人**:等所有人就绪,前面那段就错过了;而且各人拉流的延迟
+    // 本来就有几秒差,等齐也没有意义。
+    if (live())
+        return BlockReason::None;
 
     if (m_session->inRoom() && !m_session->allOthersLoaded())
         return BlockReason::OthersNotLoaded;
@@ -248,18 +359,32 @@ void PlaybackSync::onRoomChanged() {
 
     // 该显示哪一路画面:
     //
-    //   本地模式           → 自己的画面(每人各自加载各自的文件)
-    //   共享/网链 + 房主   → 自己的画面(房主就是推流的那一方)
-    //   共享/网链 + 非房主 → 远端画面(房主推过来的)
-    const bool isLocal = (m_session->roomMode() == RoomSession::RoomMode::Sync);
-    m_showRemote = !isLocal && !m_session->isHost();
+    //   同步模式          → 自己的画面(每人各自加载各自的文件)
+    //   网链模式          → 自己的画面(大家各自播自己那份,没有"推流方")
+    //   共享模式 + 房主   → 自己的画面(房主就是推流的那一方)
+    //   共享模式 + 非房主 → 远端画面(房主推过来的)
+    //
+    // 网链模式**不能**按"非房主就看远端"处理:那样观众会去等房主的推流,
+    // 而这条模式的语义是"每个人自己从链接拿内容"。
+    m_showRemote = (m_session->roomMode() == RoomSession::RoomMode::Share)
+                   && !m_session->isHost();
 
     m_playback->setShowingRemote(m_showRemote);
 
     // 观众端的时长来自房主的 video_status(成员表里就有)
     m_syncedDuration = hostDuration();
 
-    // 模式变了,"这一条从哪儿来"也跟着变:本地/共享读本地文件,网链读 URL。
+    // 离开房间:临时文件不该留下(这里不做持久缓存)
+    if (!m_session->inRoom()) {
+        if (m_urlDownloader != nullptr) {
+            m_urlDownloader->cancel();
+            UrlDownloader::removeRoomTempDir(m_session->roomId(), m_session->clientId());
+        }
+        m_preparingItemId.clear();
+        m_preparedItemId.clear();
+    }
+
+    // 模式变了,"这一条从哪儿来"也跟着变:同步/共享读本地文件,网链读 URL。
     // 重新解析一次当前条目(没有当前条目时是空串,等价于卸载)
     applyPlaylistItem(m_session->playlist()->currentItemId());
 
@@ -274,6 +399,7 @@ void PlaybackSync::onPlaylistSwitched(const QString &itemId) {
     if (m_session == nullptr || m_playback == nullptr)
         return;
 
+
     // 切集不自动播:位置归零、停在暂停,由用户按播放(和"换了部片子"的直觉一致)
     m_syncedPosition = 0;
     m_syncedPlaying = false;
@@ -281,6 +407,7 @@ void PlaybackSync::onPlaylistSwitched(const QString &itemId) {
     emit playingChanged();
 
     applyPlaylistItem(itemId);
+    emit liveChanged();
     emit gateChanged();
 }
 
@@ -301,12 +428,7 @@ void PlaybackSync::applyPlaylistItem(const QString &itemId) {
     }
 
     if (mode == RoomSession::RoomMode::Url) {
-        const QString url = m_session->urlFor(itemId);
-        if (url.isEmpty()) {
-            m_playback->unload();
-            return;
-        }
-        m_playback->load(QUrl(url));
+        prepareUrlItem(itemId);
         return;
     }
 
@@ -322,6 +444,124 @@ void PlaybackSync::applyPlaylistItem(const QString &itemId) {
     m_playback->load(QUrl::fromLocalFile(path));
 }
 
+// ============================
+// 网链模式:把一个链接变成能播的媒体
+// ============================
+
+void PlaybackSync::prepareUrlItem(const QString &itemId)
+{
+    const QString url = m_session->urlFor(itemId);
+    if (url.isEmpty()) {
+        m_playback->unload();
+        return;
+    }
+
+    // ---- 幂等保护 ----
+    // 房间状态变一次就会走到这里一次(成员表更新、模式广播、连自己上报的
+    // video_status 回显也算),不挡住的话会反复重启 yt-dlp,
+    // 而且每次都会把已经加载好的媒体卸载掉 —— 表现为永远"解析中"。
+    if (itemId == m_preparingItemId && m_urlDownloader != nullptr) {
+        const QString stage = m_urlDownloader->stage();
+        if (stage == QLatin1String("probing")
+            || stage == QLatin1String("downloading")
+            || stage == QLatin1String("merging")
+            || stage == QLatin1String("probed")) {
+            return; // 正在准备,或已经解析好等着切过来
+        }
+    }
+    if (itemId == m_preparedItemId && m_playback->hasLoaded())
+        return; // 已经就绪,播放器上就是它
+
+    // 换了条目:先把上一个的临时文件清掉(这条模式不做持久缓存),
+    // 并取消可能在跑的下载
+    if (m_preparedItemId != itemId)
+        cleanupPreparedItem();
+    m_preparingItemId = itemId;
+
+    // 准备期间播放器是空的 —— 门禁会自动挡住播放,界面显示"准备中"
+    m_playback->unload();
+
+    if (m_urlDownloader == nullptr) {
+        // 没有下载器就退回直连(能播就播,不能播会走播放器的错误路径)
+        m_playback->load(QUrl(url));
+        return;
+    }
+
+    // 按条目上记的档位解析:直链候选也要受这个上限约束,
+    // 否则"选 720P"可能被一个合一的 360P 直链顶掉(见 UrlDownloader.h 顶部说明)
+    const int quality = m_session->playlist()->qualityOf(itemId);
+    LOG_INFO("Playback") << "网链模式:开始解析" << url
+                         << (quality > 0 ? QStringLiteral("(限 %1P)").arg(quality)
+                                         : QStringLiteral("(最高画质)"));
+    m_urlDownloader->probe(url, quality);
+}
+
+void PlaybackSync::onUrlProbed()
+{
+    if (m_urlDownloader == nullptr)
+        return;
+
+    // 解析这几秒里用户可能已经切走了 —— 结果作废,别把播放器抢回来
+    const QString itemId = m_session->playlist()->currentItemId();
+    if (itemId.isEmpty() || itemId != m_preparingItemId) {
+        LOG_DEBUG("Playback") << "解析结果已过期(条目换过了),丢弃";
+        return;
+    }
+
+    if (m_urlDownloader->canStreamDirectly()) {
+
+        // 路径 A:站点给了单文件格式 —— 直链交给播放器:秒开、能拖、不落盘
+        LOG_INFO("Playback") << "直链播放:" << m_urlDownloader->title();
+        // 记成"已就绪":直链这条路没有临时文件,但同样不该被反复重新解析
+        m_preparedItemId = itemId;
+        m_playback->load(QUrl(m_urlDownloader->directUrl()));
+        return;
+    }
+
+    // 直播没有"下完"这一刻 —— 下载合并对它不成立。
+    // 走到这里说明这个直播源没有可直接播放的流(通常是要登录/要特殊请求头)
+    if (m_urlDownloader->live()) {
+        m_urlDownloader->reportFailure(QStringLiteral(
+            "这个直播源没有可直接播放的流(可能需要登录或特殊请求头)"));
+        return;
+    }
+
+    // 路径 B:画面/声音分离,只能下完再合并。下载期间门禁挡着播放,
+    // 界面显示进度(PlaybackSync 的 download* 属性)
+    LOG_INFO("Playback") << "需要下载合并:" << m_urlDownloader->title();
+    m_urlDownloader->download(
+        m_session->urlFor(itemId),
+        UrlDownloader::itemTempDir(m_session->roomId(), m_session->clientId(), itemId),
+        m_session->playlist()->qualityOf(itemId));
+}
+
+void PlaybackSync::onUrlReady(const QString &filePath)
+{
+    const QString itemId = m_session->playlist()->currentItemId();
+    if (itemId.isEmpty() || itemId != m_preparingItemId) {
+        LOG_DEBUG("Playback") << "下载完成但条目已经切走,丢弃并删除:" << filePath;
+        QFile::remove(filePath);
+        return;
+    }
+
+    m_preparedItemId = itemId;
+    m_playback->load(QUrl::fromLocalFile(filePath));
+}
+
+void PlaybackSync::cleanupPreparedItem()
+{
+    if (m_preparedItemId.isEmpty())
+        return;
+
+    if (m_urlDownloader != nullptr) {
+        m_urlDownloader->cancelAndRemoveDir(
+            UrlDownloader::itemTempDir(m_session->roomId(), m_session->clientId(),
+                                       m_preparedItemId));
+    }
+    LOG_DEBUG("Playback") << "已清理上一个条目的临时文件";
+    m_preparedItemId.clear();
+}
+
 void PlaybackSync::onPositionTimer() {
     if (m_session == nullptr || m_playback == nullptr)
         return;
@@ -332,6 +572,8 @@ void PlaybackSync::onPositionTimer() {
         return;
     if (m_session->roomMode() == RoomSession::RoomMode::Sync)
         return;
+    if (live())
+        return;   // 直播没有共同时间轴:位置广播和纠偏都没有意义
     if (!m_playback->playing())
         return;
 
@@ -342,8 +584,26 @@ void PlaybackSync::pushVideoStatus() {
     if (m_session == nullptr || m_playback == nullptr || !m_session->inRoom())
         return;
 
+    // 网链模式上报的是**来源身份**(链接 + 画质),不是文件字节的哈希:
+    // 大家各自下载,CDN 变体和封装细节都可能不同,拿文件哈希去比会误报"不同步"。
+    // 时长照报,服务端还能靠"时长差 > 2 秒"发现各人拿到的不是同一个版本。
+    QString sourceHash;
+    if (m_session->roomMode() == RoomSession::RoomMode::Url) {
+        const QString itemId = m_session->playlist()->currentItemId();
+        // 画质档位要拼进去:各人按同一上限各自下载,档位不同就是不同的内容,
+        // 必须算成不同的来源身份 —— 否则"我下 720P 你下 1080P"会被判成"已匹配"。
+        // 直播没有档位(清单自己协商),照旧只拼 #live。
+        const int quality = m_session->playlist()->qualityOf(itemId);
+        const QString qualityTag = m_session->playlist()->currentIsLive()
+                                       ? QStringLiteral("#live")
+                                       : (quality > 0 ? QStringLiteral("#%1").arg(quality)
+                                                      : QStringLiteral("#best"));
+        sourceHash = MediaHash::forText(m_session->urlFor(itemId) + qualityTag);
+    }
+
     m_session->reportVideoStatus(m_playback->hasLoaded(),
-                                 m_playback->hash(),
+                                 sourceHash.isEmpty() ? m_playback->hash()
+                                                      : sourceHash,
                                  m_playback->duration());
 }
 
@@ -363,8 +623,10 @@ void PlaybackSync::onRemoteCommand(RoomSession::PlaybackAction action, qint64 po
 
     const RemoteScope scope(m_applyingRemote);
 
-    // 三种动作都先对齐位置,再执行动作
-    m_playback->seek(position);
+    // 三种动作都先对齐位置,再执行动作。
+
+    if (!live())
+        m_playback->seek(position);
 
     switch (action) {
     case RoomSession::PlaybackAction::Play:
@@ -383,10 +645,25 @@ void PlaybackSync::onRemoteCommand(RoomSession::PlaybackAction action, qint64 po
 }
 
 void PlaybackSync::onPositionUpdate(qint64 position, bool playing) {
-    if (!m_showRemote)
-        return;                     // 房主/本地不需要这个
+    // 同步模式不进行纠偏
 
-    updateSyncedState(position, playing);
+    if (m_showRemote) {
+        updateSyncedState(position, playing);
+        return;
+    }
+
+    if (m_session != nullptr && m_playback != nullptr
+        && m_session->roomMode() == RoomSession::RoomMode::Url
+        && !live()   // 直播不纠偏:没有共同时间轴
+        && !m_session->isHost() && playing && m_playback->hasLoaded()) {
+        const qint64 drift = qAbs(m_playback->position() - position);
+        if (drift > 3000) {
+            LOG_INFO("Playback") << "网链模式纠偏:与房主差" << drift / 1000
+                                 << "秒,跳转对齐";
+            const RemoteScope scope(m_applyingRemote);
+            m_playback->seek(position);
+        }
+    }
 }
 
 void PlaybackSync::updateSyncedState(qint64 position, bool playing) {

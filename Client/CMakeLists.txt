@@ -59,6 +59,7 @@ find_package(Qt6 REQUIRED COMPONENTS
         Quick
         QuickControls2
         Multimedia
+        Network
         WebSockets
 )
 
@@ -252,6 +253,10 @@ qt_add_executable(Syncine
         src/core/MediaHash.h
         src/core/NetworkManager.cpp
         src/core/NetworkManager.h
+        src/core/Toolchain.cpp
+        src/core/Toolchain.h
+        src/core/UrlDownloader.cpp
+        src/core/UrlDownloader.h
         src/core/Protocol.cpp
         src/core/Protocol.h
         src/core/RoomTypes.h
@@ -336,6 +341,7 @@ qt_add_qml_module(Syncine
         ui/components/PrimaryButton.qml
         ui/components/GhostButton.qml
         ui/components/MessageDialog.qml
+        ui/components/AddVideoDialog.qml
         ui/components/AppTextField.qml
         ui/components/ModeButton.qml
         ui/components/AppIcon.qml
@@ -369,6 +375,7 @@ target_link_libraries(Syncine
         Qt6::Quick
         Qt6::QuickControls2
         Qt6::Multimedia
+        Qt6::Network
         Qt6::WebSockets
 
         # WebRTC

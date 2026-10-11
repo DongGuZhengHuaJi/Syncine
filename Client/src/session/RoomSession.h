@@ -139,7 +139,15 @@ public:
     // 全部失效 —— 媒体加载失败、匹配状态永远"未匹配"就是这么来的。
     // 让 QML 原样传 QUrl,C++ 里 toLocalFile() 拿干净路径。
     Q_INVOKABLE void addLocalFile(const QUrl &fileUrl);
-    Q_INVOKABLE void addUrl(const QString &url, const QString &title);
+    // live / durationMs / quality 都由 UrlDownloader 探测得到:
+    //   直播没有时长、也不能下载合并;
+    //   durationMs 顺手带上,列表里就不用先显示 "--:--" 等有人加载完;
+    //   quality 是画质档位(高度上限,0 = 最高),**条目级** —— 大家按同一档下载,
+    //   否则内容哈希对不上会被判"不同步"(见 PlaylistEntry::quality)。
+    // 注意:QML 调这个方法必须把参数**全部传满** —— Q_INVOKABLE 的默认参数
+    // 不存在于 meta-object 里,QML 少传一个会直接报 "Insufficient arguments"。
+    Q_INVOKABLE void addUrl(const QString &url, const QString &title, bool live,
+                            qint64 durationMs, int quality);
     Q_INVOKABLE void assignLocalFile(const QString &itemId, const QUrl &fileUrl);
     Q_INVOKABLE void removeFromPlaylist(const QString &itemId);
     Q_INVOKABLE void switchTo(const QString &itemId);

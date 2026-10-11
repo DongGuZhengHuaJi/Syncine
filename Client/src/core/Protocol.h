@@ -127,10 +127,13 @@ QString encodeVideoStatus(bool loaded, const QString &hash, qint64 duration);
 // ---- 播放列表 ----
 // itemId 由客户端生成(UUID),服务端只保证不重复。
 // 本地文件路径**不进协议** —— 那是各人自己的事(见 docs/playlist-design.md)
+// quality 是画质档位(高度上限,0 = 最高),见 PlaylistEntry::quality
 QString encodePlaylistAdd(const QString &itemId,
                           const QString &title,
                           const QString &url,
-                          qint64 duration);
+                          qint64 duration,
+                          bool live,
+                          int quality);
 
 QString encodePlaylistRemove(const QString &itemId);
 

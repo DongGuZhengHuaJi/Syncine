@@ -37,6 +37,10 @@ QVariant PlaylistModel::data(const QModelIndex &index, int role) const {
         return m_localFiles.contains(entry.itemId);
     case StatusRole:
         return entry.status;
+    case LiveRole:
+        return entry.live;
+    case QualityRole:
+        return entry.quality;
     default:
         return {};
     }
@@ -52,6 +56,8 @@ QHash<int, QByteArray> PlaylistModel::roleNames() const {
         {IsCurrentRole, "isCurrent"},
         {HasLocalFileRole, "hasLocalFile"},
         {StatusRole, "status"},
+        {LiveRole, "live"},
+        {QualityRole, "quality"},
     };
 }
 
@@ -191,6 +197,12 @@ QString PlaylistModel::currentItemId() const {
     return m_entries.at(m_currentIndex).itemId;
 }
 
+bool PlaylistModel::currentIsLive() const {
+    if (m_currentIndex < 0 || m_currentIndex >= m_entries.size())
+        return false;
+    return m_entries.at(m_currentIndex).live;
+}
+
 bool PlaylistModel::currentReady() const {
     const QString itemId = currentItemId();
     return !itemId.isEmpty() && m_localFiles.contains(itemId);
@@ -198,6 +210,11 @@ bool PlaylistModel::currentReady() const {
 
 QString PlaylistModel::localFile(const QString &itemId) const {
     return m_localFiles.value(itemId);
+}
+
+int PlaylistModel::qualityOf(const QString &itemId) const {
+    const int row = indexOf(itemId);
+    return row >= 0 ? m_entries.at(row).quality : 0;
 }
 
 bool PlaylistModel::contains(const QString &itemId) const {
