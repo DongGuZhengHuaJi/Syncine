@@ -9,6 +9,8 @@
 
 #include "rtc_base/logging.h"
 
+#include "core/AppSettings.h"
+#include "core/CookieManager.h"
 #include "core/Log.h"
 #include "core/NetworkManager.h"
 #include "core/Toolchain.h"
@@ -39,16 +41,28 @@ int main(int argc, char *argv[]) {
         webrtc::LogMessage::LogTimestamps(true);
     }
 
+    // 全局设置(~/.config/Syncine/syncine.ini)。
+    // **必须最先构造**:后面好几个对象在构造时就要读它(服务器地址、日志级别、
+    // 音频设备),晚了就赶不上。
+    AppSettings appSettings;
+    appSettings.applyLogLevel();
+
     QQmlApplicationEngine engine;
 
     // ---- 基础设施 ----
-    NetworkManager networkManager;
+    // 服务器地址从设置里来(留空 = 用 AppSettings 里的兜底地址),
+    // 真正的"试着连、连不上换兜底、都失败就重试"在 NetworkManager 里
+    NetworkManager networkManager(&appSettings);
     PlaybackController playbackController;
     WebrtcManager webrtcManager;
 
     // 外部命令行工具(yt-dlp / ffmpeg)的定位与自检。只在网链模式用得上,
     // 但启动时就把结果记进日志 —— "为什么下载失败"最常见的原因就是它俩没就位。
     Toolchain toolchain;
+
+    // cookie:给 yt-dlp 带上登录态(从浏览器导出 / 手动导入)。
+    // 必须在 Toolchain 之后(要用它的 yt-dlp 路径)、在两个下载器之前
+    CookieManager cookieManager(&toolchain, &appSettings);
 
     // ---- 房间与会话 ----
     RoomSession roomSession(&networkManager);
@@ -60,8 +74,8 @@ int main(int argc, char *argv[]) {
     //   playbackDownloader —— 跟着房间的"当前条目"走,由 PlaybackSync 驱动
     //   uiDownloader       —— 加条目时"粘贴链接 → 看标题/时长"用,界面直接调
     // 共用一个的话,一边在解析时另一边就被挡掉了。
-    UrlDownloader playbackDownloader(&toolchain);
-    UrlDownloader uiDownloader(&toolchain);
+    UrlDownloader playbackDownloader(&toolchain, &cookieManager);
+    UrlDownloader uiDownloader(&toolchain, &cookieManager);
 
     // ---- 播放同步:唯一同时持有「房间」和「播放器」的地方 ----
     PlaybackSync playbackSync(&roomSession, &playbackController, &playbackDownloader);
@@ -163,6 +177,7 @@ int main(int argc, char *argv[]) {
                          LOG_WARN("Signaling") << message;
                      });
 
+    engine.rootContext()->setContextProperty("appSettings", &appSettings);
     engine.rootContext()->setContextProperty("networkManager", &networkManager);
     engine.rootContext()->setContextProperty("playbackController", &playbackController);
     engine.rootContext()->setContextProperty("roomSession", &roomSession);
@@ -171,11 +186,16 @@ int main(int argc, char *argv[]) {
     engine.rootContext()->setContextProperty("signalingChannel", &signalingChannel);
     // 界面用的下载器:只负责"加条目"时的解析(标题/时长/能不能直链)
     engine.rootContext()->setContextProperty("urlDownloader", &uiDownloader);
+    engine.rootContext()->setContextProperty("cookieManager", &cookieManager);
 
     // 外部工具链(yt-dlp / ffmpeg)。先让它去自检 —— 版本探测是异步的
     // (yt-dlp 是 PyInstaller 包,启动要几百毫秒),不会卡住界面。
     QTimer::singleShot(1200, &toolchain, &Toolchain::detect);
     engine.rootContext()->setContextProperty("toolchain", &toolchain);
+
+    // 装配完了、设置也读过了,现在才发起连接(NetworkManager 自己不再
+    // 在构造里连 —— 那样会赶在设置之前)。连接是异步的,不用等它。
+    networkManager.connectToServer();
 
     engine.load(QUrl(QStringLiteral(
         "qrc:/qt/qml/SyncineApp/ui/Main.qml"

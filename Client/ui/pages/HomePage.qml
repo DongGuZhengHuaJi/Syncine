@@ -3,6 +3,40 @@ import QtQuick.Controls
 import SyncineApp
 
 Item {
+    // 设置入口:挨着右上角的状态胶囊。全局设置都在这页里改
+    // (房间内只放麦克风/听筒/cookie 那几项)。
+    Button {
+        id: settingsBtn
+        anchors.top: parent.top
+        anchors.right: statusPill.left
+        anchors.topMargin: 24
+        anchors.rightMargin: 8
+        width: 32
+        height: 32
+        hoverEnabled: true
+
+        contentItem: AppIcon {
+            anchors.centerIn: parent
+            width: 18
+            height: 18
+            name: "gear"
+            color: settingsBtn.hovered ? Style.accent : Style.textSecondary
+        }
+
+        background: Rectangle {
+            radius: Style.radius
+            color: settingsBtn.hovered ? Style.hover : Style.card
+            border.width: 1
+            border.color: Style.border
+        }
+
+        ToolTip.visible: hovered
+        ToolTip.text: "设置"
+        ToolTip.delay: 500
+
+        onClicked: stackView.push("SettingsPage.qml")
+    }
+
     Rectangle {
         id: statusPill
         anchors.top: parent.top
@@ -25,14 +59,26 @@ Item {
                 width: 8
                 height: 8
                 radius: 4
-                color: networkManager.isConnected ? Style.success : Style.textSecondary
+                color: networkManager.isConnected ? Style.success
+                     : networkManager.connecting ? Style.accent
+                     : networkManager.retrying ? Style.danger
+                     : Style.textSecondary
             }
 
             Label {
                 anchors.verticalCenter: parent.verticalCenter
-                text: networkManager.isConnected ? "服务器已连接" : "服务器未连接"
                 font.pixelSize: 12
                 color: Style.textSecondary
+                text: {
+                    if (networkManager.isConnected)
+                        return networkManager.usingFallback ? "已连接(备用地址)"
+                                                            : "服务器已连接"
+                    if (networkManager.connecting)
+                        return "连接中…"
+                    if (networkManager.retrying)
+                        return "未连接 · 重试中"
+                    return "服务器未连接"
+                }
             }
         }
     }

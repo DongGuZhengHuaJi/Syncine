@@ -53,6 +53,32 @@ Popup {
     x: Math.round((parent.width - width) / 2)
     y: Math.round((parent.height - height) / 2)
 
+    // 按设置里的"默认画质"挑一个**这条视频真的有**的档位。
+    //
+    // 不能直接把 defaultQuality 当选中值:档位是"高度上限",而下载时用的是
+    // `bv*[height<=N]+ba/b[height<=N]` —— 如果 N 比这条视频最高画质还大,
+    // 表达式可能一条都匹配不上、直接下载失败。所以取"不超过默认档的最大那个",
+    // 实在没有(比如默认 360 但这条只有 1080)就退到最小的那个。
+    function pickInitialQuality() {
+        const want = appSettings.defaultQuality
+        const list = urlDownloader.qualities
+        if (want <= 0 || list.length === 0)
+            return 0
+
+        let best = -1
+        let smallest = -1
+        for (let i = 0; i < list.length; ++i) {
+            const height = list[i].height
+            if (height <= 0)
+                continue
+            if (height <= want && height > best)
+                best = height
+            if (smallest < 0 || height < smallest)
+                smallest = height
+        }
+        return best > 0 ? best : (smallest > 0 ? smallest : 0)
+    }
+
     function startProbe() {
         if (!urlLooksComplete || probing)
             return
@@ -81,6 +107,12 @@ Popup {
         inspectedUrl = ""
     }
     onClosed: urlDownloader.cancel()
+
+    // 解析出档位之后,把选中项落到"默认画质"对应的那一档上
+    Connections {
+        target: urlDownloader
+        function onProbed() { root.selectedHeight = root.pickInitialQuality() }
+    }
 
     background: Rectangle {
         radius: Style.radius

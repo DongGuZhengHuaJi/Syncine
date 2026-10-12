@@ -36,6 +36,21 @@ SessionController::SessionController(NetworkManager *networkManager,
             this, &SessionController::onConnected);
     connect(m_networkManager, &NetworkManager::disconnected,
             this, &SessionController::onDisconnected);
+
+    // 一整轮(用户地址 + 兜底)都没连上时,把挂着的请求判失败。
+    //
+    // 没有这一条会出一个很硬的死结:点了"创建房间"之后请求挂起、按钮变成
+    // 禁用的"连接中…",而失败路径**只**在 onDisconnected 里复位 ——
+    // Qt 在"连接被拒"时不一定发那个信号(各版本行为不一致),于是按钮
+    // 永远禁用,用户只能重启客户端。
+    connect(m_networkManager, &NetworkManager::connectionFailed, this,
+            [this](const QString &reason) {
+                Q_UNUSED(reason);
+                // 只有"正等着连接去发请求"时才报错;平时后台重试的失败
+                // 不该弹给用户看
+                if (m_pending != PendingRequest::None)
+                    failPending(QStringLiteral("无法连接到服务器"));
+            });
 }
 
 bool SessionController::busy() const {

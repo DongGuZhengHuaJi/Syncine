@@ -208,6 +208,19 @@ Item {
                 circle(9.5, 14.5, 3.7, Math.PI * 1.75, Math.PI * 1.25)
                 line(10.6, 13.4, 13.4, 10.6)
                 break
+
+            case "gear": {
+                // 齿轮:外圈 + 内圈 + 8 根朝外的齿。齿用极坐标算,
+                // 比手写 16 个坐标点好改(要几个齿就改循环次数)
+                circle(12, 12, 6.6)
+                circle(12, 12, 2.4)
+                for (let i = 0; i < 8; ++i) {
+                    const a = i * Math.PI / 4
+                    line(12 + Math.cos(a) * 6.6, 12 + Math.sin(a) * 6.6,
+                         12 + Math.cos(a) * 9.3, 12 + Math.sin(a) * 9.3)
+                }
+                break
+            }
             }
 
             ctx.restore()

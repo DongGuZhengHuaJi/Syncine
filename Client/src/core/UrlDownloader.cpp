@@ -16,6 +16,7 @@
 #include <QStandardPaths>
 #include <QVariantMap>
 
+#include "core/CookieManager.h"
 #include "core/Log.h"
 #include "core/Toolchain.h"
 
@@ -241,9 +242,12 @@ QString errorFromOutput(const QStringList &output, const QString &fallback)
 
 } // namespace
 
-UrlDownloader::UrlDownloader(const Toolchain *toolchain, QObject *parent)
+UrlDownloader::UrlDownloader(const Toolchain *toolchain,
+                             const CookieManager *cookies,
+                             QObject *parent)
     : QObject(parent),
       m_toolchain(toolchain),
+      m_cookies(cookies),
       m_network(new QNetworkAccessManager(this)) {
 }
 
@@ -438,7 +442,9 @@ void UrlDownloader::verifyDirectUrl(const QString &url)
         } else {
             m_directUrl.clear();
             m_verifyRejectReason =
-                QStringLiteral("直链拉不动(HTTP %1),通常要 Referer/Cookie,播放器加不了")
+                QStringLiteral("直链拉不动(HTTP %1),通常要 Referer/Cookie,"
+                               "播放器加不了请求头(导入了 cookie 也一样 —— "
+                               "cookie 只作用于下载那条路)")
                     .arg(status > 0 ? QString::number(status) : QStringLiteral("连接失败"));
             LOG_WARN("UrlDownloader") << "直链试拉失败: HTTP" << status << reply->errorString();
         }
@@ -640,13 +646,18 @@ void UrlDownloader::startProcess(const QStringList &options, const QString &url)
     m_process->setProgram(m_toolchain->ytDlpPath());
 
 
-    // 拼接参数:用户选项 + ffmpeg-location + url
+    // 拼接参数:用户选项 + ffmpeg-location + cookies + url
+    // **url 必须留在最后一位**,前面这些谁先谁后都无所谓
     QStringList args = options;
     args << m_toolchain->ffmpegLocationArgs();
+    if (m_cookies != nullptr)
+        args << m_cookies->cookieArgs();
     args << url;
     m_process->setArguments(args);
 
-    LOG_DEBUG("UrlDownloader") << "yt-dlp" << options.join(QLatin1Char(' '));
+    // 打**拼好的完整参数**(不只 options)—— "为什么没带上 cookie / 用的是哪个
+    // ffmpeg" 这类问题,看一眼这行就清楚了
+    LOG_DEBUG("UrlDownloader") << "yt-dlp" << args.join(QLatin1Char(' '));
 
     connect(m_process, &QProcess::readyReadStandardOutput, this, [this]() {
         const QByteArray raw = m_process->readAllStandardOutput();

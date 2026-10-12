@@ -4,16 +4,57 @@
 
 #include "NetworkManager.h"
 
-NetworkManager::NetworkManager(QObject *parent)
-    : QObject(parent), m_webSocket(std::make_unique<QWebSocket>()) {
+#include "core/AppSettings.h"
+#include "core/Log.h"
+
+namespace {
+
+// 单次连接的超时。WebSocket 没有内建超时,不自己掐的话要等 OS 级的 TCP
+// 超时(几十秒)—— 那期间界面一直"连接中…",用户只能干等
+constexpr int kConnectTimeoutMs = 8000;
+
+// 整轮失败后的重试间隔:第一次 15 秒,之后每次翻倍,60 秒封顶
+constexpr int kRetryBaseMs = 15 * 1000;
+constexpr int kRetryMaxMs = 60 * 1000;
+
+} // namespace
+
+NetworkManager::NetworkManager(AppSettings *settings, QObject *parent)
+    : QObject(parent),
+      m_settings(settings),
+      m_webSocket(std::make_unique<QWebSocket>()) {
+
+    m_connectTimer.setSingleShot(true);
+    m_retryTimer.setSingleShot(true);
+
+    connect(&m_connectTimer, &QTimer::timeout, this, [this]() {
+        if (m_connected)
+            return;
+        LOG_WARN("Network") << "连接超时:" << m_currentUrl.toString();
+        handleAttemptFailed(QStringLiteral("连接超时"));
+    });
+
+    connect(&m_retryTimer, &QTimer::timeout, this, [this]() {
+        if (m_userDisconnected)
+            return;
+        LOG_INFO("Network") << "重试连接(" << m_failedRounds + 1 << ")";
+        startRound();
+    });
 
     connect(
         m_webSocket.get(),
         &QWebSocket::connected,
         this,
         [this]() {
+            stopTimers();
+            m_connected = true;
+            m_retrying = false;
+            m_failedRounds = 0;
+            LOG_INFO("Network") << "已连接:" << m_currentUrl.toString()
+                                << (m_usingFallback ? "(内置地址)" : "(用户设置地址)");
             emit connected();
             emit isConnectedChanged();
+            emit stateChanged();
         }
     );
 
@@ -21,8 +62,20 @@ NetworkManager::NetworkManager(QObject *parent)
         &QWebSocket::disconnected,
         this,
         [this]() {
+            // 连接**尝试**失败时 Qt 也可能发这个信号(各版本不一致)。
+            // 只有"真的连上过再断"才算"掉线",否则由 handleAttemptFailed 处理
+            if (!m_connected)
+                return;
+
+            m_connected = false;
+            stopTimers();
+            LOG_WARN("Network") << "与服务器的连接已断开:" << m_currentUrl.toString();
             emit disconnected();
             emit isConnectedChanged();
+            emit stateChanged();
+
+            if (!m_userDisconnected)
+                scheduleRetry();
         }
     );
 
@@ -39,55 +92,187 @@ NetworkManager::NetworkManager(QObject *parent)
         this,
         [this](QAbstractSocket::SocketError error) {
             Q_UNUSED(error);
-            emit errorOccurred(m_webSocket->errorString());
+
+            // 自己 abort 触发的那一次不算失败(切换地址时必然发生)
+            if (m_switching) {
+                m_switching = false;
+                return;
+            }
+
+            // 连上之后的收发错误不算"这次没连上";真掉线会走 disconnected
+            if (m_connected)
+                return;
+
+            const QString reason = m_webSocket->errorString();
+            LOG_WARN("Network") << "连接失败:" << m_currentUrl.toString() << reason;
+            emit errorOccurred(reason);
+            handleAttemptFailed(reason);
         }
     );
-
-    if (!isConnected()) {
-        connectToServer();
-    }
-
 }
 
 bool NetworkManager::isConnected() const {
-    return m_webSocket->state() == QAbstractSocket::ConnectedState;
+    return m_connected && m_webSocket->state() == QAbstractSocket::ConnectedState;
 }
 
-void NetworkManager::setServerUrl(const QString &serverUrl) {
-    QUrl url(serverUrl);
-    if (!url.isValid() || (url.scheme() != "ws" && url.scheme() != "wss")) {
-        emit errorOccurred("Invalid WebSocket URL.");
-        return;
-    }
-
-    if (m_serverUrl != url) {
-        m_serverUrl = url;
-        emit isConnectedChanged();
-    }
-
-    connectToServer();
+bool NetworkManager::connecting() const {
+    // 连接正在进行
+    return m_connectTimer.isActive();
 }
+
+bool NetworkManager::retrying() const {
+    return m_retrying;
+}
+
+QString NetworkManager::effectiveUrl() const {
+    return m_currentUrl.toString();
+}
+
+bool NetworkManager::usingFallback() const {
+    return m_usingFallback;
+}
+
+// ============================
+// 连接
+// ============================
 
 void NetworkManager::connectToServer() {
-    if (!m_serverUrl.isValid()) {
-        emit errorOccurred("Invalid WebSocket URL.");
-        return;
-    }
+    m_userDisconnected = false;
+    m_failedRounds = 0;
+    startRound();
+}
 
-    if (m_webSocket->state() != QAbstractSocket::UnconnectedState) {
-        emit errorOccurred("WebSocket is already connecting or connected.");
-        return;
-    }
-
-    m_webSocket->open(m_serverUrl);
+void NetworkManager::retryNow() {
+    m_userDisconnected = false;
+    stopTimers();
+    startRound();
 }
 
 void NetworkManager::disconnectFromServer() {
-    m_webSocket->close();
+    m_userDisconnected = true;
+    stopTimers();
+    m_retrying = false;
+    m_connected = false;
+    abortSocket();
+    emit isConnectedChanged();
+    emit stateChanged();
+}
+
+void NetworkManager::startRound() {
+    m_attempts.clear();
+
+    const QString userUrl = m_settings != nullptr ? m_settings->serverUrl() : QString();
+    const QString fallbackUrl = m_settings != nullptr ? m_settings->fallbackServerUrl()
+                                                      : QString();
+
+    // 用户地址优先;和兜底一样就不重复试一遍
+    if (!userUrl.isEmpty() && userUrl != fallbackUrl)
+        m_attempts << userUrl;
+    if (!fallbackUrl.isEmpty())
+        m_attempts << fallbackUrl;
+
+    // 一个都没有(用户把地址清空、兜底又是空的):别再空转
+    if (m_attempts.isEmpty()) {
+        LOG_ERROR("Network") << "没有可用的服务器地址";
+        emit connectionFailed(QStringLiteral("没有可用的服务器地址"));
+        return;
+    }
+
+    LOG_INFO("Network") << "开始连接,依次尝试:" << m_attempts.join(QStringLiteral(" → "));
+    m_attemptIndex = 0;
+    tryNextUrl();
+}
+
+void NetworkManager::tryNextUrl() {
+    if (m_attemptIndex >= m_attempts.size()) {
+        // 正常不会走到这儿(试完了由 handleAttemptFailed 安排重试),
+        // 留着只是防御 —— 别在这里再排一次重试,会和那边重复
+        LOG_ERROR("Network") << "地址列表全部连接失败";
+        return;
+    }
+
+    const QString next = m_attempts.at(m_attemptIndex++);
+    const bool isFallback = m_settings != nullptr
+                            && next == m_settings->fallbackServerUrl();
+
+    if (isFallback && m_attemptIndex > 1)
+        LOG_INFO("Network") << "用户设置地址连接失败，尝试内置地址:" << next;
+
+    startAttempt(QUrl(next));
+}
+
+void NetworkManager::startAttempt(const QUrl &url) {
+    if (!url.isValid() || (url.scheme() != QLatin1String("ws")
+                           && url.scheme() != QLatin1String("wss"))) {
+        LOG_ERROR("Network") << "地址不合法,跳过:" << url.toString();
+        handleAttemptFailed(QStringLiteral("地址不合法"));
+        return;
+    }
+
+    stopTimers();
+    abortSocket();
+
+    m_currentUrl = url;
+    m_usingFallback = m_settings != nullptr
+                      && url.toString() == m_settings->fallbackServerUrl();
+    m_retrying = false;
+
+    LOG_INFO("Network") << "连接" << url.toString();
+    emit stateChanged();
+
+    m_switching = false;
+    m_webSocket->open(url);
+    m_connectTimer.start(kConnectTimeoutMs);
+}
+
+void NetworkManager::handleAttemptFailed(const QString &reason) {
+    stopTimers();
+    abortSocket();
+
+    if (m_attemptIndex < m_attempts.size()) {
+        tryNextUrl();
+        return;
+    }
+
+    // 整轮都失败了
+    ++m_failedRounds;
+    emit connectionFailed(reason);
+    scheduleRetry();
+}
+
+void NetworkManager::scheduleRetry() {
+    if (m_userDisconnected)
+        return;
+
+    m_retrying = true;
+    emit stateChanged();
+
+    // 15s → 30s → 60s 封顶
+    int delay = kRetryBaseMs;
+    for (int i = 1; i < m_failedRounds; ++i)
+        delay = qMin(delay * 2, kRetryMaxMs);
+
+    LOG_INFO("Network") << "将在" << delay / 1000 << "秒后重试";
+    m_retryTimer.start(delay);
+}
+
+void NetworkManager::stopTimers() {
+    m_connectTimer.stop();
+    m_retryTimer.stop();
+}
+
+void NetworkManager::abortSocket() {
+    if (m_webSocket->state() == QAbstractSocket::UnconnectedState)
+        return;
+
+    // abort 之后 Qt 会补一个 errorOccurred(OperationCanceledError),
+    // 那不是"连不上",置位让上面那个 lambda 把它吞掉
+    m_switching = true;
+    m_webSocket->abort();
 }
 
 bool NetworkManager::sendMessage(const QString &message) {
-    if (m_webSocket->state() != QAbstractSocket::ConnectedState)
+    if (!isConnected())
         return false;
 
     if (message.isEmpty())

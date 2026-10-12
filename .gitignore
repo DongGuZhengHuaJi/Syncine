@@ -5,3 +5,9 @@
 */cmake-build-*
 
 docs
+
+# 凭据:绝不会进仓库。
+# tools/ 下面是随包分发的二进制,但 cookie 文件是用户自己的登录态 ——
+# 别让它跟着 `git add Client/tools` 一起进去(2026-10-12 差点发生)
+cookies.txt
+*.part

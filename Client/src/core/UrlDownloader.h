@@ -35,6 +35,7 @@ class QNetworkAccessManager;
 class QNetworkReply;
 
 class QProcess;
+class CookieManager;
 class Toolchain;
 
 class UrlDownloader : public QObject {
@@ -91,7 +92,11 @@ class UrlDownloader : public QObject {
                NOTIFY stateChanged)
 
 public:
-    explicit UrlDownloader(const Toolchain *toolchain, QObject *parent = nullptr);
+    // cookies 可以为空(那就不带 --cookies)。参数给默认值,是为了让
+    // 现有的调用点不用全改一遍
+    explicit UrlDownloader(const Toolchain *toolchain,
+                           const CookieManager *cookies = nullptr,
+                           QObject *parent = nullptr);
     ~UrlDownloader() override;
 
     // 解析链接:拿标题/时长,并挑一个单文件格式作为直链候选。
@@ -174,6 +179,8 @@ private:
     void fail(const QString &message);
 
     const Toolchain *m_toolchain = nullptr;
+    // 有 cookie 文件时给 yt-dlp 带上 --cookies(见 CookieManager::cookieArgs)
+    const CookieManager *m_cookies = nullptr;
     QProcess *m_process = nullptr;
 
     QString m_stage = QStringLiteral("idle");
