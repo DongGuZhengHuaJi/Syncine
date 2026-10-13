@@ -16,6 +16,7 @@ const char *kFallbackServerUrl = "ws://localhost:8765";
 
 const char *kKeyServerUrl = "server/userUrl";
 const char *kKeyQuality = "playback/quality";
+const char *kKeyHdrAllowed = "playback/hdrAllowed";
 const char *kKeyLogLevel = "log/level";
 const char *kKeyLastCookieBrowser = "cookies/lastBrowser";
 const char *kKeyCookieSource = "cookies/source";
@@ -52,7 +53,12 @@ AppSettings::AppSettings(QObject *parent)
     m_lastCookieBrowser = m_settings->value(QLatin1String(kKeyLastCookieBrowser)).toString();
     m_cookieSource = m_settings->value(QLatin1String(kKeyCookieSource)).toString();
     m_cookieImportedAt = m_settings->value(QLatin1String(kKeyCookieImportedAt)).toString();
-    m_defaultQuality = m_settings->value(QLatin1String(kKeyQuality), 0).toInt();
+    // 老版本这里存的是 int(高度上限,0 = 最高);现在存字符串,读法兼容两者:
+    // "0" 归一成空串(两种写法语义相同:不设限)
+    m_defaultQuality = m_settings->value(QLatin1String(kKeyQuality)).toString().trimmed();
+    if (m_defaultQuality == QLatin1String("0"))
+        m_defaultQuality.clear();
+    m_hdrAllowed = m_settings->value(QLatin1String(kKeyHdrAllowed), false).toBool();
     m_logLevel = m_settings->value(QLatin1String(kKeyLogLevel),
                                    QStringLiteral("info")).toString().toLower();
 
@@ -129,14 +135,26 @@ void AppSettings::setCookieImportedAt(const QString &isoTime)
     emit cookieImportedAtChanged();
 }
 
-void AppSettings::setDefaultQuality(int quality)
+void AppSettings::setDefaultQuality(const QString &quality)
 {
-    if (m_defaultQuality == quality)
+    // "0" 和空串是同一个意思(不设限),归一成空串,免得界面两种取值来回跳
+    const QString normalized = quality == QLatin1String("0") ? QString() : quality;
+    if (m_defaultQuality == normalized)
         return;
 
-    m_defaultQuality = quality;
+    m_defaultQuality = normalized;
     m_settings->setValue(QLatin1String(kKeyQuality), m_defaultQuality);
     emit defaultQualityChanged();
+}
+
+void AppSettings::setHdrAllowed(bool allowed)
+{
+    if (m_hdrAllowed == allowed)
+        return;
+
+    m_hdrAllowed = allowed;
+    m_settings->setValue(QLatin1String(kKeyHdrAllowed), m_hdrAllowed);
+    emit hdrAllowedChanged();
 }
 
 void AppSettings::setLogLevel(const QString &level)

@@ -100,12 +100,12 @@ void Toolchain::detect()
 
     // ffprobe:不是必需的(合并音视频只用 ffmpeg),但 yt-dlp 修 m3u8 时间戳之类的
     // 场合会用到它 —— 少了它只是降级 + 一条警告。找一下、记进日志,便于排查。
-    const QString ffprobePath = findTool(QStringLiteral("ffmpeg"),
-                                         {QStringLiteral("ffprobe")});
-    if (!ffprobePath.isEmpty())
-        LOG_INFO("Toolchain") << "ffprobe:" << ffprobePath;
+    // 存起来:除了 yt-dlp 修时间戳,客户端的 HDR 检查也用它
+    m_ffprobePath = findTool(QStringLiteral("ffmpeg"), {QStringLiteral("ffprobe")});
+    if (!m_ffprobePath.isEmpty())
+        LOG_INFO("Toolchain") << "ffprobe:" << m_ffprobePath;
     else if (!m_ffmpegPath.isEmpty())
-        LOG_WARN("Toolchain") << "未发现 ffprobe，个别修复功能会降级";
+        LOG_WARN("Toolchain") << "未发现 ffprobe，部分功能受到限制";
 
     emit statusChanged();
 

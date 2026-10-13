@@ -1,5 +1,7 @@
 #include "PlaylistModel.h"
 
+#include "media/FormatModel.h"
+
 PlaylistModel::PlaylistModel(QObject *parent)
     : QAbstractListModel(parent) {
 }
@@ -39,8 +41,10 @@ QVariant PlaylistModel::data(const QModelIndex &index, int role) const {
         return entry.status;
     case LiveRole:
         return entry.live;
-    case QualityRole:
-        return entry.quality;
+    case SpecRole:
+        return entry.spec;
+    case SpecLabelRole:
+        return specLabelOf(entry);
     default:
         return {};
     }
@@ -57,7 +61,8 @@ QHash<int, QByteArray> PlaylistModel::roleNames() const {
         {HasLocalFileRole, "hasLocalFile"},
         {StatusRole, "status"},
         {LiveRole, "live"},
-        {QualityRole, "quality"},
+        {SpecRole, "spec"},
+        {SpecLabelRole, "specLabel"},
     };
 }
 
@@ -155,7 +160,13 @@ void PlaylistModel::setLocalFile(const QString &itemId, const QString &path) {
     if (itemId.isEmpty())
         return;
 
-    m_localFiles.insert(itemId, path);
+    // 空路径 = 撤销这条的映射(重试时要的就是这个:让"缓存"失效、重新下一遍)。
+    // 注意**别 insert 空值** —— 那样 hasLocalFile 会报 true(界面显示"就绪"),
+    // 可实际没有文件可放
+    if (path.isEmpty())
+        m_localFiles.remove(itemId);
+    else
+        m_localFiles.insert(itemId, path);
 
     const int row = indexOf(itemId);
     if (row >= 0)
@@ -212,9 +223,22 @@ QString PlaylistModel::localFile(const QString &itemId) const {
     return m_localFiles.value(itemId);
 }
 
-int PlaylistModel::qualityOf(const QString &itemId) const {
+QString PlaylistModel::specOf(const QString &itemId) const {
     const int row = indexOf(itemId);
-    return row >= 0 ? m_entries.at(row).quality : 0;
+    return row >= 0 ? m_entries.at(row).spec : QString();
+}
+
+// spec → 人话标签("1080P" / "手选 720P" / "最高画质")。
+// 手选的 format_id 和竖屏档位都要对着 formats 才翻得准,而列表这边没有
+// formats —— 传空 MediaInfo,翻不出来的部分退化成"手选"/原样数字。
+// (播放页手上有一整份 formats,那边显示的 label 才是全的)
+QString PlaylistModel::specLabelOf(const PlaylistEntry &entry) const
+{
+    if (entry.spec.isEmpty())
+        return entry.live ? QStringLiteral("直播") : QStringLiteral("最高画质");
+
+    // 现在每次进房都会重建模型,逐行解析没必要开缓存;真变热了再考虑
+    return StreamSpec::label(entry.spec, MediaInfo());
 }
 
 bool PlaylistModel::contains(const QString &itemId) const {

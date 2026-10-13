@@ -151,7 +151,7 @@ private slots:
     void onPositionTimer();
     void onPlaylistSwitched(const QString &itemId);
     // 网链模式:解析出直链(路径 A,秒开)或开始下载合并(路径 B)
-    void onUrlProbed();
+    void onUrlResolved();
     void onUrlReady(const QString &filePath);
 
 private:
@@ -160,8 +160,9 @@ private:
     void applyPlaylistItem(const QString &itemId);
     // 网链模式:准备某一条(解析 → 直链播放 或 下载合并)
     void prepareUrlItem(const QString &itemId);
-    // 清掉上一个条目的临时文件(不做持久缓存)
-    void cleanupPreparedItem();
+    // 停掉可能在跑的下载。**不删文件** —— 下载好的那份留着,切回这一条直接复用
+    // (缓存只在退出软件时清,见 removeRoomTempDir 的说明)
+    void cancelOngoingDownload();
     void updateSyncedState(qint64 position, bool playing);
     // 从成员表里取房主的视频时长(观众端的 duration 来源)
     qint64 hostDuration() const;

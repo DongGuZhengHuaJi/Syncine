@@ -54,7 +54,8 @@ public:
         HasLocalFileRole,
         StatusRole,      // 服务端聚合的匹配状态,见 PlaylistEntry::status
         LiveRole,        // 是不是直播源
-        QualityRole,     // 画质档位(高度上限,0 = 最高)
+        SpecRole,        // 画质选择(条目级 spec 字符串,见 PlaylistEntry::spec)
+        SpecLabelRole,   // 上面那条的人话标签("1080P"),由 FormatModel 翻出来
     };
     Q_ENUM(Role)
 
@@ -87,8 +88,8 @@ public:
     bool currentIsLive() const;
     bool currentReady() const;
     QString localFile(const QString &itemId) const;
-    // 某一条的画质档位(PlaybackSync 要用它拼 yt-dlp 的格式表达式)
-    int qualityOf(const QString &itemId) const;
+    // 某一条的画质选择 spec 字符串(PlaybackSync 拿它去解析下载,见 FormatModel.h)
+    QString specOf(const QString &itemId) const;
     // 条目是否存在
     bool contains(const QString &itemId) const;
 
@@ -98,6 +99,8 @@ signals:
 
 private:
     int indexOf(const QString &itemId) const;
+    // spec → 列表里那行小字("1080P" / "手选" / "最高画质")
+    QString specLabelOf(const PlaylistEntry &entry) const;
 
     QList<PlaylistEntry> m_entries;
     int m_currentIndex = -1;

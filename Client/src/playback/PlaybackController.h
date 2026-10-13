@@ -55,6 +55,11 @@ class PlaybackController : public QObject
                READ player
                CONSTANT)
 
+    // 当前加载的媒体(空 = 没加载)。本地文件的 HDR 检查靠它拿路径
+    Q_PROPERTY(QUrl source
+               READ source
+               NOTIFY sourceChanged)
+
     // Qquick 6.4 里 VideoOutput.videoSink 是只读的,只能由 QML 主动交出来
     Q_PROPERTY(QVideoSink* displayVideoSink
                READ displayVideoSink
@@ -87,6 +92,7 @@ public:
 
     QMediaPlayer *player() const;
     QVideoSink *displayVideoSink() const;
+    QUrl source() const;
 
     bool showingRemote() const;
     void setShowingRemote(bool showing);

@@ -61,11 +61,21 @@ class AppSettings : public QObject {
                WRITE setCookieImportedAt
                NOTIFY cookieImportedAtChanged)
 
-    // 网链模式加条目时默认选中的画质档位(高度上限,0 = 最高画质)
-    Q_PROPERTY(int defaultQuality
+    // 网链模式加条目时默认选中的画质档(spec 的"主体",见 FormatModel.h):
+    // "0" = 最高画质,"1080" = 不超过 1080P……
+    // 注意它**不带** HDR 后缀 —— 那是下面 hdrAllowed 的事,提交时由
+    // UrlInspector::buildSpec 缀上
+    Q_PROPERTY(QString defaultQuality
                READ defaultQuality
                WRITE setDefaultQuality
                NOTIFY defaultQualityChanged)
+
+    // 简单模式选档时**允不允许下 HDR/杜比视界**。
+    // 默认关:HDR 在 Qt 播放器上要过一遍离线转 SDR(见 HdrConverter),
+    Q_PROPERTY(bool hdrAllowed
+               READ hdrAllowed
+               WRITE setHdrAllowed
+               NOTIFY hdrAllowedChanged)
 
     // 日志级别:trace / debug / info / warn / error。
     // 注意环境变量 SYNCINE_LOG_LEVEL 优先级更高(临时调试用,见 applyLogLevel)
@@ -94,8 +104,11 @@ public:
     QString cookieImportedAt() const { return m_cookieImportedAt; }
     Q_INVOKABLE void setCookieImportedAt(const QString &isoTime);
 
-    int defaultQuality() const { return m_defaultQuality; }
-    Q_INVOKABLE void setDefaultQuality(int quality);
+    QString defaultQuality() const { return m_defaultQuality; }
+    Q_INVOKABLE void setDefaultQuality(const QString &quality);
+
+    bool hdrAllowed() const { return m_hdrAllowed; }
+    Q_INVOKABLE void setHdrAllowed(bool allowed);
 
     QString logLevel() const { return m_logLevel; }
     Q_INVOKABLE void setLogLevel(const QString &level);
@@ -125,6 +138,7 @@ signals:
     void cookieSourceChanged();
     void cookieImportedAtChanged();
     void defaultQualityChanged();
+    void hdrAllowedChanged();
     void logLevelChanged();
 
 private:
@@ -134,7 +148,9 @@ private:
     QString m_lastCookieBrowser;
     QString m_cookieSource;
     QString m_cookieImportedAt;
-    int m_defaultQuality = 0;
+    // 空 = 最高画质;数字串 = 高度上限(见头部的说明)
+    QString m_defaultQuality;
+    bool m_hdrAllowed = false;
     QString m_logLevel = QStringLiteral("info");
 };
 

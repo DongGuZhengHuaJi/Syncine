@@ -5,10 +5,12 @@
 #include "PlaybackSync.h"
 
 #include <QFile>
+#include <QFileInfo>
 
 #include "core/Log.h"
 #include "core/MediaHash.h"
 #include "core/UrlDownloader.h"
+#include "media/FormatModel.h"
 #include "playback/PlaybackController.h"
 
 namespace {
@@ -49,8 +51,8 @@ PlaybackSync::PlaybackSync(RoomSession *session,
 
     // ---- 网链模式:解析/下载的结果 ----
     if (m_urlDownloader != nullptr) {
-        connect(m_urlDownloader, &UrlDownloader::probed,
-                this, &PlaybackSync::onUrlProbed);
+        connect(m_urlDownloader, &UrlDownloader::resolved,
+                this, &PlaybackSync::onUrlResolved);
         connect(m_urlDownloader, &UrlDownloader::ready,
                 this, &PlaybackSync::onUrlReady);
         connect(m_urlDownloader, &UrlDownloader::stateChanged,
@@ -225,6 +227,10 @@ void PlaybackSync::retryCurrentItem() {
     if (m_urlDownloader != nullptr)
         m_urlDownloader->cancel();
     m_preparedItemId.clear();
+    m_preparingItemId.clear();
+    // "重试"的意思是**重新下一遍**:把缓存的映射删掉,否则 prepareUrlItem
+    // 会认出上一轮的产物直接复用它(重试就变成空转)
+    m_session->playlist()->setLocalFile(itemId, QString());
     prepareUrlItem(itemId);
 }
 
@@ -463,19 +469,29 @@ void PlaybackSync::prepareUrlItem(const QString &itemId)
     if (itemId == m_preparingItemId && m_urlDownloader != nullptr) {
         const QString stage = m_urlDownloader->stage();
         if (stage == QLatin1String("probing")
+            || stage == QLatin1String("resolved")   // 直链就绪,等 PlaybackSync 切播放器
             || stage == QLatin1String("downloading")
-            || stage == QLatin1String("merging")
-            || stage == QLatin1String("probed")) {
-            return; // 正在准备,或已经解析好等着切过来
+            || stage == QLatin1String("merging")) {
+            return; // 正在准备(或已经准备好),别把它推倒重来
         }
     }
     if (itemId == m_preparedItemId && m_playback->hasLoaded())
         return; // 已经就绪,播放器上就是它
 
-    // 换了条目:先把上一个的临时文件清掉(这条模式不做持久缓存),
-    // 并取消可能在跑的下载
-    if (m_preparedItemId != itemId)
-        cleanupPreparedItem();
+    // 这一条之前下过了(会话内缓存):直接放,不再解析下载。
+    // 缓存文件只在这两种时候消失:退出软件时整体清掉(见 PlaybackSync 的
+    // onSessionChanged),或者用户手点重试重新下载(那时会覆盖同一目录)。
+    const QString cached = m_session->playlist()->localFile(itemId);
+    if (!cached.isEmpty() && QFileInfo::exists(cached)) {
+        LOG_INFO("Playback") << "复用已下载的缓存:" << cached;
+        m_preparedItemId = itemId;
+        m_playback->load(QUrl::fromLocalFile(cached));
+        return;
+    }
+
+    // 换了条目:只把还在跑的下载停掉,**不删文件** —— 下好的那份留着,
+    // 切回来直接复用(以前这里是"切走就删",下过的片子每次都要重下)
+    cancelOngoingDownload();
     m_preparingItemId = itemId;
 
     // 准备期间播放器是空的 —— 门禁会自动挡住播放,界面显示"准备中"
@@ -487,16 +503,20 @@ void PlaybackSync::prepareUrlItem(const QString &itemId)
         return;
     }
 
-    // 按条目上记的档位解析:直链候选也要受这个上限约束,
-    // 否则"选 720P"可能被一个合一的 360P 直链顶掉(见 UrlDownloader.h 顶部说明)
-    const int quality = m_session->playlist()->qualityOf(itemId);
+    // 按条目上记的 spec 解析(见 FormatModel.h):选了什么就下什么,
+    // 各端拿同一条 spec 各自解析,内容才对得上
+    const QString spec = m_session->playlist()->specOf(itemId);
     LOG_INFO("Playback") << "网链模式:开始解析" << url
-                         << (quality > 0 ? QStringLiteral("(限 %1P)").arg(quality)
-                                         : QStringLiteral("(最高画质)"));
-    m_urlDownloader->probe(url, quality);
+                         << QStringLiteral("spec[%1]").arg(spec)
+                         << QStringLiteral("→")
+                         << StreamSpec::label(spec, MediaInfo());
+    // 下载合并要落盘,目录按条目算(clientId 不能少,见 itemTempDir 的说明)
+    m_urlDownloader->setDownloadDir(
+        UrlDownloader::itemTempDir(m_session->roomId(), m_session->clientId(), itemId));
+    m_urlDownloader->start(url, spec);
 }
 
-void PlaybackSync::onUrlProbed()
+void PlaybackSync::onUrlResolved()
 {
     if (m_urlDownloader == nullptr)
         return;
@@ -508,31 +528,16 @@ void PlaybackSync::onUrlProbed()
         return;
     }
 
-    if (m_urlDownloader->canStreamDirectly()) {
-
-        // 路径 A:站点给了单文件格式 —— 直链交给播放器:秒开、能拖、不落盘
-        LOG_INFO("Playback") << "直链播放:" << m_urlDownloader->title();
-        // 记成"已就绪":直链这条路没有临时文件,但同样不该被反复重新解析
-        m_preparedItemId = itemId;
-        m_playback->load(QUrl(m_urlDownloader->directUrl()));
+    // 只有"直链可播"才会走到这个信号(分离流会自己进下载,见 UrlDownloader::start)
+    if (!m_urlDownloader->direct())
         return;
-    }
 
-    // 直播没有"下完"这一刻 —— 下载合并对它不成立。
-    // 走到这里说明这个直播源没有可直接播放的流(通常是要登录/要特殊请求头)
-    if (m_urlDownloader->live()) {
-        m_urlDownloader->reportFailure(QStringLiteral(
-            "这个直播源没有可直接播放的流(可能需要登录或特殊请求头)"));
-        return;
-    }
-
-    // 路径 B:画面/声音分离,只能下完再合并。下载期间门禁挡着播放,
-    // 界面显示进度(PlaybackSync 的 download* 属性)
-    LOG_INFO("Playback") << "需要下载合并:" << m_urlDownloader->title();
-    m_urlDownloader->download(
-        m_session->urlFor(itemId),
-        UrlDownloader::itemTempDir(m_session->roomId(), m_session->clientId(), itemId),
-        m_session->playlist()->qualityOf(itemId));
+    // 路径 A:选中的是音视频合一格式(或直播的 m3u8)—— 直链交给播放器:
+    // 秒开、能拖、不落盘
+    LOG_INFO("Playback") << "直链播放:" << m_urlDownloader->title();
+    // 记成"已就绪":直链这条路没有临时文件,但同样不该被反复重新解析
+    m_preparedItemId = itemId;
+    m_playback->load(QUrl(m_urlDownloader->directUrl()));
 }
 
 void PlaybackSync::onUrlReady(const QString &filePath)
@@ -544,22 +549,21 @@ void PlaybackSync::onUrlReady(const QString &filePath)
         return;
     }
 
+    // 记下这份缓存属于哪一条:切走再切回来时靠它直接复用,不必重新解析下载。
+    // (会话内的映射;退出软件时缓存文件本身会被清掉,这份映射也随会话结束消失)
+    m_session->playlist()->setLocalFile(itemId, filePath);
+
     m_preparedItemId = itemId;
     m_playback->load(QUrl::fromLocalFile(filePath));
 }
 
-void PlaybackSync::cleanupPreparedItem()
+void PlaybackSync::cancelOngoingDownload()
 {
-    if (m_preparedItemId.isEmpty())
+    if (m_urlDownloader == nullptr)
         return;
-
-    if (m_urlDownloader != nullptr) {
-        m_urlDownloader->cancelAndRemoveDir(
-            UrlDownloader::itemTempDir(m_session->roomId(), m_session->clientId(),
-                                       m_preparedItemId));
-    }
-    LOG_DEBUG("Playback") << "已清理上一个条目的临时文件";
-    m_preparedItemId.clear();
+    // **只停进程,不删文件** —— 下载好的那份留着给下次复用。
+    // 删文件的时机只有两个:退出软件(整目录清掉)、重试(覆盖同一目录)
+    m_urlDownloader->cancel();
 }
 
 void PlaybackSync::onPositionTimer() {
@@ -590,15 +594,13 @@ void PlaybackSync::pushVideoStatus() {
     QString sourceHash;
     if (m_session->roomMode() == RoomSession::RoomMode::Url) {
         const QString itemId = m_session->playlist()->currentItemId();
-        // 画质档位要拼进去:各人按同一上限各自下载,档位不同就是不同的内容,
+        // spec 要拼进去:各人按同一条 spec 各自下载,spec 不同就是不同的内容,
         // 必须算成不同的来源身份 —— 否则"我下 720P 你下 1080P"会被判成"已匹配"。
-        // 直播没有档位(清单自己协商),照旧只拼 #live。
-        const int quality = m_session->playlist()->qualityOf(itemId);
-        const QString qualityTag = m_session->playlist()->currentIsLive()
-                                       ? QStringLiteral("#live")
-                                       : (quality > 0 ? QStringLiteral("#%1").arg(quality)
-                                                      : QStringLiteral("#best"));
-        sourceHash = MediaHash::forText(m_session->urlFor(itemId) + qualityTag);
+        // 直播照旧只拼 #live(清晰度由清单自己协商,各端可能不一样)。
+        const QString specTag = m_session->playlist()->currentIsLive()
+                                    ? QStringLiteral("#live")
+                                    : QStringLiteral("#") + m_session->playlist()->specOf(itemId);
+        sourceHash = MediaHash::forText(m_session->urlFor(itemId) + specTag);
     }
 
     m_session->reportVideoStatus(m_playback->hasLoaded(),

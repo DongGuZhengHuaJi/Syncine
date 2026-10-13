@@ -4,6 +4,7 @@
 
 #include "RoomSession.h"
 
+#include <QCryptographicHash>
 #include <QFileInfo>
 #include <QUuid>
 
@@ -275,15 +276,30 @@ void RoomSession::reportPlaylistFile(const QString &itemId, const QString &path)
     send(Protocol::encodePlaylistStatus(itemId, !hash.isEmpty(), hash));
 }
 
+void RoomSession::addUrlWithId(const QString &itemId, const QString &url,
+                               const QString &title, bool live,
+                               qint64 durationMs, const QString &spec) {
+    if (!m_inRoom || url.isEmpty() || itemId.isEmpty())
+        return;
+
+    send(Protocol::encodePlaylistAdd(itemId,
+                                     title.isEmpty() ? url : title,
+                                     url, durationMs, live, spec));
+}
+
 void RoomSession::addUrl(const QString &url, const QString &title, bool live,
-                         qint64 durationMs, int quality) {
+                         qint64 durationMs, const QString &spec) {
     if (!m_inRoom || url.isEmpty())
         return;
 
-    const QString itemId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    send(Protocol::encodePlaylistAdd(itemId,
-                                     title.isEmpty() ? url : title,
-                                     url, durationMs, live, quality));
+    // itemId 由 URL 算:**同一链接 = 同一个条目**,各端各加一次不会变成两条
+    // (服务端查重按 itemId 比)。哈希而不是原样带 url:它要进协议。
+    // 剧集不用这条 —— 它们用平台集号(见 FormatModel 的 Episodes::itemId)
+    const QByteArray digest = QCryptographicHash::hash(url.toUtf8(),
+                                                       QCryptographicHash::Sha1);
+    const QString itemId = QStringLiteral("url")
+                           + QString::fromLatin1(digest.toHex().left(16));
+    addUrlWithId(itemId, url, title, live, durationMs, spec);
 }
 
 void RoomSession::assignLocalFile(const QString &itemId, const QUrl &fileUrl) {

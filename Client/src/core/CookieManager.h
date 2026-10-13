@@ -44,7 +44,7 @@ class CookieManager : public QObject {
     Q_OBJECT
 
     // 探测到的浏览器。每项 {label, value},value 是喂给 yt-dlp 的 key。
-    // 形状和 urlDownloader.qualities 一致,可以直接喂 OptionList
+    // 形状和 OptionList 的 options 一致,可以直接喂它
     Q_PROPERTY(QVariantList browsers
                READ browsers
                NOTIFY browsersChanged)

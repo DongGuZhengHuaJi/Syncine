@@ -11,10 +11,12 @@
 
 #include "core/AppSettings.h"
 #include "core/CookieManager.h"
+#include "core/HdrConverter.h"
 #include "core/Log.h"
 #include "core/NetworkManager.h"
 #include "core/Toolchain.h"
 #include "core/UrlDownloader.h"
+#include "media/UrlInspector.h"
 #include "playback/PlaybackController.h"
 #include "playback/PlaybackSync.h"
 #include "session/RoomSession.h"
@@ -64,18 +66,21 @@ int main(int argc, char *argv[]) {
     // 必须在 Toolchain 之后(要用它的 yt-dlp 路径)、在两个下载器之前
     CookieManager cookieManager(&toolchain, &appSettings);
 
+    // HDR → SDR:检测到 HDR 视频时提示用户转码(Qt 的渲染不做色调映射,会过曝)
+    HdrConverter hdrConverter(&toolchain);
+
     // ---- 房间与会话 ----
     RoomSession roomSession(&networkManager);
     SessionController sessionController(&networkManager, &roomSession);
 
     // ---- 网链模式:把链接变成能播的媒体 ----
     //
-    // 两个实例,互不干扰:
+    // 两个对象,互不干扰:
     //   playbackDownloader —— 跟着房间的"当前条目"走,由 PlaybackSync 驱动
-    //   uiDownloader       —— 加条目时"粘贴链接 → 看标题/时长"用,界面直接调
+    //   urlInspector       —— 加条目时"粘贴链接 → 看标题/画质/流列表"用,弹窗直接调
     // 共用一个的话,一边在解析时另一边就被挡掉了。
     UrlDownloader playbackDownloader(&toolchain, &cookieManager);
-    UrlDownloader uiDownloader(&toolchain, &cookieManager);
+    UrlInspector urlInspector(&toolchain, &cookieManager);
 
     // ---- 播放同步:唯一同时持有「房间」和「播放器」的地方 ----
     PlaybackSync playbackSync(&roomSession, &playbackController, &playbackDownloader);
@@ -102,6 +107,13 @@ int main(int argc, char *argv[]) {
     //
     // 挡在 push 之前而不是只关轨道,是因为 Qt 帧 → I420 那次逐行转换是纯 CPU
     // 开销,放在门控里面一起省掉。轨道本身的开关见下面的 updateVideoEnabled。
+    // 加载本地文件后查一下是不是 HDR —— 是的话界面会提示"要不要转成 SDR"。
+    // Qt 的渲染不做 HDR→SDR 映射,直接播会亮处过曝(详见 HdrConverter 顶部说明)。
+    QObject::connect(&playbackController, &PlaybackController::sourceChanged, &app,
+                     [&playbackController, &hdrConverter]() {
+                         hdrConverter.check(playbackController.source());
+                     });
+
     QObject::connect(&playbackController, &PlaybackController::videoFrameAvailable,
                      &app, [&webrtcManager, &roomSession](const QVideoFrame &f) {
                          if (roomSession.roomMode() != RoomSession::RoomMode::Share)
@@ -184,9 +196,11 @@ int main(int argc, char *argv[]) {
     engine.rootContext()->setContextProperty("sessionController", &sessionController);
     engine.rootContext()->setContextProperty("playbackSync", &playbackSync);
     engine.rootContext()->setContextProperty("signalingChannel", &signalingChannel);
-    // 界面用的下载器:只负责"加条目"时的解析(标题/时长/能不能直链)
-    engine.rootContext()->setContextProperty("urlDownloader", &uiDownloader);
+    // 界面用的探测器:加条目时解析链接(标题/时长/画质档位/流列表)。
+    // 它只"看"不下载 —— 真正的下载走 playbackSync 那条线
+    engine.rootContext()->setContextProperty("urlInspector", &urlInspector);
     engine.rootContext()->setContextProperty("cookieManager", &cookieManager);
+    engine.rootContext()->setContextProperty("hdrConverter", &hdrConverter);
 
     // 外部工具链(yt-dlp / ffmpeg)。先让它去自检 —— 版本探测是异步的
     // (yt-dlp 是 PyInstaller 包,启动要几百毫秒),不会卡住界面。
@@ -202,6 +216,13 @@ int main(int argc, char *argv[]) {
     )));
 
     const int exitCode = app.exec();
+
+    // 退出前退一次房:临时文件(下载合并出来的视频)在这里整体清掉 ——
+    // **这是缓存唯一的删除时机**(切条目只停下载、不删文件,下载好的切回来直接复用)。
+    // 关窗口时 RoomPage 只是被销毁,不会发 leave_room,所以必须在这里显式调;
+    // 顺带也让服务端立刻知道我们走了,不用等心跳超时。
+    sessionController.leaveRoom();
+
     Log::shutdown();
     return exitCode;
 }

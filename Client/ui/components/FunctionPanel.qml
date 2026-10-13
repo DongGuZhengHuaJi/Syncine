@@ -278,14 +278,15 @@ Rectangle {
             // (同步模式还是走"选本地文件"的对话框)
             readonly property bool isUrlMode: roomSession.roomMode === RoomSession.Url
 
-            function subtitleFor(dur, url, isLive, quality) {
+            function subtitleFor(dur, url, isLive, label) {
                 const parts = []
                 // 直播没有时长:标"直播"
                 parts.push(isLive ? "直播" : (dur > 0 ? Style.formatTime(dur) : "--:--"))
                 parts.push(url !== "" ? "网链" : "本地文件")
-                // 档位:0 = 最高(不显示,免得每条都拖一句"最高画质")
-                if (url !== "" && quality > 0)
-                    parts.push(quality + "P")
+                // 画质标签("1080P"/"手选 720P")。最高画质和直播不显示 ——
+                // 免得每条都拖一句看不出信息的话(specLabel 里那两种就是它们)
+                if (url !== "" && label !== "" && label !== "最高画质" && label !== "直播")
+                    parts.push(label)
                 return parts.join(" · ")
             }
 
@@ -428,7 +429,7 @@ Rectangle {
                                 spacing: 6
 
                                 Text {
-                                    text: playlistTab.subtitleFor(duration, url, live, quality)
+                                    text: playlistTab.subtitleFor(duration, url, live, specLabel)
                                     font.pixelSize: 11
                                     color: Style.textFaint
                                 }

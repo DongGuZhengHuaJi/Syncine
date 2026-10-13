@@ -287,6 +287,10 @@ QVideoSink *PlaybackController::displayVideoSink() const {
     return m_outputSink;
 }
 
+QUrl PlaybackController::source() const {
+    return m_player != nullptr ? m_player->source() : QUrl();
+}
+
 bool PlaybackController::showingRemote() const {
     return m_showingRemote;
 }

@@ -251,6 +251,8 @@ qt_add_executable(Syncine
         src/core/AppSettings.h
         src/core/CookieManager.cpp
         src/core/CookieManager.h
+        src/core/HdrConverter.cpp
+        src/core/HdrConverter.h
         src/core/Log.cpp
         src/core/Log.h
         src/core/MediaHash.cpp
@@ -264,6 +266,12 @@ qt_add_executable(Syncine
         src/core/Protocol.cpp
         src/core/Protocol.h
         src/core/RoomTypes.h
+
+        # media:格式模型与探测(不认识房间,也不认识播放器)
+        src/media/FormatModel.cpp
+        src/media/FormatModel.h
+        src/media/UrlInspector.cpp
+        src/media/UrlInspector.h
 
         # playback:本地播放器 + 播放同步策略
         src/playback/PlaybackController.cpp
@@ -310,6 +318,7 @@ target_include_directories(Syncine
         PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/media"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/playback"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/session"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/webrtc"
@@ -347,6 +356,7 @@ qt_add_qml_module(Syncine
         ui/components/MessageDialog.qml
         ui/components/AddVideoDialog.qml
         ui/components/OptionList.qml
+        ui/components/FormatList.qml
         ui/components/AppTextField.qml
         ui/components/ModeButton.qml
         ui/components/AppIcon.qml

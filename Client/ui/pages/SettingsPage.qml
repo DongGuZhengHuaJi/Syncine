@@ -236,22 +236,45 @@ Item {
                         wrapMode: Text.Wrap
                         font.pixelSize: 12
                         color: Style.textFaint
-                        text: "网链模式加条目时的默认档位(存的是高度上限:1080 = 不超过 1080P)。"
+                        text: "网链模式加条目时的默认档位(1080 = 不超过 1080P,"
+                              + "下载时按\"分辨率优先、H.264 优先、AAC 优先\"的规则挑选)。"
                               + "条目上会记下当时选的档位,改这里不影响已经加好的条目"
                     }
 
                     OptionList {
+                        // value 是 spec 的"主体"("" = 最高画质,见 FormatModel.h)
                         options: [
-                            { label: "最高画质", value: 0 },
-                            { label: "2160P(4K)", value: 2160 },
-                            { label: "1440P(2K)", value: 1440 },
-                            { label: "1080P", value: 1080 },
-                            { label: "720P", value: 720 },
-                            { label: "480P", value: 480 },
-                            { label: "360P", value: 360 }
+                            { label: "最高画质", value: "" },
+                            { label: "2160P(4K)", value: "2160" },
+                            { label: "1440P(2K)", value: "1440" },
+                            { label: "1080P", value: "1080" },
+                            { label: "720P", value: "720" },
+                            { label: "480P", value: "480" },
+                            { label: "360P", value: "360" }
                         ]
                         selectedValue: appSettings.defaultQuality
                         onPicked: (value) => appSettings.setDefaultQuality(value)
+                    }
+
+                    Label {
+                        width: parent.width
+                        topPadding: 6
+                        wrapMode: Text.Wrap
+                        font.pixelSize: 12
+                        color: Style.textFaint
+                        text: "动态范围(HDR / 杜比视界)。开着的话,"
+                              + "画质档会优先挑带 HDR 的流 —— 下载没问题,"
+                              + "但当前播放器要先离线转成 SDR 才能正常显示(亮处会过曝);"
+                              + "关了则只挑 SDR 流。详情视图里看到的 HDR 标不受这个开关限制"
+                    }
+
+                    OptionList {
+                        options: [
+                            { label: "优先 SDR(推荐)", value: false },
+                            { label: "允许 HDR", value: true }
+                        ]
+                        selectedValue: appSettings.hdrAllowed
+                        onPicked: (value) => appSettings.setHdrAllowed(value)
                     }
                 }
             }

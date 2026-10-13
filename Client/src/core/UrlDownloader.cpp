@@ -1,12 +1,8 @@
 #include "UrlDownloader.h"
 
-#include <algorithm>
-
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QHash>
-#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
@@ -14,7 +10,7 @@
 #include <QNetworkRequest>
 #include <QProcess>
 #include <QStandardPaths>
-#include <QVariantMap>
+#include <QUrl>
 
 #include "core/CookieManager.h"
 #include "core/Log.h"
@@ -65,167 +61,6 @@ QString formatEta(int seconds)
         .arg(seconds % 60, 2, 10, QLatin1Char('0'));
 }
 
-// 这批格式里有没有 HLS(m3u8)的
-bool isHls(const QJsonArray &formats)
-{
-    for (const QJsonValue &value : formats) {
-        if (value.toObject().value(QStringLiteral("protocol")).toString()
-                .contains(QLatin1String("m3u8"))) {
-            return true;
-        }
-    }
-    return false;
-}
-
-QVariantMap qualityEntry(const QString &label, int height)
-{
-    QVariantMap map;
-    map[QStringLiteral("label")] = label;
-    map[QStringLiteral("height")] = height;
-    return map;
-}
-
-// 把 formats 归纳成"人话的"画质档位:按画面高度去重、从高到低。
-//
-// 为什么要归纳而不是把几十条 formats 直接列出来:同一个高度通常有好几条
-// (B 站 1080P 就有 h264 / hevc / av1 三种),对用户来说它们是同一档;
-// 到底用哪条编码是 yt-dlp 排序的事,不该让用户选。
-//
-// 首项固定是 { 最高画质, height=0 } —— 它和"最新版 yt-dlp 自己挑的"等价,
-// 也就是这个功能上线之前的行为,所以默认选它 = 什么都没变。
-QVariantList qualityOptionsFromFormats(const QJsonArray &formats, bool isLive)
-{
-    QVariantList options;
-
-    // 直播的画质是清单自己协商的(EXT-X-MEDIA / 播放器自适应),
-    // 没有"档位"这回事 —— 只给一项,界面会把它整块藏起来。
-    if (isLive) {
-        options.append(qualityEntry(QStringLiteral("最高画质"), 0));
-        return options;
-    }
-
-    QHash<int, double> bestFps; // 高度 → 该高度下的最高帧率
-    QList<int> heights;
-    for (const QJsonValue &value : formats) {
-        const QJsonObject format = value.toObject();
-        // 纯音频(vcodec 为 none)和没有高度的项(少数直链文件)不构成画质档位
-        if (format.value(QStringLiteral("vcodec")).toString() == QLatin1String("none"))
-            continue;
-        const int height = format.value(QStringLiteral("height")).toInt(0);
-        if (height <= 0)
-            continue;
-
-        if (!heights.contains(height))
-            heights.append(height);
-
-        const double fps = format.value(QStringLiteral("fps")).toDouble(0);
-        if (fps > bestFps.value(height, 0.0))
-            bestFps.insert(height, fps);
-    }
-
-    std::sort(heights.begin(), heights.end(), std::greater<int>());
-
-    options.append(qualityEntry(QStringLiteral("最高画质"), 0));
-    for (const int height : heights) {
-        QString label = QStringLiteral("%1P").arg(height);
-        // 59.94 这种也按 60 算,阈值取 50 比 60 稳
-        if (bestFps.value(height, 0.0) >= 50.0)
-            label += QStringLiteral("60");
-        options.append(qualityEntry(label, height));
-    }
-    return options;
-}
-
-QString pickDirectFormat(const QJsonArray &formats, bool isLive, int heightCap,
-                         QString *rejectReason)
-{
-    // ---- 直播:HLS 的 master 清单 ----
-    //
-    // HLS 有个别的协议没有的能力:master 清单里能用 EXT-X-MEDIA 把音视频
-    // 分成两条列出来,**播放器自己会把它们合起来播**。所以对 HLS 不挑具体格式,
-    // 直接把 master 清单交给播放器就行。
-    //
-    // 这不是优化,是**直播唯一可行的形态**:直播源基本都是音视频分离的,
-    // 而直播没有"下完"这一刻,下载合并对它不成立。
-    // (DASH/mpd 没有这个能力 —— ffmpeg 只有 dash 封装器,没有解封装器,
-    //  所以那种源只能走下载合并。)
-    //
-    // **只有直播才走这条路**:拿 HLS 换来的代价是"时长未知、不能拖进度"
-    // (实测 Apple 的 HLS 样片:加载成功但 duration=0、seekable=false)。
-    // 普通视频那样做就丢掉了拖动和位置同步,所以 VOD 一律走下面那两条。
-    //
-    // 挑法(按优先级):
-    //   1. h264 的 m3u8 —— 兼容性最好
-    //   2. 任意 m3u8
-    // 地址优先用 `manifest_url`(master 清单,能带 EXT-X-MEDIA);
-    // **它为空时用格式自己的 url** —— 实测 B 站直播就是这种:manifest_url 为空,
-    // 但那条 url 指的 m3u8 里 h264 + aac 都有,而且不带 Referer 也能拉,
-    // 这才是能用的那一条(它同时列出的 HEVC FLV 反而要 Referer)。
-    QString hlsAny;
-    QString hlsAvc;
-    for (const QJsonValue &value : isLive ? formats : QJsonArray()) {
-        const QJsonObject format = value.toObject();
-        if (!format.value(QStringLiteral("protocol")).toString()
-                 .contains(QLatin1String("m3u8"))) {
-            continue;
-        }
-
-        QString candidate = format.value(QStringLiteral("manifest_url")).toString();
-        if (candidate.isEmpty())
-            candidate = format.value(QStringLiteral("url")).toString();
-        if (candidate.isEmpty())
-            continue;
-
-        if (hlsAny.isEmpty())
-            hlsAny = candidate;
-
-        const QString vcodec = format.value(QStringLiteral("vcodec")).toString();
-        if (hlsAvc.isEmpty()
-            && (vcodec.startsWith(QLatin1String("avc"), Qt::CaseInsensitive)
-                || vcodec.startsWith(QLatin1String("h264"), Qt::CaseInsensitive))) {
-            hlsAvc = candidate;
-        }
-    }
-    if (!hlsAvc.isEmpty())
-        return hlsAvc;
-    if (!hlsAny.isEmpty())
-        return hlsAny;
-
-    // ---- 退路:挑一个"画面和声音在同一个流里"的格式 ----
-    //
-    // **指定了档位就要求高度正好等于档位**:高清基本是音视频分离的,
-    // 合一的只有低清 —— 放宽成"不超过"的话,用户选 1080P 会静默变成
-    // 秒开 360P。宁可返回空、老老实实走下载合并(用户选哪档就该拿到哪档)。
-    QString bestUrl;
-    int bestHeight = -1;
-
-    for (const QJsonValue &value : formats) {
-        const QJsonObject format = value.toObject();
-
-        const QString vcodec = format.value(QStringLiteral("vcodec")).toString();
-        const QString acodec = format.value(QStringLiteral("acodec")).toString();
-        // 检测到纯视频或纯音频
-        if (vcodec == QLatin1String("none") || acodec == QLatin1String("none"))
-            continue;
-
-        const QString url = format.value(QStringLiteral("url")).toString();
-        if (url.isEmpty())
-            continue;
-
-        // 分辨率高的优先;直链文件没有 height 字段(是 null),按 0 算也能选中
-        const int height = format.value(QStringLiteral("height")).toInt(0);
-        if (heightCap > 0 && height != heightCap)
-            continue;
-
-        if (height > bestHeight) {
-            bestHeight = height;
-            bestUrl = url;
-        }
-    }
-
-    return bestUrl;
-}
-
 // 从 yt-dlp 的输出里挑"原因"那一行。它出错时总是打一行 ERROR: 开头的话,
 // 而周围混着别的东西(合并通道把 stderr 也并进来了,`-J` 失败时还会单独
 // 输出一个 null)—— 整段原样显示会带一堆噪声,只挑 ERROR 那行最清楚。
@@ -238,6 +73,19 @@ QString errorFromOutput(const QStringList &output, const QString &fallback)
             return line;
     }
     return output.isEmpty() ? fallback : output.join(QLatin1Char('\n'));
+}
+
+// 手动钉的 format_id 在本端 formats 里不存在时,yt-dlp 会报这个。
+// 这时退回"按档位重挑"再试一次(见 handleDownloadFinished)。
+bool looksLikeFormatUnavailable(const QStringList &output)
+{
+    for (const QString &line : output) {
+        if (line.contains(QLatin1String("Requested format is not available"))
+            || line.contains(QLatin1String("format not available"))) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -271,12 +119,6 @@ QString UrlDownloader::itemTempDir(const QString &roomId, const QString &clientI
            + QLatin1Char('/') + sanitize(itemId);
 }
 
-void UrlDownloader::removeItemTempDir(const QString &roomId, const QString &clientId,
-                                      const QString &itemId)
-{
-    QDir(itemTempDir(roomId, clientId, itemId)).removeRecursively();
-}
-
 void UrlDownloader::removeRoomTempDir(const QString &roomId, const QString &clientId)
 {
     QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation)
@@ -284,35 +126,11 @@ void UrlDownloader::removeRoomTempDir(const QString &roomId, const QString &clie
          + QLatin1Char('/') + sanitize(roomId)).removeRecursively();
 }
 
-void UrlDownloader::cancelAndRemoveDir(const QString &dir)
-{
-    if (m_process == nullptr) {
-        QDir(dir).removeRecursively(); // 没有在跑的进程,直接删
-        return;
-    }
-
-    m_removeDirAfterExit = dir;
-    m_process->kill();
-}
-
 // ============================
-// 探测
+// 解析
 // ============================
 
-void UrlDownloader::probe(const QString &url, int heightCap)
-{
-    m_heightCap = heightCap;
-    startProbe(url, /*inspectOnly=*/false);
-}
-
-void UrlDownloader::inspect(const QString &url)
-{
-    // 只是给人看一眼有哪些档位,不涉及直链,所以档位上限无意义
-    m_heightCap = 0;
-    startProbe(url, /*inspectOnly=*/true);
-}
-
-void UrlDownloader::startProbe(const QString &url, bool inspectOnly)
+void UrlDownloader::start(const QString &url, const QString &spec)
 {
     if (m_process != nullptr) {
         LOG_DEBUG("UrlDownloader") << "上一次任务还没结束,忽略这次解析";
@@ -323,13 +141,15 @@ void UrlDownloader::startProbe(const QString &url, bool inspectOnly)
         return;
     }
 
+    startResolve(url, spec);
+}
+
+void UrlDownloader::startResolve(const QString &url, const QString &spec)
+{
     m_url = url;
-    m_inspectOnly = inspectOnly;
-    m_title.clear();
-    m_uploader.clear();
-    m_durationMs = 0;
-    m_directUrl.clear();
-    m_qualities.clear();
+    m_spec = spec;
+    m_media = MediaInfo();
+    m_selection = MediaSelection();
     m_error.clear();
     m_progress = -1;
     m_detail.clear();
@@ -338,73 +158,54 @@ void UrlDownloader::startProbe(const QString &url, bool inspectOnly)
     startProcess({QStringLiteral("-J"), QStringLiteral("--no-playlist")}, url);
 }
 
-void UrlDownloader::handleProbeFinished()
+void UrlDownloader::handleResolveFinished(int exitCode)
 {
-    const QByteArray output = m_outputBuffer;
     // 探测的 stdout 就是那一整份 JSON(合并通道后它可能和警告混在一起,
     // 所以从第一个 '{' 开始截)
+    const QByteArray output = m_outputBuffer;
     const int start = output.indexOf('{');
     const QJsonDocument document = start >= 0
         ? QJsonDocument::fromJson(output.mid(start))
         : QJsonDocument();
-    if (!document.isObject()) {
+    if (exitCode != 0 || !document.isObject()) {
         fail(errorFromOutput(m_outputTail, QStringLiteral("yt-dlp 没能解析这个链接")));
         return;
     }
 
-    const QJsonObject root = document.object();
-    m_title = root.value(QStringLiteral("title")).toString();
-    // uploader 是通用字段,频道类的站点给 channel,拿不到就算了(界面会少显示一段)
-    m_uploader = root.value(QStringLiteral("uploader")).toString();
-    if (m_uploader.isEmpty())
-        m_uploader = root.value(QStringLiteral("channel")).toString();
+    m_media = MediaFormats::parseMediaInfo(document.object());
+    m_selection = MediaFormats::resolve(m_spec, m_media);
 
-    const QJsonArray formats = root.value(QStringLiteral("formats")).toArray();
-    const double seconds = root.value(QStringLiteral("duration")).toDouble(0);
-    m_durationMs = static_cast<qint64>(seconds * 1000);
-
-    // ---- 直播判定 ----
-    // yt-dlp 的 is_live 只在"提取器认识这个站点"时才准;裸 m3u8 链接走通用
-    // 提取器时它常常是 null。补一条:是 HLS 又**算不出总时长** —— 直播清单没有
-    // EXT-X-ENDLIST,推不出时长,这个特征足够可靠(实测 VOD 的 HLS 能算出时长)。
-    m_isLive = root.value(QStringLiteral("is_live")).toBool(false);
-    if (!m_isLive && m_durationMs <= 0 && isHls(formats))
-        m_isLive = true;
-
-    // 画质档位:两条路都要(弹窗拿它给用户挑,播放路径也要知道自己被限在哪一档)
-    m_qualities = qualityOptionsFromFormats(formats, m_isLive);
-
-    if (m_inspectOnly) {
-        // 只是"看一看":不挑直链、也不试拉 —— 那一步最多要等 8 秒,
-        // 而弹窗这会儿只需要标题/时长/档位列表
-        m_directUrl.clear();
-        finishProbe();
+    if (!m_selection.valid) {
+        // 直播走到这里 = 没有能直接拉的流(通常是要登录/要特殊请求头);
+        // 普通视频走到这里 = 连一条画面都挑不出来(空 formats 之类)
+        reportFailure(m_media.live
+                          ? QStringLiteral("这个直播源没有可直接播放的流"
+                                           "，请检查输入内容或Cookie状态")
+                          : QStringLiteral("这个视频源没有可供下载的流"
+                                            "，请检查输入内容或Cookie状态"));
         return;
     }
 
-    QString rejectReason;
-    const QString candidate = pickDirectFormat(formats, m_isLive, m_heightCap, &rejectReason);
+    LOG_INFO("UrlDownloader") << "解析完成:" << m_media.title
+                              << QStringLiteral("spec[%1]").arg(m_spec)
+                              << "→" << m_selection.label
+                              << (m_selection.direct ? "(直链)" : "(下载合并)");
 
-    if (candidate.isEmpty() || m_network == nullptr) {
-        m_directUrl.clear();
-        m_verifyRejectReason = rejectReason;
-        finishProbe();
+    if (m_selection.direct) {
+        // 合一格式(或直播的 m3u8):试一下能不能直接拉 —— 能就交给播放器
+        m_verifyCandidate = m_selection.url;
+        verifyDirectUrl(m_verifyCandidate);
         return;
     }
 
-    // 有候选:**实际试一下**再决定能不能直连(异步,完了走 finishProbe)
-    m_verifying = true;
-    m_verifyCandidate = candidate;
-    m_verifyRejectReason.clear();
-    verifyDirectUrl(candidate);
+    beginDownload(exitCode);
 }
 
 void UrlDownloader::verifyDirectUrl(const QString &url)
 {
     QNetworkRequest request{QUrl(url)};
-    // 只要第一个字节:既验证了可达性,又不会把整个媒体拉下来。
-    // **不带任何自定义头** —— 要测的就是"播放器那种处境下能不能拉"
-    // (QMediaPlayer 加不了 Referer/Cookie)。
+    // 测试一个字节，验证能否响应
+    // 不携带消息头(Referer/Cookie) —— 后续播放器无法携带
     request.setRawHeader("Range", "bytes=0-0");
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -415,12 +216,10 @@ void UrlDownloader::verifyDirectUrl(const QString &url)
     auto *gotData = new bool(false);
 
     connect(reply, &QNetworkReply::readyRead, this, [reply, gotData]() {
-        // 能拉就立刻断:直播流会一直吐字节,不能等它结束(直播永远不会结束)。
-        //
-        // **先看状态码**:403/404 的响应体是 HTML 错误页,它同样会触发 readyRead ——
-        // 只看"有没有数据"会把"被拒绝"当成"能拉"(实测踩过)。
+        // 不做重复处理
         if (*gotData)
             return;
+        // 检测 HTTP 状态码范围
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (status < 200 || status >= 300)
             return;
@@ -430,68 +229,44 @@ void UrlDownloader::verifyDirectUrl(const QString &url)
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, gotData]() {
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        // HTTP 200/206 认为成功
         const bool ok = *gotData || status == 200 || status == 206;
         delete gotData;
         reply->deleteLater();
         m_verifyReply = nullptr;
-        m_verifying = false;
 
         if (ok) {
             LOG_INFO("UrlDownloader") << "直链可直接拉取(HTTP" << status << ")";
-            m_directUrl = m_verifyCandidate;
-        } else {
-            m_directUrl.clear();
-            m_verifyRejectReason =
-                QStringLiteral("直链拉不动(HTTP %1),通常要 Referer/Cookie,"
-                               "播放器加不了请求头(导入了 cookie 也一样 —— "
-                               "cookie 只作用于下载那条路)")
-                    .arg(status > 0 ? QString::number(status) : QStringLiteral("连接失败"));
-            LOG_WARN("UrlDownloader") << "直链试拉失败: HTTP" << status << reply->errorString();
+            m_selection.url = m_verifyCandidate;
+            setStage(QStringLiteral("resolved"));
+            emit resolved();
+            return;
         }
-        finishProbe();
+
+        LOG_WARN("UrlDownloader") << "直链试拉失败: HTTP" << status << reply->errorString();
+        if (m_media.live) {
+            fail(QStringLiteral("这个直播源拉不动(HTTP %1,通常要 Referer/Cookie,"
+                                "播放器加不了请求头)")
+                     .arg(status > 0 ? QString::number(status) : QStringLiteral("连接失败")));
+            return;
+        }
+        m_selection.direct = false;
+        beginDownload(0);
     });
 }
 
-void UrlDownloader::finishProbe()
+void UrlDownloader::beginDownload(int /*exitCode*/)
 {
-    if (m_inspectOnly) {
-        QStringList labels;
-        for (const QVariant &option : m_qualities)
-            labels << option.toMap().value(QStringLiteral("label")).toString();
-        LOG_INFO("UrlDownloader") << "解析完成(只看画质):" << m_title
-                                  << QStringLiteral("档位[%1]").arg(labels.join(QLatin1Char('/')));
-    } else if (m_directUrl.isEmpty()) {
-        LOG_INFO("UrlDownloader") << (m_isLive ? "直播源没有可直接播放的流:"
-                                               : "没有可直连的格式,这条将走下载合并:")
-                                  << (m_verifyRejectReason.isEmpty() ? m_title
-                                                                     : m_verifyRejectReason);
-    } else {
-        LOG_INFO("UrlDownloader") << (m_isLive ? "直播源,可直链播放:"
-                                               : "可以直链播放:") << m_title;
+    if (m_destDir.isEmpty()) {
+        // 没指定目录就放在系统临时目录里,每次新建一个 syncine/download 子目录
+        m_destDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation)
+                    + QStringLiteral("/syncine/download");
     }
-
-    // 停在 "probed" 而不是回 idle:界面靠它显示"解析成功、等你点加入"
-    setStage(QStringLiteral("probed"));
-    emit probed();
-}
-
-// ============================
-// 下载
-// ============================
-
-void UrlDownloader::download(const QString &url, const QString &destDir, int heightCap)
-{
-    if (m_process != nullptr) {
-        LOG_DEBUG("UrlDownloader") << "上一次任务还没结束,忽略这次下载";
-        return;
-    }
-    m_heightCap = heightCap;
-    if (m_toolchain == nullptr || !m_toolchain->ytDlpReady()) {
-        fail(QStringLiteral("找不到 yt-dlp,无法下载"));
+    if (m_toolchain == nullptr || !m_toolchain->ffmpegReady()) {
+        fail(QStringLiteral("找不到 ffmpeg,画面/声音分离的源无法下载合并"));
         return;
     }
 
-    m_destDir = destDir;
     m_downloadedBytes = 0;
     m_totalBytes = 0;
     m_speedBps = 0;
@@ -499,36 +274,54 @@ void UrlDownloader::download(const QString &url, const QString &destDir, int hei
     m_progress = -1;
     m_error.clear();
     m_outputTail.clear();
-    QDir().mkpath(destDir);
-    // 先把目录清干净再下:上一次失败留下的中间文件(经常是纯音频那条流)
-    // 会被后面的产物查找误认成结果
-    const QDir destDirInfo(destDir);
+    QDir().mkpath(m_destDir);
+
+    // 清理旧残留，避免 glob "media.*" 拿到上次的文件
+    const QDir destDirInfo(m_destDir);
     for (const QString &name : destDirInfo.entryList({QStringLiteral("media.*")}, QDir::Files))
         QFile::remove(destDirInfo.absoluteFilePath(name));
     setStage(QStringLiteral("downloading"));
 
     // 输出名固定成 media.<ext>:扩展名事先不知道(要看源格式,合并后是 mkv),
     // 结束时在目录里 glob "media.*" 就能拿到。
-    const QString outputTemplate = destDir + QStringLiteral("/media.%(ext)s");
-    const QString progress = QStringLiteral(
+    m_outputTemplate = m_destDir + QStringLiteral("/media.%(ext)s");
+    const QString progressTemplate = QStringLiteral(
         "download:%(progress.downloaded_bytes)s %(progress.total_bytes)s "
         "%(progress.total_bytes_estimate)s %(progress.speed)s %(progress.eta)s");
 
-    // 档位上限:0 = 最高(yt-dlp 自己挑,和没有这个功能之前一样)。
-    // `bv*+ba/b` 是 yt-dlp 的默认选择表达式:优先"最佳画面 + 最佳声音",
-    // 站点只有合一格式时退回单条 —— 加上 [height<=N] 就是"不超过这个高度"。
-    const QString format = heightCap > 0
-        ? QStringLiteral("bv*[height<=%1]+ba/b[height<=%1]").arg(heightCap)
-        : QStringLiteral("bv*+ba/b");
+    QStringList options{QStringLiteral("--newline"),
+                        QStringLiteral("--progress-template"), progressTemplate,
+                        QStringLiteral("--no-playlist"),
+                        QStringLiteral("-o"), m_outputTemplate};
 
-    startProcess({QStringLiteral("-f"), format,
-                  QStringLiteral("--merge-output-format"), QStringLiteral("mkv"),
-                  QStringLiteral("--newline"),
-                  QStringLiteral("--progress-template"), progress,
-                  QStringLiteral("--no-playlist"),
-                  QStringLiteral("-o"), outputTemplate},
-                 url);
+    if (m_selection.video.kind == MediaFormat::Combined && !m_selection.formatExpression.isEmpty()) {
+        // 用户手选的是一条合一格式:原样照下,不转换不合并
+        options << QStringLiteral("-f") << m_selection.formatExpression;
+    } else if (!m_selection.formatExpression.isEmpty()) {
+        // 用户手选的一对具体流:精确指定。
+        // 合并格式按容器名定(mkv 能装几乎所有编码组合,也是最稳的):
+        // 源本身就是单文件 mp4 时不重封装。
+        options << QStringLiteral("-f") << m_selection.formatExpression
+                << QStringLiteral("--merge-output-format") << QStringLiteral("mkv");
+    } else if (!m_selection.sortArgs.isEmpty()) {
+        // 档位:不写 -f,让 yt-dlp 按 -S 的优先级自己挑(见 FormatModel.h 顶部
+        // 为什么不写 `-f "bv*[height<=1080]"` —— 那是筛选,不是排序,实测会降档)
+        options << QStringLiteral("-f") << QStringLiteral("bv*+ba/b")
+                << QStringLiteral("-S") << m_selection.sortArgs.first()
+                << QStringLiteral("--merge-output-format") << QStringLiteral("mkv");
+    } else {
+        options << QStringLiteral("-f") << QStringLiteral("bv*+ba/b")
+                << QStringLiteral("--merge-output-format") << QStringLiteral("mkv");
+    }
+
+    LOG_INFO("UrlDownloader") << "开始下载:" << m_selection.label
+                              << "→" << m_destDir;
+    startProcess(options, m_url);
 }
+
+// ============================
+// 下载
+// ============================
 
 void UrlDownloader::handleDownloadLine(const QString &line)
 {
@@ -585,6 +378,24 @@ void UrlDownloader::handleDownloadLine(const QString &line)
 void UrlDownloader::handleDownloadFinished(int exitCode)
 {
     if (exitCode != 0) {
+        // 手选的 format_id 在本端不存在(登录态/会员等级和添加者不同)时,
+        // 退回"按档位挑"再试一次 —— 别让"这条下不到"变成"这条播不了"。
+        // **注意:这里只对"手选的精确流"这么做**;档位下载本身不会遇到这个错。
+        if (!m_selection.formatExpression.isEmpty()
+            && looksLikeFormatUnavailable(m_outputTail)
+            && !m_manualFallbackTried) {
+            m_manualFallbackTried = true;
+            const int height = m_selection.video.height;
+            LOG_WARN("UrlDownloader") << "手选的流在本端不存在,退回按档位解析:"
+                                      << m_selection.formatExpression;
+            m_selection = MediaFormats::resolve(
+                StreamSpec::withHdr(height > 0 ? QString::number(height) : QString(),
+                                    /*allowHdr=*/true),
+                m_media);
+            beginDownload(0);
+            return;
+        }
+
         fail(errorFromOutput(m_outputTail,
                              QStringLiteral("yt-dlp 退出码 %1").arg(exitCode)));
         return;
@@ -594,11 +405,16 @@ void UrlDownloader::handleDownloadFinished(int exitCode)
     //
     // 中间流文件的形状是 media.<format_id>.<ext>,比如 media.f30280.m4a 是**纯音频** ——
     // 上一轮失败留下的这种文件如果被当成产物加载,症状就是"只有声音"(实测踩过)。
+    const QStringList finalExts{QStringLiteral("mkv"), QStringLiteral("mp4"),
+                                QStringLiteral("webm"), QStringLiteral("mov"),
+                                QStringLiteral("flv"), QStringLiteral("avi")};
     const QDir dir(m_destDir);
     const QStringList entries = dir.entryList({QStringLiteral("media.*")}, QDir::Files);
     for (const QString &name : entries) {
         // "media." 之后还有一层点 = 中间流文件或未完成文件,都不是产物
         if (name.mid(6).contains(QLatin1Char('.')))
+            continue;
+        if (!finalExts.contains(QFileInfo(name).suffix().toLower()))
             continue;
 
         const QString path = dir.absoluteFilePath(name);
@@ -624,12 +440,11 @@ void UrlDownloader::abortVerify()
         return;
 
     // 先断开再 abort:abort 也会发 finished,不断开的话那个回调会把它当成
-    // "试拉结束"、拿着已经作废的候选走 finishProbe
+    // "试拉结束"、拿着已经作废的候选往下走
     disconnect(m_verifyReply, nullptr, this, nullptr);
     m_verifyReply->abort();
     m_verifyReply->deleteLater();
     m_verifyReply = nullptr;
-    m_verifying = false;
     m_verifyCandidate.clear();
 }
 
@@ -645,9 +460,8 @@ void UrlDownloader::startProcess(const QStringList &options, const QString &url)
     m_process->setProcessChannelMode(QProcess::MergedChannels);
     m_process->setProgram(m_toolchain->ytDlpPath());
 
-
     // 拼接参数:用户选项 + ffmpeg-location + cookies + url
-    // **url 必须留在最后一位**,前面这些谁先谁后都无所谓
+    // url 在末尾，其余无限制
     QStringList args = options;
     args << m_toolchain->ffmpegLocationArgs();
     if (m_cookies != nullptr)
@@ -655,8 +469,6 @@ void UrlDownloader::startProcess(const QStringList &options, const QString &url)
     args << url;
     m_process->setArguments(args);
 
-    // 打**拼好的完整参数**(不只 options)—— "为什么没带上 cookie / 用的是哪个
-    // ffmpeg" 这类问题,看一眼这行就清楚了
     LOG_DEBUG("UrlDownloader") << "yt-dlp" << args.join(QLatin1Char(' '));
 
     connect(m_process, &QProcess::readyReadStandardOutput, this, [this]() {
@@ -691,17 +503,18 @@ void UrlDownloader::startProcess(const QStringList &options, const QString &url)
                 if (finished != nullptr)
                     finished->deleteLater();
 
-                // cancelAndRemoveDir 交代的事:进程真的退出了才删目录
-                if (!m_removeDirAfterExit.isEmpty()) {
-                    QDir(m_removeDirAfterExit).removeRecursively();
-                    m_removeDirAfterExit.clear();
-                }
-
                 // cancel() 会把阶段设回 idle —— 这种"异常结束"是用户自己取消的,
                 // 不能报成失败
+
+                if (stage == QLatin1String("idle")) {
+                    LOG_INFO("UrlDownloader") << "yt-dlp 被用户取消";
+                    return;
+                }
+
                 if (stage != QLatin1String("probing")
                     && stage != QLatin1String("downloading")
                     && stage != QLatin1String("merging")) {
+                    LOG_DEBUG("UrlDownloader") << "yt-dlp 在阶段" << stage << "结束,忽略";
                     return;
                 }
 
@@ -711,7 +524,7 @@ void UrlDownloader::startProcess(const QStringList &options, const QString &url)
                 }
 
                 if (stage == QLatin1String("probing"))
-                    handleProbeFinished();
+                    handleResolveFinished(exitCode);
                 else
                     handleDownloadFinished(exitCode);
             });
@@ -737,20 +550,19 @@ void UrlDownloader::cancel()
     // 不清掉的话,下次打开弹窗会直接看到上一次的结果。
     //
     // 这里**只发 stateChanged**:setStage 对相同取值去重,而 reset 之后
-    // 各属性都变了,得让绑定有机会重算。千万别在这里 emit probed() ——
+    // 各属性都变了,得让绑定有机会重算。千万别在这里 emit resolved() ——
     // PlaybackSync::retryCurrentItem 是先 cancel 再重新准备,
-    // 一个多余的 probed 会让它拿着刚被清空的直链直接去下载。
+    // 一个多余的 resolved 会让它拿着刚被清空的直链直接去下载。
     m_progress = -1;
     m_detail.clear();
     m_error.clear();
-    m_title.clear();
-    m_uploader.clear();
-    m_durationMs = 0;
-    m_directUrl.clear();
-    m_isLive = false;
-    m_qualities.clear();
-    m_inspectOnly = false;
-    m_heightCap = 0;
+    m_url.clear();
+    m_spec.clear();
+    m_media = MediaInfo();
+    m_selection = MediaSelection();
+    m_destDir.clear();
+    m_outputTemplate.clear();
+    m_manualFallbackTried = false;
     const bool stageChanged = m_stage != QLatin1String("idle");
     setStage(QStringLiteral("idle"));
     // 本来就是 idle 时 setStage 会去重(不发信号),可上面那一串清空同样

@@ -11,6 +11,7 @@
 #include "core/Log.h"
 
 #include "api/video/i420_buffer.h"
+#include "api/video/nv12_buffer.h"
 #include "libyuv/convert.h"
 #include "libyuv/video_common.h"
 #include "rtc_base/time_utils.h"
@@ -44,6 +45,17 @@ uint32_t toLibyuvFourcc(QVideoFrameFormat::PixelFormat format) {
     }
 }
 
+// 10bit 的两种布局。它们的 FourCC 是 0(不是"不认识",而是"没有对应的 8bit 四字码"),
+// 所以单独判断,别和"不支持"混在一起。
+//
+// 为什么必须处理:**HDR10 就是 10bit**(hevc 10bit + PQ + BT.2020),而现在的
+// Qt FFmpeg 后端对 10bit 内容给的就是下面的格式。不处理的话,共享模式下房主
+// 一播 HDR,推流这一路每一帧都被丢掉 —— 观众看到的是黑屏。
+bool isTenBit(QVideoFrameFormat::PixelFormat format) {
+    return format == QVideoFrameFormat::Format_P010          // 半平面(实测:Qt 给的就是它)
+        || format == QVideoFrameFormat::Format_YUV420P10;    // 三平面
+}
+
 } // namespace
 
 // ============================
@@ -70,13 +82,16 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
     // 拷一份出来(隐式共享,很廉价),并保证所有出口都会 unmap。
     QVideoFrame mapped = frame;
 
-    const uint32_t fourcc = toLibyuvFourcc(mapped.surfaceFormat().pixelFormat());
-    if (fourcc == 0) {
+    const QVideoFrameFormat::PixelFormat pixelFormat = mapped.surfaceFormat().pixelFormat();
+    const uint32_t fourcc = toLibyuvFourcc(pixelFormat);
+    const bool tenBit = isTenBit(pixelFormat);
+
+    if (fourcc == 0 && !tenBit) {
         static bool warned = false;
         if (!warned) {
             warned = true;
             LOG_ERROR("VideoSource") << "不支持的像素格式"
-                                     << static_cast<int>(mapped.surfaceFormat().pixelFormat())
+                                     << static_cast<int>(pixelFormat)
                                      << "—— 这一路视频不会发送。需要为它补一条到 libyuv 的映射。";
         }
         return;
@@ -143,7 +158,49 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
 
     int ret = 0;
 
-    if (fourcc == libyuv::FOURCC_I420) {
+    if (pixelFormat == QVideoFrameFormat::Format_P010) {
+        // 10bit 半平面(P010):HDR 内容走的就是这条。
+        //
+        // libyuv 没有 P010→I420 的一步转换,所以先降到 8bit 的 NV12,
+        // 再复用下面那条已经调好的 NV12 路径。
+        //
+        // **这一步只降位深、不做色调映射** —— 所以观众看到的是"HDR 当 SDR 用"
+        // 的效果(偏暗、发灰),而不是本机那种过曝。要真正修好 HDR,
+        // 得在整条链路上做 HDR→SDR 映射,那是另一件事。
+        //
+        // **步进单位是"元素"不是字节**:libyuv 的这些 16bit 函数内部直接把
+        // stride 用在 uint16_t* 的指针运算上,所以要除以 2。传字节数的话
+        // 画面会逐行错位(斜切)—— 而且不会有任何报错。
+        auto nv12 = webrtc::NV12Buffer::Create(width, height);
+        ret = libyuv::P010ToNV12(
+            reinterpret_cast<const uint16_t *>(srcY), srcStrideY / 2,
+            reinterpret_cast<const uint16_t *>(srcU), srcStrideU / 2,
+            nv12->MutableDataY(), nv12->StrideY(),
+            nv12->MutableDataUV(), nv12->StrideUV(),
+            width, height);
+
+        if (ret == 0) {
+            ret = libyuv::NV12ToI420(
+                nv12->MutableDataY(), nv12->StrideY(),
+                nv12->MutableDataUV(), nv12->StrideUV(),
+                buffer->MutableDataY(), buffer->StrideY(),
+                buffer->MutableDataU(), buffer->StrideU(),
+                buffer->MutableDataV(), buffer->StrideV(),
+                width, height);
+        }
+    } else if (pixelFormat == QVideoFrameFormat::Format_YUV420P10) {
+        // 10bit 三平面(I010):三块 16bit 平面,同样是元素步进。
+        // 注意这里**不能**沿用上面 NV12 的"显式传 UV 指针"那套讨论 ——
+        // 三平面各给各的指针,libyuv 不需要推算任何偏移。
+        ret = libyuv::I010ToI420(
+            reinterpret_cast<const uint16_t *>(srcY), srcStrideY / 2,
+            reinterpret_cast<const uint16_t *>(srcU), srcStrideU / 2,
+            reinterpret_cast<const uint16_t *>(srcV), srcStrideV / 2,
+            buffer->MutableDataY(), buffer->StrideY(),
+            buffer->MutableDataU(), buffer->StrideU(),
+            buffer->MutableDataV(), buffer->StrideV(),
+            width, height);
+    } else if (fourcc == libyuv::FOURCC_I420) {
         // 源已经是 I420(三平面分开),只是行距可能比宽度大(填充)。
         //
         // **必须用 I420Copy,不能用 ConvertToI420。**

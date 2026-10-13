@@ -63,7 +63,7 @@ PlaylistEntry playlistEntryFromJson(const QJsonObject &object) {
     entry.addedBy = object.value("addedBy").toString();
     entry.status = object.value("status").toString();
     entry.live = object.value("live").toBool(false);
-    entry.quality = object.value("quality").toInt(0);
+    entry.spec = object.value("spec").toString();
     return entry;
 }
 
@@ -286,20 +286,20 @@ QString encodePlaylistAdd(const QString &itemId,
                           const QString &url,
                           qint64 duration,
                           bool live,
-                          int quality) {
+                          const QString &spec) {
     QJsonObject message;
     message["type"] = "playlist_add";
     message["itemId"] = itemId;
     message["title"] = title;
-    // url / duration / quality 是可选信息,空着就不发,省得服务端存一堆空字段
+    // url / duration / spec 是可选信息,空着就不发,省得服务端存一堆空字段
     if (!url.isEmpty())
         message["url"] = url;
     if (duration > 0)
         message["duration"] = duration;
     if (live)
         message["live"] = true;
-    if (quality > 0)
-        message["quality"] = quality;
+    if (!spec.isEmpty())
+        message["spec"] = spec;
     return serialize(message);
 }
 

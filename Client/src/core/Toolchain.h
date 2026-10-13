@@ -57,6 +57,8 @@ public:
 
     QString ytDlpPath() const { return m_ytDlpPath; }
     QString ffmpegPath() const { return m_ffmpegPath; }
+    // ffprobe 和 ffmpeg 一起找,可能为空(缺了只是降级,不是致命)
+    QString ffprobePath() const { return m_ffprobePath; }
     QString ytDlpVersion() const { return m_ytDlpVersion; }
     QString ffmpegVersion() const { return m_ffmpegVersion; }
 
@@ -80,6 +82,7 @@ private:
 
     QString m_ytDlpPath;
     QString m_ffmpegPath;
+    QString m_ffprobePath;
     QString m_ffmpegDir;
     QString m_ytDlpVersion;
     QString m_ffmpegVersion;
