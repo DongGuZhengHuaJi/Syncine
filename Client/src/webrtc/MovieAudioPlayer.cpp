@@ -147,7 +147,9 @@ void MovieAudioPlayer::startSink() {
     format.setChannelCount(kChannels);
     format.setSampleFormat(QAudioFormat::Int16);
 
-    QAudioDevice device = QMediaDevices::defaultAudioOutput();
+    // 用户选了"听筒"就用它,没选(m_outputDevice 为空)就跟系统默认
+    QAudioDevice device = m_outputDevice.isNull() ? QMediaDevices::defaultAudioOutput()
+                                                  : m_outputDevice;
     if (device.isNull()) {
         LOG_WARN("MovieAudio") << "没有可用的音频输出设备,电影声将无处播放";
         return;
@@ -173,6 +175,33 @@ void MovieAudioPlayer::startSink() {
              << "音量" << m_sink->volume()
              << "状态" << static_cast<int>(m_sink->state()) // 状态0正常
              << "错误" << static_cast<int>(m_sink->error());
+}
+
+void MovieAudioPlayer::setOutputDevice(const QAudioDevice &device) {
+    // 设备只能在构造 QAudioSink 时指定,所以换设备 = 停掉重开一个。
+    // id() 是比较设备的标准做法(description 可能重名)。
+    if (device.id() == m_outputDevice.id())
+        return;
+
+    const double previousVolume = volume();
+
+    m_outputDevice = device;
+
+    if (m_sink != nullptr) {
+        // 先停再析构:析构里也会停,但显式停一下能让错误码在日志里看得见
+        m_sink->stop();
+        m_sink.reset();
+    }
+
+    startSink();
+
+    // 新 sink 的音量是默认的 1.0,把它补回用户设过的值
+    if (m_sink != nullptr)
+        m_sink->setVolume(previousVolume);
+
+    LOG_INFO("MovieAudio") << "输出设备已切换:"
+                           << (m_outputDevice.isNull() ? QStringLiteral("(系统默认)")
+                                                       : m_outputDevice.description());
 }
 
 void MovieAudioPlayer::setVolume(double volume) {

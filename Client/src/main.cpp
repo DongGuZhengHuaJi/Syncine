@@ -10,6 +10,7 @@
 #include "rtc_base/logging.h"
 
 #include "core/AppSettings.h"
+#include "core/AudioDevices.h"
 #include "core/CookieManager.h"
 #include "core/HdrConverter.h"
 #include "core/Log.h"
@@ -49,7 +50,6 @@ int main(int argc, char *argv[]) {
     AppSettings appSettings;
     appSettings.applyLogLevel();
 
-    QQmlApplicationEngine engine;
 
     // ---- 基础设施 ----
     // 服务器地址从设置里来(留空 = 用 AppSettings 里的兜底地址),
@@ -88,11 +88,45 @@ int main(int argc, char *argv[]) {
     // ---- WebRTC 信令:房间 <-> WebRTC 状态机 ----
     SignalingChannel signalingChannel(&roomSession, &networkManager, &webrtcManager);
 
-    // 局域网联调暂不需要 STUN;上互联网时再配置。
+    // ICE 配置(STUN/TURN)不在这里给:它跟着房间走 —— 服务端在 room_created /
+    // room_joined 里下发(含从 Cloudflare 换来的临时 TURN 凭据,API token 只在
+    // 服务端),由 SignalingChannel 在每次建连前交给 WebrtcManager。
+    // 好处是换服务端、换 TURN 供应商都不用改客户端。
     //
     // 这里只初始化线程和工厂 —— 对端连接**不在这里建**。
     // 每条连接对应一个对端,由 SignalingChannel 在进房后按成员表创建。
-    webrtcManager.initialize({});
+    webrtcManager.initialize();
+
+    // ---- 音频设备(麦克风 / 听筒)的装配 ----
+    //
+    // 三件事,都放在这一个装配点上(而不是塞进 SignalingChannel):
+    //
+    //   1. 界面改了设备 → 落盘。
+    //   2. **听筒是"所有出声的地方共用一个选择"**。这句注释不是修辞,
+    //      它要扇到三个对象上,而它们分属两套设备体系:
+    //        对方语音         → WebrtcManager(WebRTC 的 ADM,认索引)
+    //        推过来的电影声    → WebrtcManager(它持有 MovieAudioPlayer,
+    //                          同一个信号在 setDesiredDevice 里顺手换掉)
+    //        本机播放的电影声  → 这里补一刀,见下面那个 lambda
+    //      所以本机播放器和"听筒"之间这条线必须在这里接 —— 它们互不认识。
+    //   3. 启动时把**存下来的**偏好喂进去一次,否则重启就丢。
+    //
+    // **顺序要紧**:先把线接好,再喂启动偏好。反过来的话,启动那次
+    // setSpeakerDevice 会在没人监听的时候把信号发掉 —— WebrtcManager 内部
+    // 照样生效,但本机播放器收不到通知,于是"上次选的耳机"只对了一半。
+    QObject::connect(&signalingChannel, &SignalingChannel::micDeviceChanged, &app,
+                     [&appSettings](const QString &name) {
+                         appSettings.setMicDevice(name);
+                     });
+    QObject::connect(&signalingChannel, &SignalingChannel::speakerDeviceChanged, &app,
+                     [&appSettings, &playbackController](const QString &name) {
+                         appSettings.setSpeakerDevice(name);
+                         // 设备名(ADM 给的 PulseAudio 描述)→ Qt 的输出设备
+                         playbackController.setOutputDevice(findAudioOutputByName(name));
+                     });
+
+    signalingChannel.setMicDevice(appSettings.micDevice());
+    signalingChannel.setSpeakerDevice(appSettings.speakerDevice());
 
     // ---- 视频的两条接线 ----
     //
@@ -189,6 +223,9 @@ int main(int argc, char *argv[]) {
                          LOG_WARN("Signaling") << message;
                      });
 
+
+    // 先析构engine避免输出null错误日志
+    QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("appSettings", &appSettings);
     engine.rootContext()->setContextProperty("networkManager", &networkManager);
     engine.rootContext()->setContextProperty("playbackController", &playbackController);

@@ -121,6 +121,14 @@ public:
     // 所以这里返回的是列表而不是单个 ID。
     QList<QString> otherMemberIds() const;
 
+    // 入房时服务端下发的 ICE 配置(STUN + 带临时凭据的 TURN)。空 = 服务端没给
+    // (老服务端,或者它自己也拿不到凭据)。
+    //
+    // 本类只保管、只转交,**不认识 WebRTC** —— 把它变成 PeerConnection 的配置
+    // 是 SignalingChannel + WebrtcManager 的事(和"播放列表条目不认识播放器"
+    // 是同一个原则)。
+    QList<IceServerConfig> iceServers() const;
+
     // ---- 生命周期:由 SessionController 在入场/离场时调用 ----
     void enterRoom(const RoomSnapshot &snapshot);
     void leaveRoom();
@@ -237,6 +245,7 @@ private:
     RoomMode m_roomMode = RoomMode::Sync;
     bool m_videoMismatched = false;
     qint64 m_shortestDuration = 0;
+    QList<IceServerConfig> m_iceServers;
 };
 
 #endif //SYNCINE_ROOMSESSION_H

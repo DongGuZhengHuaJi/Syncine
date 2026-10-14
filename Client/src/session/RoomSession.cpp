@@ -89,6 +89,10 @@ QList<QString> RoomSession::otherMemberIds() const {
     return m_members->idsExcept(m_clientId);
 }
 
+QList<IceServerConfig> RoomSession::iceServers() const {
+    return m_iceServers;
+}
+
 bool RoomSession::allOthersLoaded() const {
     return m_members->allOthersLoaded(m_clientId);
 }
@@ -101,6 +105,33 @@ void RoomSession::enterRoom(const RoomSnapshot &snapshot) {
     m_roomId = snapshot.roomId;
     m_roomName = snapshot.roomName;
     m_clientId = snapshot.clientId;
+
+    // ICE 配置必须存**在成员表之前**:m_members->reset() 会发 membersChanged,
+    // SignalingChannel 收到就 syncPeers() 建连。首次进房那次会被
+    // onMembersChanged 里的"不在房间就返回"挡掉,但**换房**时(已在房间 A
+    // 直接进房间 B)m_inRoom 仍是 true,那次建连会真的发生 —— 配置塞在后面
+    // 就拿着上一个房间的凭据去建了,而且表面上看不出任何异常。
+    m_iceServers = snapshot.iceServers;
+
+    // 服务端下发的 ICE 配置在这里落账,顺手记一行 —— 跨网络连不上时,
+    // "凭据到底下来没有"是第一个要确认的事(看日志比抓包快得多)。
+    // 放在收下的当下而不是建连的时候:一个人待在房间里是不会有 PeerConnection 的,
+    // 那种情况下也得看得见。
+    //
+    // **只打 URL**:username/credential 是临时密钥,任何级别都不写进日志。
+    if (m_iceServers.isEmpty()) {
+        LOG_WARN("Room") << "服务端没有下发 ICE 配置,只能靠直连(对称 NAT 后面的对端会连不上)";
+    } else {
+        QStringList groups;
+        for (const IceServerConfig &server : m_iceServers) {
+            groups.append(server.urls.join(QLatin1Char(' '))
+                          + (server.credential.isEmpty()
+                                 ? QStringLiteral(" [STUN]")
+                                 : QStringLiteral(" [TURN 带凭据]")));
+        }
+        LOG_INFO("Room") << "收到 ICE 配置:" << groups.join(QStringLiteral(" | "));
+    }
+
     m_members->reset(snapshot.members);
 
     const RoomMode mode = modeFromWire(snapshot.mode);
@@ -158,6 +189,7 @@ void RoomSession::clearRoomState() {
     m_roomId.clear();
     m_roomName.clear();
     m_inRoom = false;
+    m_iceServers.clear();   // 凭据是跟着这次入房来的,退房就作废(反正下次进房会重新下发)
     m_members->clear();     // 触发 refreshDerivedState,顺带修正 isHost
     m_playlist->clear();    // 播放列表和本地文件映射都是跟着房间走的
 

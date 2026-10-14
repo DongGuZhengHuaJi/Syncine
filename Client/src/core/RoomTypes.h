@@ -8,6 +8,27 @@
 
 #include <QList>
 #include <QString>
+#include <QStringList>
+
+// 一条 ICE 服务器配置(服务端随 room_created / room_joined 下发)。
+//
+// 里面是服务端拿 Cloudflare 的 TURN 密钥换来的**临时**凭据 —— API token 是
+// 账户级的,只待在服务端,客户端永远拿不到它(见 Server/src/tools/TurnCredentials.h)。
+//
+// 一组 urls 共用同一份 username/credential:Cloudflare 返回的 TURN 项就是这样,
+// 一个 username 覆盖 udp/tcp/tls 好几个端口。STUN 那项没有凭据(也不需要)。
+//
+// 字段名照抄协议(credential);libwebrtc 那边叫 password,是同一个东西 ——
+// 翻译只在 WebrtcManager::buildIceServers() 里做一次。
+struct IceServerConfig {
+    QStringList urls;
+    QString username;
+    QString credential;
+
+    // 用来判断"配置有没有真的变"(每次建连前都会塞一遍同样的内容,
+    // 内容没变就不必刷日志)
+    bool operator==(const IceServerConfig &other) const = default;
+};
 
 // 房间成员的一次快照(服务端 members[] / member_joined 里的元素)
 struct Member {
@@ -72,6 +93,10 @@ struct RoomSnapshot {
     // 入房时服务端一并下发的播放列表(队列 + 现在放到第几条)
     QList<PlaylistEntry> playlist;
     int currentIndex = -1;
+
+    // 入房时服务端一并下发的 ICE 配置(STUN + 带临时凭据的 TURN)。
+    // 本结构只负责"带着它",解释它的是 WebrtcManager。
+    QList<IceServerConfig> iceServers;
 };
 
 #endif //SYNCINE_ROOMTYPES_H

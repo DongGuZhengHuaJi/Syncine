@@ -265,5 +265,8 @@ RoomSnapshot SessionController::snapshotFrom(const Protocol::Message &message) c
     // 播放列表随 state 一起下发 —— 漏了这两行,入房的人会看到一个空列表
     snapshot.playlist = message.playlist;
     snapshot.currentIndex = message.currentIndex;
+    // ICE 配置(STUN/TURN)也随入房消息一起来。SignalingChannel 建连前会取它,
+    // 所以必须走进 snapshot —— 见 RoomSession::enterRoom 里的时序说明。
+    snapshot.iceServers = message.iceServers;
     return snapshot;
 }

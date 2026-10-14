@@ -76,6 +76,31 @@ QList<PlaylistEntry> playlistFromJson(const QJsonValue &value) {
     return entries;
 }
 
+// urls 按 WebRTC 的定义允许写成字符串或字符串数组。
+// Cloudflare 现在返回的是数组,但两种都收着点 —— 形状一变不至于整批废掉。
+QStringList stringListFromJson(const QJsonValue &value) {
+    QStringList list;
+    if (value.isString()) {
+        list.append(value.toString());
+        return list;
+    }
+
+    const QJsonArray array = value.toArray();
+    list.reserve(array.size());
+    for (const QJsonValue &item : array)
+        list.append(item.toString());
+    return list;
+}
+
+IceServerConfig iceServerFromJson(const QJsonObject &object) {
+    IceServerConfig server;
+    server.urls = stringListFromJson(object.value("urls"));
+    // STUN 那一项没有这两个字段,取到空串是正常的(它不需要鉴权)
+    server.username = object.value("username").toString();
+    server.credential = object.value("credential").toString();
+    return server;
+}
+
 QString serialize(const QJsonObject &object) {
     return QString::fromUtf8(
         QJsonDocument(object).toJson(QJsonDocument::Compact));
@@ -129,6 +154,12 @@ std::optional<Message> decode(const QString &text) {
         message.currentIndex = state.contains("currentIndex")
                                    ? state.value("currentIndex").toInt(-1)
                                    : -1;
+
+        // ICE 配置在**顶层**(不在 state 里):它不是房间播放状态,是网络配置
+        const QJsonArray iceServers = object.value("iceServers").toArray();
+        message.iceServers.reserve(iceServers.size());
+        for (const QJsonValue &value : iceServers)
+            message.iceServers.append(iceServerFromJson(value.toObject()));
         break;
     }
 

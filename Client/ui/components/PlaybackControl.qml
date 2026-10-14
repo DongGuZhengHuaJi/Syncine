@@ -20,6 +20,9 @@ Rectangle {
     signal danmakuSubmitted(string text)
     signal danmakuToggleRequested()
     signal viewModeRequested(string mode)
+    // 齿轮(= 声音设置)。弹窗本身声明在 RoomPage 根上,这里只发意图 ——
+    // 理由见 AudioSettingsDialog 顶部
+    signal audioSettingsRequested()
 
     // 窗口全屏/屏幕全屏时,弹幕输入框并进这一行(非全屏时它在播放器下方)
     property bool inlineDanmaku: false
@@ -305,7 +308,7 @@ Rectangle {
                 icon: "speaker"
                 tip: "电影音量"
                 value: signalingChannel.movieVolume
-                onMoved: signalingChannel.movieVolume = v
+                onMoved: (v) => { signalingChannel.movieVolume = v }
                 onInteracted: root.interacted()
             }
 
@@ -313,7 +316,7 @@ Rectangle {
                 icon: "headset"
                 tip: "语音音量"
                 value: signalingChannel.chatVolume
-                onMoved: signalingChannel.chatVolume = v
+                onMoved: (v) => { signalingChannel.chatVolume = v }
                 onInteracted: root.interacted()
             }
 
@@ -326,6 +329,18 @@ Rectangle {
                 tip: signalingChannel.audioEnabled ? "关闭语音" : "开启语音"
                 onClicked: {
                     signalingChannel.setAudioEnabled(!signalingChannel.audioEnabled)
+                    root.interacted()
+                }
+            }
+
+            // ── 声音设置(麦克风 / 听筒设备) ─────────
+            // 放在控制条上而不是顶栏:顶栏在两种全屏模式下都会收起,
+            // 而"耳机插上了声音还在外放"往往是全屏看片时才发现的
+            ControlButton {
+                iconName: "gear"
+                tip: "声音设置"
+                onClicked: {
+                    root.audioSettingsRequested()
                     root.interacted()
                 }
             }

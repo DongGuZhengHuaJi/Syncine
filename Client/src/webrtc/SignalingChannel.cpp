@@ -55,6 +55,17 @@ SignalingChannel::SignalingChannel(RoomSession *session,
             [this](WebrtcManager::VideoQuality quality) {
                 emit videoQualityChanged(static_cast<int>(quality));
             });
+
+    // 音频设备:列表变了两个属性都要重算(QML 一次只看得见一个列表,
+    // 但分开成两个信号没有意义 —— 枚举本来就不分侧)
+    connect(m_webrtcManager, &WebrtcManager::audioDevicesChanged, this, [this] {
+        emit micDevicesChanged();
+        emit speakerDevicesChanged();
+    });
+    connect(m_webrtcManager, &WebrtcManager::recordingDeviceChanged,
+            this, &SignalingChannel::micDeviceChanged);
+    connect(m_webrtcManager, &WebrtcManager::playoutDeviceChanged,
+            this, &SignalingChannel::speakerDeviceChanged);
 }
 
 // ============================
@@ -115,6 +126,58 @@ void SignalingChannel::setChatVolume(double volume) {
 }
 
 // ============================
+// 音频设备(麦克风 / 听筒)
+// ============================
+
+void SignalingChannel::refreshAudioDevices() {
+    if (m_webrtcManager == nullptr)
+        return;
+
+    m_webrtcManager->refreshAudioDevices();
+}
+
+void SignalingChannel::setMicDevice(const QString &name) {
+    if (m_webrtcManager == nullptr)
+        return;
+
+    // 值没变就什么都不做。启动时 main.cpp 会把存下来的偏好喂进来一次,
+    // 若是空串(从没选过)这里就静悄悄地过去 —— 否则每次启动都会白白
+    // 把声卡拉起来,还会在日志里留一行看着像"用户切换了设备"的记录。
+    if (m_webrtcManager->recordingDeviceName() == name)
+        return;
+
+    LOG_DEBUG("Signaling") << "切换麦克风设备:" << (name.isEmpty() ? QStringLiteral("(系统默认)") : name);
+    m_webrtcManager->selectRecordingDevice(name);
+}
+
+void SignalingChannel::setSpeakerDevice(const QString &name) {
+    if (m_webrtcManager == nullptr)
+        return;
+
+    if (m_webrtcManager->playoutDeviceName() == name)
+        return;
+
+    LOG_DEBUG("Signaling") << "切换听筒设备:" << (name.isEmpty() ? QStringLiteral("(系统默认)") : name);
+    m_webrtcManager->selectPlayoutDevice(name);
+}
+
+QVariantList SignalingChannel::micDevices() const {
+    return m_webrtcManager != nullptr ? m_webrtcManager->recordingDevices() : QVariantList{};
+}
+
+QVariantList SignalingChannel::speakerDevices() const {
+    return m_webrtcManager != nullptr ? m_webrtcManager->playoutDevices() : QVariantList{};
+}
+
+QString SignalingChannel::micDevice() const {
+    return m_webrtcManager != nullptr ? m_webrtcManager->recordingDeviceName() : QString();
+}
+
+QString SignalingChannel::speakerDevice() const {
+    return m_webrtcManager != nullptr ? m_webrtcManager->playoutDeviceName() : QString();
+}
+
+// ============================
 // 连接的对齐:该建谁、该删谁
 // ============================
 
@@ -132,6 +195,15 @@ QString SignalingChannel::offerKey(const QString &peerId, const QString &link) {
 bool SignalingChannel::ensurePeer(const QString &peerId) {
     if (m_webrtcManager == nullptr || peerId.isEmpty())
         return false;
+
+    // 建连前把当前的 ICE 配置(STUN/TURN)交给 WebrtcManager。
+    //
+    // 放这里而不是 syncPeers():ensurePeer 是**唯一**的建连入口 ——
+    // syncPeers() 走它,收到 offer 的 onMessage() 也直接走它(那条路根本不经过
+    // syncPeers),放别处会漏。QList 隐式共享,这个赋值是 O(1);
+    // 配置只在 CreatePeerConnection 那一刻生效,已连上的对端不受影响。
+    if (m_session != nullptr)
+        m_webrtcManager->setIceServers(m_session->iceServers());
 
     if (m_webrtcManager->peer(peerId, LinkKind::Voice) != nullptr)
         return true;

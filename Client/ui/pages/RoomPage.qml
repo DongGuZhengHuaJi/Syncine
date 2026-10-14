@@ -153,6 +153,12 @@ Item {
         id: addVideoDialog
     }
 
+    // 声音设置(控制条上的齿轮)。同样声明在根上:Popup 以声明它的 Item 为原点,
+    // 挂在控制条里会跟着画面偏移
+    AudioSettingsDialog {
+        id: audioSettingsDialog
+    }
+
     FileDialog {
         id: fileDialog
 
@@ -203,7 +209,8 @@ Item {
 
         // 服务端断开(或被动离开)时,弹回上一页
         function onLeft() {
-            addVideoDialog.close()   // 房间都没了,开着的加条目窗口不该留着
+            addVideoDialog.close()      // 房间都没了,开着的加条目窗口不该留着
+            audioSettingsDialog.close() // 同理
             if (leaving)
                 return
             const win = root.Window.window
@@ -426,6 +433,7 @@ Item {
                         onDanmakuToggleRequested: root.danmakuVisible = !root.danmakuVisible
                         onViewModeRequested: (mode) => root.setViewMode(mode)
                         onLoadRequested: root.requestNewItem()
+                        onAudioSettingsRequested: audioSettingsDialog.open()
                     }
 
                     // 非全屏时,弹幕输入框在播放器下方

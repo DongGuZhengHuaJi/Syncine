@@ -249,6 +249,7 @@ qt_add_executable(Syncine
         # core:传输 + 协议(不认识房间,也不认识播放器)
         src/core/AppSettings.cpp
         src/core/AppSettings.h
+        src/core/AudioDevices.h
         src/core/CookieManager.cpp
         src/core/CookieManager.h
         src/core/HdrConverter.cpp
@@ -355,6 +356,8 @@ qt_add_qml_module(Syncine
         ui/components/GhostButton.qml
         ui/components/MessageDialog.qml
         ui/components/AddVideoDialog.qml
+        ui/components/AudioDeviceSettings.qml
+        ui/components/AudioSettingsDialog.qml
         ui/components/OptionList.qml
         ui/components/FormatList.qml
         ui/components/AppTextField.qml

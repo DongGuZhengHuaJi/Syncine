@@ -34,6 +34,13 @@
 // 由 QAudioSink::setVolume() 控制。这是"接收端电影音量独立可调"的落点,
 // 和语音那条走 WebRTC 的 SetVolume 完全无关,所以两者天然互不影响。
 //
+// 【输出设备】
+//
+// 也不归 WebRTC 管 —— 语音那条的设备由 ADM 定,这里得自己选。
+// 默认跟系统默认输出,用户在设置里选了"听筒"之后由 WebrtcManager 调
+// setOutputDevice() 切过来:语音和电影声同属"我听别人"的声音,
+// 分成两个设备会出现"语音在耳机里、电影声在外放"。
+//
 
 #ifndef SYNCINE_MOVIEAUDIOPLAYER_H
 #define SYNCINE_MOVIEAUDIOPLAYER_H
@@ -42,6 +49,7 @@
 #include <memory>
 #include <optional>
 
+#include <QAudioDevice>
 #include <QObject>
 
 #include "api/media_stream_interface.h"
@@ -57,6 +65,11 @@ class MovieAudioPlayer : public QObject,
 public:
     explicit MovieAudioPlayer(QObject *parent = nullptr);
     ~MovieAudioPlayer() override;
+
+    // 换输出设备。传一个 isNull() 的设备 = 回到系统默认。
+    // 会停掉重开 QAudioSink(设备只能在构造 QAudioSink 时指定),音量保留。
+    // 只在 Qt 主线程上调用。
+    void setOutputDevice(const QAudioDevice &device);
 
     // 0.0 ~ 1.0,1.0 为原始音量。
     void setVolume(double volume);
@@ -83,6 +96,9 @@ private:
 
     std::unique_ptr<MovieAudioDevice> m_device;
     std::unique_ptr<QAudioSink> m_sink;
+
+    // 输出设备。默认构造是空设备 = 用系统默认(见 startSink)。
+    QAudioDevice m_outputDevice;
 
     // 诊断:前几次 + 每隔一段打一条,避免淹没日志
     int m_frameCount = 0;

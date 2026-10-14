@@ -77,6 +77,25 @@ class AppSettings : public QObject {
                WRITE setHdrAllowed
                NOTIFY hdrAllowedChanged)
 
+    // 音频设备:麦克风(采集)和听筒(播放)。
+    //
+    // 存的是**设备名**(ADM 给的显示名),空串 = 跟随系统默认。
+    // 为什么不存索引:声卡设备的索引会随插拔漂移,今天选的是 3 号、
+    // 明天可能就变成 2 号了,存索引会静默选错设备。
+    // (Linux 上 WebRTC 的 ADM 不提供 GUID —— guid 恒为空,所以只能用名字。)
+    //
+    // 真正把设备落到声卡上的是 WebrtcManager:它可能在启动时还做不到
+    // (WebRTC 的声卡是进房间才初始化的),这时只记下意图,进房后再套用。
+    Q_PROPERTY(QString micDevice
+               READ micDevice
+               WRITE setMicDevice
+               NOTIFY micDeviceChanged)
+
+    Q_PROPERTY(QString speakerDevice
+               READ speakerDevice
+               WRITE setSpeakerDevice
+               NOTIFY speakerDeviceChanged)
+
     // 日志级别:trace / debug / info / warn / error。
     // 注意环境变量 SYNCINE_LOG_LEVEL 优先级更高(临时调试用,见 applyLogLevel)
     Q_PROPERTY(QString logLevel
@@ -110,6 +129,12 @@ public:
     bool hdrAllowed() const { return m_hdrAllowed; }
     Q_INVOKABLE void setHdrAllowed(bool allowed);
 
+    QString micDevice() const { return m_micDevice; }
+    Q_INVOKABLE void setMicDevice(const QString &deviceName);
+
+    QString speakerDevice() const { return m_speakerDevice; }
+    Q_INVOKABLE void setSpeakerDevice(const QString &deviceName);
+
     QString logLevel() const { return m_logLevel; }
     Q_INVOKABLE void setLogLevel(const QString &level);
 
@@ -139,6 +164,8 @@ signals:
     void cookieImportedAtChanged();
     void defaultQualityChanged();
     void hdrAllowedChanged();
+    void micDeviceChanged();
+    void speakerDeviceChanged();
     void logLevelChanged();
 
 private:
@@ -151,6 +178,9 @@ private:
     // 空 = 最高画质;数字串 = 高度上限(见头部的说明)
     QString m_defaultQuality;
     bool m_hdrAllowed = false;
+    // 空串 = 跟随系统默认(见上面两个属性的说明)
+    QString m_micDevice;
+    QString m_speakerDevice;
     QString m_logLevel = QStringLiteral("info");
 };
 

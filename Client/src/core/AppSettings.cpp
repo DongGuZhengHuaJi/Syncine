@@ -17,6 +17,8 @@ const char *kFallbackServerUrl = "ws://localhost:8765";
 const char *kKeyServerUrl = "server/userUrl";
 const char *kKeyQuality = "playback/quality";
 const char *kKeyHdrAllowed = "playback/hdrAllowed";
+const char *kKeyMicDevice = "audio/micDevice";
+const char *kKeySpeakerDevice = "audio/speakerDevice";
 const char *kKeyLogLevel = "log/level";
 const char *kKeyLastCookieBrowser = "cookies/lastBrowser";
 const char *kKeyCookieSource = "cookies/source";
@@ -59,6 +61,8 @@ AppSettings::AppSettings(QObject *parent)
     if (m_defaultQuality == QLatin1String("0"))
         m_defaultQuality.clear();
     m_hdrAllowed = m_settings->value(QLatin1String(kKeyHdrAllowed), false).toBool();
+    m_micDevice = m_settings->value(QLatin1String(kKeyMicDevice)).toString();
+    m_speakerDevice = m_settings->value(QLatin1String(kKeySpeakerDevice)).toString();
     m_logLevel = m_settings->value(QLatin1String(kKeyLogLevel),
                                    QStringLiteral("info")).toString().toLower();
 
@@ -155,6 +159,27 @@ void AppSettings::setHdrAllowed(bool allowed)
     m_hdrAllowed = allowed;
     m_settings->setValue(QLatin1String(kKeyHdrAllowed), m_hdrAllowed);
     emit hdrAllowedChanged();
+}
+
+void AppSettings::setMicDevice(const QString &deviceName)
+{
+    // 空串是合法值(= 跟随系统默认),不做归一化
+    if (m_micDevice == deviceName)
+        return;
+
+    m_micDevice = deviceName;
+    m_settings->setValue(QLatin1String(kKeyMicDevice), m_micDevice);
+    emit micDeviceChanged();
+}
+
+void AppSettings::setSpeakerDevice(const QString &deviceName)
+{
+    if (m_speakerDevice == deviceName)
+        return;
+
+    m_speakerDevice = deviceName;
+    m_settings->setValue(QLatin1String(kKeySpeakerDevice), m_speakerDevice);
+    emit speakerDeviceChanged();
 }
 
 void AppSettings::setLogLevel(const QString &level)

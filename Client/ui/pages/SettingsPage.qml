@@ -28,8 +28,16 @@ Item {
     // 用户可能把浏览器卸了)
     property string cookieBrowser: ""
 
-    // 进"播放与下载"时重新探测一次浏览器(装了新的不用重启程序)
-    onSectionChanged: if (section === "playback") refreshCookieBrowsers()
+    // 切分类时的"进页面初始化"。写成一处:QML 不允许同一个信号有两个处理函数。
+    //   · 播放与下载 → 重新探测一次浏览器(装了新的不用重启程序)
+    //   · 音频       → 重新枚举设备(可能刚插上/拔掉耳机)。
+    //                 没进过房间也能列出来 —— C++ 那边会先把 WebRTC 的声卡拉起来
+    onSectionChanged: {
+        if (section === "playback")
+            refreshCookieBrowsers()
+        if (section === "audio")
+            signalingChannel.refreshAudioDevices()
+    }
 
     function refreshCookieBrowsers() {
         cookieManager.refreshBrowsers()
@@ -410,7 +418,7 @@ Item {
                 }
             }
 
-            // ── 音频(阶段三做,先占个位)─────────
+            // ── 音频:麦克风 / 听筒 ──────────────────
             Card {
                 width: parent.width
                 visible: root.section === "audio"
@@ -426,13 +434,10 @@ Item {
                         color: Style.textPrimary
                     }
 
-                    Label {
+                    // 两个设备列表。房间里的齿轮弹窗用的是同一个组件,
+                    // 免得两处显示不一致
+                    AudioDeviceSettings {
                         width: parent.width
-                        wrapMode: Text.Wrap
-                        font.pixelSize: 12
-                        color: Style.textFaint
-                        text: "麦克风与听筒的设备选择正在做。做好之后这一页会出现两个设备列表,"
-                              + "房间里的设置面板也会有一份同样的(房间内只能改这两项)"
                     }
                 }
             }

@@ -65,6 +65,11 @@ struct Message {
     int currentIndex = -1;
     QString itemId;
 
+    // room_created / room_joined 的顶层字段:服务端下发的 ICE 服务器列表
+    // (STUN + 带临时凭据的 TURN)。core 层只搬运,不认识 WebRTC ——
+    // 真正把它变成 PeerConnection 配置的是 WebrtcManager。
+    QList<IceServerConfig> iceServers;
+
     // member_joined / member_left(clientId + 下面这几个字段)
     QString nickname;
     bool isHost = false;

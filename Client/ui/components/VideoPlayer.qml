@@ -41,6 +41,8 @@ Item {
     signal danmakuToggleRequested()
     signal viewModeRequested(string mode)
     signal loadRequested()
+    // 控制条上的齿轮:声音设置。弹窗声明在 RoomPage 根上,这里只往上传意图
+    signal audioSettingsRequested()
 
     function pushDanmaku(text) {
         danmakuLayer.push(text)
@@ -275,6 +277,7 @@ Item {
         onDanmakuSubmitted: (text) => root.danmakuSubmitted(text)
         onDanmakuToggleRequested: root.danmakuToggleRequested()
         onViewModeRequested: (mode) => root.viewModeRequested(mode)
+        onAudioSettingsRequested: root.audioSettingsRequested()
     }
 
     Timer {

@@ -181,6 +181,23 @@ void PlaybackController::setVolume(double volume)
     emit volumeChanged();
 }
 
+void PlaybackController::setOutputDevice(const QAudioDevice &device)
+{
+    if (device.id() == m_audioOutput->device().id())
+        return;
+
+    // QAudioOutput 自带 setDevice()(QAudioSink 没有,那边只能重建),
+    // 播放中切换由 Qt 自己把底层输出重新接一遍,音量和静音状态不受影响。
+    // 切记**不要**为了换设备去 setAudioOutput(nullptr) —— 那会把播放器的
+    // 音频渲染器一起拆掉(见头文件里 m_audioBufferOutput 那段说明)。
+    m_audioOutput->setDevice(device);
+
+    LOG_INFO("Playback") << "本机播放输出设备已切换:"
+                         << (device.description().isEmpty()
+                                 ? QStringLiteral("(系统默认)")
+                                 : device.description())
+                         << "当前播放状态:" << playing();
+}
 
 // ============================
 // 静音
@@ -234,9 +251,9 @@ void PlaybackController::onVideoFrame(const QVideoFrame &frame) {
     if (m_showingRemote)
         return;
 
-    // 诊断:前 10 帧 + 每 300 帧打印一次
+    // 诊断:前 3 帧 + 每 300 帧打印一次
     static int count = 0;
-    if (count < 10 || count % 300 == 0) {
+    if (count < 3 || count % 300 == 0) {
         LOG_TRACE("Playback") << "onVideoFrame 第" << (count + 1) << "帧"
                               << frame.width() << "x" << frame.height();
     }

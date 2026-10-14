@@ -19,6 +19,7 @@
 #include <QObject>
 #include <QSet>
 #include <QString>
+#include <QVariantList>
 
 #include "core/Protocol.h"
 #include "webrtc/PeerLink.h"
@@ -55,6 +56,29 @@ class SignalingChannel : public QObject {
                WRITE setVideoQuality
                NOTIFY videoQualityChanged)
 
+    // ---- 音频设备(麦克风 / 听筒)----
+    //
+    // 和 audioEnabled、两个音量一样只是转发给 WebrtcManager,本类不存状态。
+    // 界面不直接看 WebrtcManager —— 那是 WebRTC 那一层的实现细节。
+    //
+    // 设备的"值"一律是**设备名**(空串 = 跟随系统默认),不是索引:
+    // 索引会随设备插拔漂移,存下来就会选错设备(原因见 WebrtcManager.h)。
+    Q_PROPERTY(QVariantList micDevices
+               READ micDevices
+               NOTIFY micDevicesChanged)
+
+    Q_PROPERTY(QVariantList speakerDevices
+               READ speakerDevices
+               NOTIFY speakerDevicesChanged)
+
+    Q_PROPERTY(QString micDevice
+               READ micDevice
+               NOTIFY micDeviceChanged)
+
+    Q_PROPERTY(QString speakerDevice
+               READ speakerDevice
+               NOTIFY speakerDeviceChanged)
+
 public:
     SignalingChannel(RoomSession *session,
                      NetworkManager *networkManager,
@@ -87,6 +111,19 @@ public:
     int videoQuality() const;
     Q_INVOKABLE void setVideoQuality(int quality);
 
+    // 重新枚举音频设备(打开设置页 / 房间里的设置弹窗时调一次)。
+    // 没进过房间也能用 —— 内部会先把 WebRTC 的声卡拉起来。
+    Q_INVOKABLE void refreshAudioDevices();
+
+    // 选设备。空串 = 跟随系统默认。选中**立刻生效**,落盘由 main.cpp 接线。
+    Q_INVOKABLE void setMicDevice(const QString &name);
+    Q_INVOKABLE void setSpeakerDevice(const QString &name);
+
+    QVariantList micDevices() const;
+    QVariantList speakerDevices() const;
+    QString micDevice() const;
+    QString speakerDevice() const;
+
 signals:
     void errorOccurred(const QString &message);
     // 与某个对端的连接真正打通(ICE 完成),供界面显示状态
@@ -98,6 +135,11 @@ signals:
     void movieVolumeChanged(double volume);
     void chatVolumeChanged(double volume);
     void videoQualityChanged(int quality);
+
+    void micDevicesChanged();
+    void speakerDevicesChanged();
+    void micDeviceChanged(const QString &name);
+    void speakerDeviceChanged(const QString &name);
 
 private slots:
     void onMessage(const QString &text);

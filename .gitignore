@@ -6,8 +6,20 @@
 
 docs
 
+design
+
+logs
+
+Client/tools/*
+
 # 凭据:绝不会进仓库。
 # tools/ 下面是随包分发的二进制,但 cookie 文件是用户自己的登录态 ——
 # 别让它跟着 `git add Client/tools` 一起进去(2026-10-12 差点发生)
 cookies.txt
 *.part
+
+# TURN 密钥:Cloudflare 的 API token 能无限次兑换凭据,编进客户端就等于公开。
+# 服务端从 Secrets.h 读(没有就退回环境变量,见 Server/src/tools/TurnCredentials.cpp);
+# 根目录那份是申请时抄下来的原文,同样带明文 token。
+Server/src/tools/Secrets.h
+STUN*TURN.txt

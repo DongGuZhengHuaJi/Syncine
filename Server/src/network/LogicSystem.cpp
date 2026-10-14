@@ -6,6 +6,7 @@
 #include "Log.h"
 #include "Room.h"
 #include "Session.h"
+#include "TurnCredentials.h"
 
 #include <algorithm>
 
@@ -121,6 +122,11 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
         reply["state"] = room->stateJson(); // 建房的人就是房主,列表给全
         reply["videoMismatched"] = room->videoMismatched();
         reply["shortestDuration"] = room->shortestDuration();
+        // ICE 配置(STUN + 带临时凭据的 TURN)随入房消息一起下发。
+        // 客户端进房后马上就要建 PeerConnection,单独发一条消息会晚于建连;
+        // 放顶层而不是塞进 state —— state 是"房间播放状态",这是网络配置。
+        // 内容由 TurnCredentials 从 Cloudflare 兑换并缓存,这里只是取一份快照。
+        reply["iceServers"] = TurnCredentials::getInstance().iceServers();
         session->send(reply.dump());
         LOG_INFO("Logic") << "房间创建: " << newRoomId;
         return;
@@ -170,6 +176,8 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
                                                || targetRoom->isHost(session));
         reply["videoMismatched"] = targetRoom->videoMismatched();
         reply["shortestDuration"] = targetRoom->shortestDuration();
+        // 同 create_room:ICE 配置跟着入房消息走(见那里的说明)
+        reply["iceServers"] = TurnCredentials::getInstance().iceServers();
         session->send(reply.dump());
 
         json notice;

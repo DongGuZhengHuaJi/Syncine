@@ -8,6 +8,7 @@
 #include <QObject>
 #include <QUrl>
 #include <QMediaPlayer>
+#include <QAudioDevice>
 #include <QAudioOutput>
 #include <QAudioBuffer>
 #include <QAudioBufferOutput>
@@ -87,6 +88,14 @@ public:
 
     bool muted() const;
     void setMuted(bool muted);
+
+    // 换本机播放的输出设备("听筒"设置里的那一项)。
+    // 传一个 isNull() 的设备 = 回到系统默认;和设备没变则什么也不做。
+    //
+    // 和 MovieAudioPlayer 那边不同,QAudioOutput **有** setDevice(),所以
+    // 不用重建对象,音量/静音这些状态都还在自己身上。
+    // 只在 Qt 主线程调用(main.cpp 里接线)。
+    void setOutputDevice(const QAudioDevice &device);
 
     QString hash() const;
 

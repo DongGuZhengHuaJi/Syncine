@@ -50,11 +50,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <QHash>
 #include <QObject>
 #include <QString>
+#include <QVariantList>
 #include <string>
 #include <vector>
 
@@ -68,6 +70,8 @@
 #include "api/video_codecs/builtin_video_encoder_factory.h"
 #include "api/media_stream_interface.h"
 #include "rtc_base/thread.h"
+
+#include "core/RoomTypes.h"
 
 #include "MovieAudioSource.h"
 #include "PeerLink.h"
@@ -89,7 +93,33 @@ public:
     WebrtcManager &operator=(const WebrtcManager &) = delete;
 
     // 初始化两套线程和编解码工厂。可重复调用,第二次直接返回 true。
-    bool initialize(const std::vector<std::string> &stunServers);
+    //
+    // ICE 配置**不从参数里给** —— 它跟着房间走:服务端在 room_created /
+    // room_joined 里下发(含 Cloudflare 换来的临时 TURN 凭据),由
+    // SignalingChannel 在建连前交给 setIceServers()。
+    bool initialize();
+
+    // ---- ICE 配置(STUN / TURN)----
+    //
+    // 服务端下发的列表(见 RoomTypes.h 的 IceServerConfig)。
+    //
+    // **必须在 createPeerConnection() 之前调用**:配置是在
+    // CreatePeerConnection 那一刻拷进 PeerConnection 的,WebRTC 没有"事后改"的
+    // 接口(改已建好的连接要 SetConfiguration,那是另一件事,见下)。
+    // 唯一调用方是 SignalingChannel::ensurePeer()。
+    //
+    // 只影响**之后新建**的连接:已经协商好的不会换凭据。对一个 24 小时有效期的
+    // 凭据来说够用 —— 注意 libwebrtc 的 TurnPort 是拿同一份凭据周期性续租的,
+    // 凭据过期后续租会被拒、那条连接会降级断开。真要做热刷新,是服务端刷新后
+    // 主动推送 + 客户端 SetConfiguration,本期没做。
+    //
+    // 线程:只在 Qt 主线程调(createPeerConnection 也是主线程调的),
+    // 所以不加锁 —— 谁要把建连挪到别的线程,这里得跟着改。
+    void setIceServers(const QList<IceServerConfig> &servers);
+
+    QList<IceServerConfig> iceServers() const {
+        return m_iceServers;
+    }
 
     // ---- 对端管理 ----
 
@@ -202,11 +232,9 @@ public:
     bool movieAudioEnabled() const;
 
     // ---- 接收端音量(0.0 ~ 1.0,1.0 为原始音量)----
-    //
     // 两条路的音量**由不同机制实现**,这一点值得记住:
     //   语音 → WebRTC 自己的播放,音量走 AudioSource::SetVolume
     //   电影 → 我们的 MovieAudioPlayer 在播,音量走 QAudioSink::setVolume
-    // 两者互不相干,所以能独立调 —— 这正是需求要的。
     void setRemoteMovieVolume(double volume);
     void setRemoteChatVolume(double volume);
 
@@ -225,6 +253,60 @@ public:
         return m_localAudioTrack != nullptr && m_localAudioTrack->enabled();
     }
 
+    // ---- 音频设备(麦克风 / 听筒)----
+    //
+    // 只影响 **voice 那条**(真声卡):麦克风采集和对方语音的播放都归 WebRTC
+    // 的 ADM 管。media 那条是假声卡、不管设备,但观众侧的电影声由
+    // MovieAudioPlayer 自己播 —— 听筒一并把它也切过去,否则会出现
+    // "语音在耳机里、电影声在外放"。
+    //
+    // 几条绕不开的事实(都核对过 libwebrtc 源码,动这里之前先看一遍):
+    //   · ADM 是**惰性初始化**的:WebRTC 在建第一条 PeerConnection 时才调它的
+    //     Init()。在那之前枚举设备只会拿到 -1,所以这里得自己补一次。
+    //     (实际上 initialize() 里那条"保活连接"会把这一步提前到启动时,
+    //      所以正常情况下声卡一开始就是活的 —— 那次补 Init 是兜底。)
+    //   · 索引 0 恒为 "default: xxx"(跟随系统默认),1 起才是真实设备。
+    //   · Linux 上 ADM **不填 GUID**(guid 恒为空串),所以只能用名字认设备。
+    //   · 索引不能当持久化标识 —— 插拔一次就漂。对外一律用**名字**,
+    //     空串 = 系统默认。
+    //   · 播放/录音已经开始时,SetXxxDevice 会直接返回 -1(PulseAudio 的 ADM
+    //     不允许热改),必须 Stop → Set → Init → Start 走一遍。
+    //   · 引擎每次(重新)初始化都会把设备复位成 0(adm_helpers::Init 里干的)。
+    //     有了保活连接之后引擎实际不会再重新初始化,那一步重套是防御性的 ——
+    //     哪天保活连接没了,它能把"每次进房都回到系统默认"挡掉。
+    //   · 这些 ADM 调用都要在 voice 的 worker 线程上做,见 .cpp 里的
+    //     runOnVoiceWorker。
+
+    // 一个声卡设备。index 是 ADM 的索引(0 = 系统默认),name 是它的显示名。
+    // (Linux 上没有 GUID 可用,所以名字就是唯一的标识 —— 见上面那条)
+    struct DeviceInfo {
+        int index = 0;
+        QString name;
+
+        bool operator==(const DeviceInfo &other) const {
+            return index == other.index && name == other.name;
+        }
+    };
+
+    // 设备列表,QML 的 {label, value} 形状(和 CookieManager::browsers 一致)。
+    // value 为 "" 表示"跟随系统默认"。
+    QVariantList recordingDevices() const;
+    QVariantList playoutDevices() const;
+
+    // 当前选中的设备名。"" = 系统默认。
+    QString recordingDeviceName() const;
+    QString playoutDeviceName() const;
+
+    // 重新枚举设备。必要时会替 WebRTC 先把声卡 Init 了(设置页在没进房间时
+    // 也要能看到列表)。列表有变化才发 audioDevicesChanged。
+    void refreshAudioDevices();
+
+    // 按名字选设备,空串 = 系统默认。名字对不上(设备被拔了)则退回系统默认。
+    // 听筒那条会同时应用到语音(ADM)和电影声(MovieAudioPlayer)。
+    // 返回是否真的落地了 —— 声卡还没起来时只记下意图(进房后再套用)。
+    bool selectRecordingDevice(const QString &name);
+    bool selectPlayoutDevice(const QString &name);
+
     // 销毁一切,包括线程和工厂。析构时自动调用。
     void destroy();
 
@@ -241,6 +323,13 @@ signals:
     // 接收端两条音轨的音量。QML 的两个滑块绑这个。
     void remoteMovieVolumeChanged(double volume);
     void remoteChatVolumeChanged(double volume);
+
+    // 设备列表变了(重新枚举后内容不同)。QML 的设备列表绑这个。
+    void audioDevicesChanged();
+
+    // 选中的设备变了。名字是 "" 表示系统默认。QML 显示当前选择、以及落盘都用它。
+    void recordingDeviceChanged(const QString &name);
+    void playoutDeviceChanged(const QString &name);
 
 private:
     // 一个对端的两条连接。裸指针 + Qt 父子关系:
@@ -263,29 +352,98 @@ private:
     PeerLink *createLink(const QString &peerId, LinkKind kind,
                          bool createDataChannel);
 
+    // 把 m_iceServers 翻成 libwebrtc 的形状。**全项目唯一的翻译点** ——
+    // 那边字段叫 password、协议里叫 credential,对应关系只在这里写一次。
+    // 空列表时退回一个公共 STUN(见 .cpp 里的 defaultIceServers)。
+    std::vector<webrtc::PeerConnectionInterface::IceServer> buildIceServers() const;
+
+    // ---- 音频设备(内部)----
+
+    // 把 fn 投到 voice 的 worker 线程上**同步**跑完再返回。
+    // 理由见 .cpp 里的实现说明。
+    void runOnVoiceWorker(const std::function<void()> &fn);
+
+    // 下面四个**必须在 worker 线程上调用**(由 runOnVoiceWorker 包着跑):
+
+    // 声卡没初始化就先替它 Init 一次(幂等)。没有这一步,枚举只会拿到 -1。
+    bool ensureVoiceAdmOnWorker();
+    std::vector<DeviceInfo> enumerateDevicesOnWorker(bool recording);
+    // 套用某个索引。内部按"先停、再设、再起"走 —— 热改会失败。
+    bool applyRecordingDeviceOnWorker(uint16_t index);
+    bool applyPlayoutDeviceOnWorker(uint16_t index);
+
+    // 下面几个在 Qt 主线程上跑:
+
+    // 重新枚举并写回成员。列表有变化就发 audioDevicesChanged。
+    void reloadDevices();
+    // 把某个名字落到 ADM 上。名字空/对不上都退回系统默认。
+    // force=true 时忽略"索引没变"的短路(引擎刚初始化,ADM 内部已被复位)。
+    bool applyDevice(bool recording, const QString &name, bool force);
+    // 记下用户的选择,必要时一起应用到 ADM 和电影声播放器。
+    // 返回是否真的落到 ADM 上了(声卡没起来时只记意图,返回 false)。
+    bool setDesiredDevice(bool recording, const QString &name);
+
+    int currentDeviceIndex(bool recording) const;
+    const std::vector<DeviceInfo> &deviceList(bool recording) const;
+
+    std::optional<webrtc::Environment> m_mediaEnvironment;
     // ---- 工厂甲:真声卡,只跑语音 ----
+    webrtc::scoped_refptr<webrtc::AudioDeviceModule> m_voiceAdm;
     std::unique_ptr<webrtc::Thread> m_voiceNetworkThread;
     std::unique_ptr<webrtc::Thread> m_voiceWorkerThread;
     std::unique_ptr<webrtc::Thread> m_voiceSignalingThread;
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> m_voiceFactory;
 
     // ---- 工厂乙:假声卡,只跑视频 + 电影音频 ----
-    //
-    // 用 optional 而不是直接放一个 Environment:它的默认构造函数被
-    // = delete 了,只能由 EnvironmentFactory/CreateEnvironment 造出来。
-    //
-    // 声明在 m_dummyAdm **之前**,保证它比假声卡活得久
-    // (成员按声明顺序构造、逆序析构)。
-    std::optional<webrtc::Environment> m_mediaEnvironment;
     webrtc::scoped_refptr<webrtc::AudioDeviceModule> m_dummyAdm;
     std::unique_ptr<webrtc::Thread> m_mediaNetworkThread;
     std::unique_ptr<webrtc::Thread> m_mediaWorkerThread;
     std::unique_ptr<webrtc::Thread> m_mediaSignalingThread;
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> m_mediaFactory;
 
-    std::vector<std::string> m_stunServers;
+    // ---- 声卡的"保活锁" ----
+    //
+    // 一条什么都不做的常驻连接:不挂轨、不协商、不接数据通道,唯一的作用是
+    // 让 WebRTC 的 media engine 引用计数永远不为 0。详细理由见
+    // initializeVoiceFactory() 里那段注释 —— 说穿了是给 libwebrtc 的一个
+    // 上游 bug 打的补丁,哪天它修了,这块可以整体删掉。
+    //
+    // 声明顺序要紧:观察者必须在连接**之前**声明(成员逆序析构),
+    // 否则连接销毁时回调可能踩到已经析构的观察者。
+    class KeepAliveObserver : public webrtc::PeerConnectionObserver {
+    public:
+        void OnSignalingChange(webrtc::PeerConnectionInterface::SignalingState) override {}
+        void OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface>) override {}
+        void OnRenegotiationNeeded() override {}
+        void OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState) override {}
+        void OnIceGatheringChange(webrtc::PeerConnectionInterface::IceGatheringState) override {}
+        void OnIceCandidate(const webrtc::IceCandidateInterface *) override {}
+        void OnTrack(webrtc::scoped_refptr<webrtc::RtpTransceiverInterface>) override {}
+    };
+
+    KeepAliveObserver m_voiceKeepAliveObserver;
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> m_voiceKeepAlive;
+
+    // 当前使用的 ICE 配置(STUN + 可能带临时凭据的 TURN)。
+    // 由 SignalingChannel 在每次建连前写入,createLink 读它。
+    QList<IceServerConfig> m_iceServers;
 
     QHash<QString, PeerLinks> m_peers;
+
+    // ---- 音频设备 ----
+    // 枚举结果。只由 Qt 主线程读写(worker 线程上的枚举结果先拷出来再写回)。
+    std::vector<DeviceInfo> m_recordingDevices;
+    std::vector<DeviceInfo> m_playoutDevices;
+
+    // ADM 当前实际用的索引。**它没有查询接口**,只能自己记 ——
+    // 引擎初始化时被复位成 0,所以每次重新套用后都要跟着更新。
+    int m_recordingDeviceIndex = 0;
+    int m_playoutDeviceIndex = 0;
+
+    // 用户的选择(= 意图)。"" 表示系统默认。跨重启由 AppSettings 保管,
+    // 这里只负责在引擎(重新)初始化后把它套回去。
+    QString m_desiredRecordingName;
+    QString m_desiredPlayoutName;
 
     // 音频源描述"从哪取音"(麦克风)。全进程一个:所有对端共用同一个麦克风,
     // 只是各自有一条独立的 RTP 流。
