@@ -14,16 +14,16 @@
 
 namespace {
 
-// 导出时给 yt-dlp 的"URL"。它必须有个 URL 才肯干活,而这个不合法 scheme
-// 会让它立刻报错退出(**不触网**,1 秒内结束)—— 但 cookie jar 照样在退出时
-// 落盘,这正是我们要的。
-// **副作用是退出码永远是 1** —— 所以判成功绝不能看退出码,只能看文件。
+// 导出时传给 yt-dlp 的「URL」。它需要有一个 URL 才会执行，而该非法 scheme
+// 会使其立即报错退出（**不访问网络**，1 秒内结束）——但 cookie jar 仍会在退出时
+// 落盘，这正是所需行为。
+// **副作用是退出码恒为 1**——因此判断成功不能依据退出码，只能检查文件。
 const char *kDummyUrl = "bogus-scheme://nothing";
 
-// 超过这么多天就提醒用户"该重新导一次了"。cookie 会过期,快照更是。
+// 超过这么多天就提醒用户"该重新导一次了"。cookie 会过期，快照更是。
 constexpr int kStaleDays = 30;
 
-// 导出/导入的看门狗:keyring 弹窗、浏览器数据库被锁死时得有个出口
+// 导出/导入的看门狗：keyring 弹窗、浏览器数据库被锁死时得有个出口
 constexpr int kWatchdogMs = 90 * 1000;
 
 const char *kNetscapeMagic = "# Netscape HTTP Cookie File";
@@ -211,10 +211,10 @@ QString labelForKey(const QString &key)
     return key;
 }
 
-// 数 cookie 条目,并顺手把首行(魔数)带出来。
+// 统计 cookie 条目数，并一并取出首行（魔数）
 //
-// 规则:7 列 Tab 分隔的行才算一条。
-// **`#HttpOnly_` 开头的是有效条目,不是注释**(这是 Netscape 格式的约定),
+// 规则：7 列 Tab 分隔的行才算一条。
+// **`#HttpOnly_` 开头的是有效条目，不是注释**(这是 Netscape 格式的约定),
 // 跳注释时别把它一起跳了。
 int countEntries(const QString &path, QString *firstLine)
 {
@@ -230,7 +230,7 @@ int countEntries(const QString &path, QString *firstLine)
     while (!stream.atEnd()) {
         QString line = stream.readLine();
         if (first) {
-            // 带 BOM 的文件会让魔数检查失败,这里先剥掉
+            // 带 BOM 的文件会让魔数检查失败，这里先剥掉
             line.remove(QChar(0xFEFF));
             if (firstLine != nullptr)
                 *firstLine = line;
@@ -246,7 +246,7 @@ int countEntries(const QString &path, QString *firstLine)
     return count;
 }
 
-// 这些错误值得翻译成人话;翻译表覆盖不到的,退回 yt-dlp 的原话
+// 这些错误值得翻译成人话；翻译表覆盖不到的，退回 yt-dlp 的原话
 QString humanizeError(const QString &output, const QString &browserLabel)
 {
     const QString lower = output.toLower();
@@ -273,7 +273,7 @@ QString humanizeError(const QString &output, const QString &browserLabel)
         return QStringLiteral("写 cookie 文件失败(磁盘或权限问题)。"
                               "换个位置或检查磁盘剩余空间后重试");
 
-    // 兜底:取最后一条 ERROR: 行;没有就取输出的最后几行(防止 traceback 糊屏)
+    // 兜底：取最后一条 ERROR: 行；没有就取输出的最后几行（防止 traceback 糊屏）
     const QStringList lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
     for (int i = lines.size() - 1; i >= 0; --i) {
         const QString line = lines.at(i).trimmed();
@@ -301,18 +301,18 @@ CookieManager::CookieManager(const Toolchain *toolchain, AppSettings *settings,
         fail(QStringLiteral("导入超时,请重试"));
     });
 
-    // 目录先建出来:yt-dlp 写不存在的目录是**崩在 Python 里**,一个字都不落
+    // 目录先建出来：yt-dlp 写不存在的目录是**崩在 Python 里**,一个字都不落
     const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
     if (!dir.isEmpty())
         QDir().mkpath(dir);
 
-    // 每次下载 yt-dlp 都会回写这个文件(它退出时把 cookie jar 存回去),
+    // 每次下载 yt-dlp 都会回写这个文件（它退出时把 cookie jar 存回去）,
     // 所以状态得跟着文件走 —— 不然界面上会一直显示已经删掉的旧状态
     if (!path().isEmpty()) {
         m_watcher.addPath(path());
         connect(&m_watcher, &QFileSystemWatcher::fileChanged, this, [this]() {
-            // 被下载重新创建出来的文件是 0644(没有我们的预创建),重贴一次 600;
-            // 文件可能被删掉,watcher 会自己移除路径,重新观察交给 refreshState
+            // 由下载重建的文件权限为 0644（未经过本类的预创建），需重新设为 0600；
+            // 文件可能被删除，watcher 会自行移除该路径，重新观察交由 refreshState
             if (QFile::exists(path())) {
                 QFile::setPermissions(path(), QFile::ReadOwner | QFile::WriteOwner);
                 if (!m_watcher.files().contains(path()))
@@ -403,7 +403,7 @@ void CookieManager::refreshBrowsers()
 }
 
 // ============================
-// 导入:从浏览器
+// 导入：从浏览器
 // ============================
 
 void CookieManager::importFromBrowser(const QString &key)
@@ -417,8 +417,8 @@ void CookieManager::importFromBrowser(const QString &key)
         return;
     }
 
-    // 先建好一个 0600 的空壳:yt-dlp 退出时会**原地重写**它,权限保持不变。
-    // 反过来让它自己创建,拿到的是 0644(全组可读)
+    // 先建好一个 0600 的空壳：yt-dlp 退出时会**原地重写**它，权限保持不变。
+    // 反过来让它自己创建，拿到的是 0644(全组可读)
     QString error;
     if (!writePartial(QByteArray(), &error)) {
         fail(error);
@@ -435,7 +435,7 @@ void CookieManager::importFromBrowser(const QString &key)
 
     const QStringList args{
         QStringLiteral("--ignore-config"),   // 用户 ~/.config/yt-dlp/config 里的
-        QStringLiteral("--no-cache-dir"),    // --cookies 会在退出时被我们覆盖掉
+        QStringLiteral("--no-cache-dir"),    // --cookies 会在退出时被本类覆盖
         QStringLiteral("--no-warnings"),
         QStringLiteral("--cookies-from-browser"), key,
         QStringLiteral("--cookies"), path() + QStringLiteral(".part"),
@@ -471,7 +471,7 @@ void CookieManager::handleBrowserFinished(int exitCode)
     if (finished != nullptr)
         finished->deleteLater();
 
-    // 超时时已经报过错了(那次是被我们 kill 的),这里别再覆盖一遍
+    // 超时时已报过错误（该次进程由本类终止），此处不再覆盖
     if (m_timedOut) {
         m_timedOut = false;
         QFile::remove(path() + QStringLiteral(".part"));
@@ -481,7 +481,7 @@ void CookieManager::handleBrowserFinished(int exitCode)
 
     const QString label = labelForKey(m_importingKey);
 
-    // **不能看退出码**:假 URL 必然让 yt-dlp 报错退出(exit=1),而 cookie
+    // **不能看退出码**:假 URL 必然让 yt-dlp 报错退出（exit=1）,而 cookie
     // 照样是导出了的。唯一的判据是文件本身。
     if (exitCode != 0 && m_output.contains(QLatin1String("Extracted 0 cookies"))) {
         fail(QStringLiteral("%1 里没有可用 cookie(可能没登录过任何网站)").arg(label));
@@ -507,7 +507,7 @@ void CookieManager::handleBrowserFinished(int exitCode)
 }
 
 // ============================
-// 导入:从文件
+// 导入：从文件
 // ============================
 
 void CookieManager::importFromFile(const QUrl &fileUrl)
@@ -525,7 +525,7 @@ void CookieManager::importFromFile(const QUrl &fileUrl)
         return;
     }
     if (source == path()) {
-        refreshState();   // 选的就是我们自己那份,当作成功
+        refreshState();   // 选中的即本类自身的文件，视为成功
         emit stateChanged();
         return;
     }
@@ -588,12 +588,12 @@ bool CookieManager::writePartial(const QByteArray &content, QString *error)
         return false;
     }
 
-    // open() 建出来的文件权限受 umask 影响(通常 0644),立刻收紧到 0600。
-    // 从文件导入时,这一步是权限的全部保证;从浏览器导入时,yt-dlp 之后是
-    // **原地重写**这个文件(不改权限),所以也是安全的
+    // open() 建出来的文件权限受 umask 影响（通常 0644）,立刻收紧到 0600。
+    // 从文件导入时，这一步是权限的全部保证；从浏览器导入时，yt-dlp 之后是
+    // **原地重写**这个文件（不改权限）,所以也是安全的
     QFile::setPermissions(partPath, QFile::ReadOwner | QFile::WriteOwner);
 
-    // 空内容 = 只建个合法的壳给 yt-dlp 重写;有内容 = 手动导入,先剥 BOM
+    // 空内容 = 只建个合法的壳给 yt-dlp 重写；有内容 = 手动导入，先剥 BOM
     QByteArray payload = content;
     if (payload.startsWith("\xEF\xBB\xBF"))
         payload.remove(0, 3);
@@ -629,9 +629,9 @@ bool CookieManager::finalizePartial(QString *error)
         return false;
     }
 
-    // 改名:先删旧的(同目录改名在 POSIX 上本来就是原子的,Qt 的 rename
-    // 不覆盖已存在文件,所以得先 remove)。这一步保证正在跑的下载要么看到
-    // 旧文件、要么看到新文件,不会看到半截 —— 也保证**导入失败时旧文件完好**
+    // 改名：先删旧的(同目录改名在 POSIX 上本来就是原子的，Qt 的 rename
+    // 不覆盖已存在文件，所以得先 remove)。这一步保证正在跑的下载要么看到
+    // 旧文件、要么看到新文件，不会看到半截 —— 也保证**导入失败时旧文件完好**
     QFile::remove(path());
     if (!QFile::rename(partPath, path())) {
         QFile::remove(partPath);
@@ -658,7 +658,7 @@ void CookieManager::refreshState()
         }
     }
 
-    // 文件可能刚被创建出来(下载回写),把 watcher 补上
+    // 文件可能刚被创建出来（下载回写）,把 watcher 补上
     if (!file.isEmpty() && QFileInfo::exists(file) && !m_watcher.files().contains(file))
         m_watcher.addPath(file);
 

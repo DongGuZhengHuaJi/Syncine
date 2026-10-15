@@ -1,20 +1,16 @@
 //
 // HDR 视频 → SDR 转换。
 //
-// 为什么需要:Qt 的渲染**不做 HDR→SDR 色调映射** —— 它把 PQ 曲线解开成线性后
-// 直接截断在 SDR 白(实测:76% 的通道值压到顶、63% 的像素纯白)。表现就是
-// "暗处正常、亮处过曝"。详见 memory 里的 syncine-video-pipeline。
+// 用途：Qt 的渲染不做 HDR→SDR 色调映射——将 PQ 曲线解开为线性后直接截断在 SDR 白
+// （实测：76% 的通道值压到顶、63% 的像素纯白），表现为「暗处正常、亮处过曝」。
+// 做法：用自带的 ffmpeg 将 HDR 文件离线转为 SDR（mpv 同款的 libplacebo 映射）后
+// 再交给播放器；代价是需重编码（1080p 约 3~5 倍速）。
 //
-// 做法:用自带的 ffmpeg 把 HDR 文件离线转成 SDR(mpv 同款的 libplacebo 映射),
-// 转完再交给播放器。代价是要重编码(1080p 大约 3~5 倍速),换来的是画面对了。
+// 三条状态：check() 用 ffprobe 异步判断文件是否为 HDR（几百毫秒）；
+// convert() 转码并报告进度；dismiss() 表示「继续播放原片」，不再提示该文件。
 //
-// 三条状态:
-//   check()   —— ffprobe 看一眼这个文件是不是 HDR(几百毫秒,异步)
-//   convert() —— 转码,带进度
-//   dismiss() —— "继续看原片",对当前这个文件不再提示
-//
-// 输出落在**源文件旁边**:`<原名>_SDR.mkv`。放旁边而不是临时目录,是为了
-// 用户下次还能直接用它(而且房间里各人转各自的,谁也不用等谁)。
+// 输出落在源文件旁边的 `<原名>_SDR.mkv`：放在源文件旁而非临时目录，
+// 便于用户后续直接使用，且房间内各端各自转换、互不等待。
 //
 
 #ifndef SYNCINE_HDRCONVERTER_H
@@ -51,7 +47,7 @@ class HdrConverter : public QObject {
                READ progress
                NOTIFY stateChanged)
 
-    // 转出来大概多大(给用户一个"占多少空间"的预期)
+    // 转出来大概多大（给用户一个"占多少空间"的预期）
     Q_PROPERTY(qint64 estimatedBytes
                READ estimatedBytes
                NOTIFY stateChanged)
@@ -60,7 +56,7 @@ class HdrConverter : public QObject {
                READ sourcePath
                NOTIFY stateChanged)
 
-    // 转好的文件(QUrl 给播放器/房间用,path 给界面显示)
+    // 转好的文件（QUrl 给播放器/房间用，path 给界面显示）
     Q_PROPERTY(QUrl outputUrl
                READ outputUrl
                NOTIFY stateChanged)
@@ -86,7 +82,7 @@ public:
     QString outputPath() const { return m_outputPath; }
     QString errorText() const { return m_errorText; }
 
-    // 检查一个本地文件(非本地 / 空 → 清空状态)
+    // 检查一个本地文件（非本地 / 空 → 清空状态）
     Q_INVOKABLE void check(const QUrl &fileUrl);
     Q_INVOKABLE void convert();
     Q_INVOKABLE void dismiss();
@@ -94,7 +90,7 @@ public:
 
 signals:
     void stateChanged();
-    // 转好了 —— 调用方负责把它交给播放器(以及房间里的本机文件映射)
+    // 转好了 —— 调用方负责把它交给播放器（以及房间里的本机文件映射）
     void finished(const QUrl &outputUrl);
     void failed(const QString &message);
 
@@ -104,7 +100,7 @@ private:
     void handleProgressLine(const QString &line);
     void resetForNewSource();
     void fail(const QString &message);
-    // 目标码率:跟着源走,但有下限和上限
+    // 目标码率：跟着源走，但有下限和上限
     int targetBitrateKbps() const;
 
     const Toolchain *m_toolchain = nullptr;

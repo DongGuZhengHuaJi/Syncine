@@ -1,18 +1,18 @@
 import QtQuick
 import SyncineApp
 
-// 详情视图里的一组流(视频 / 音频 / 合并格式),单选。
+// 详情视图中的一组流（视频 / 音频 / 合并格式），单选。
 //
-// 和 OptionList 的区别:
-//   · 每行有两段文字(标题 + 右边的小字信息)
-//   · 会标出 HDR 的流 —— Qt 播放器放 HDR 要离线转 SDR(见 HdrConverter),
-//     用户得能看见自己挑的是哪条
-//   · 有"手选"语义:点过了就是 pickedId,父级拿它去拼 spec
+// 与 OptionList 的区别：
+//   · 每行有两段文字（标题 + 右侧小字信息）
+//   · 标出 HDR 的流——Qt 播放器播放 HDR 需离线转 SDR（见 HdrConverter），
+//     用户需能看出所挑选的是哪一条
+//   · 具有「手选」语义：点选后即为 pickedId，父级据此拼接 spec
 //
-// 三条踩过的坑(和 OptionList 一样,别踩回去):
-//   · **用 Repeater + Column,不要用 ListView**(没有隐式高度,放进 Popup 会塌)
-//   · options 是 QVariantList,delegate 里**只有 modelData**,没有角色名
-//   · 高度靠行数自己长出来,外层要不要滚动由调用方决定
+// 三处约束（与 OptionList 相同）：
+//   · **使用 Repeater + Column，不要用 ListView**（无隐式高度，放入 Popup 会塌陷）
+//   · options 是 QVariantList，delegate 中**只有 modelData**，没有角色名
+//   · 高度由行数自然撑开，是否需要滚动由调用方决定
 Column {
     id: root
 
@@ -57,7 +57,7 @@ Column {
                     color: selected ? Style.accent : Style.textPrimary
                 }
 
-                // HDR 标:提醒播放器要转一道
+                // HDR 标：提醒播放器要转一道
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     visible: modelData.hdr === true

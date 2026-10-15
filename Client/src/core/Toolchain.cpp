@@ -56,7 +56,7 @@ QString Toolchain::findTool(const QString &subdir, const QStringList &names)
                 if (!info.exists() || !info.isFile())
                     continue;
 
-                // 从 zip/git 拿到的文件常常没有可执行位,补上再判断
+                // 从 zip/git 拿到的文件常常没有可执行位，补上再判断
                 if (!info.isExecutable()) {
                     QFile::setPermissions(candidate,
                                           QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner
@@ -70,7 +70,7 @@ QString Toolchain::findTool(const QString &subdir, const QStringList &names)
     }
 
     // 最后才退回 PATH。能找到但版本旧的情况要靠调用方把错误原样显示出来 ——
-    // 这里只负责"找到",不判断版本够不够新(那得联网问,不该在启动时做)。
+    // 这里只负责"找到",不判断版本够不够新（那得联网问，不该在启动时做）。
     for (const QString &name : names) {
         const QString found = QStandardPaths::findExecutable(name);
         if (!found.isEmpty())
@@ -98,9 +98,9 @@ void Toolchain::detect()
     else
         LOG_INFO("Toolchain") << "ffmpeg:" << m_ffmpegPath;
 
-    // ffprobe:不是必需的(合并音视频只用 ffmpeg),但 yt-dlp 修 m3u8 时间戳之类的
-    // 场合会用到它 —— 少了它只是降级 + 一条警告。找一下、记进日志,便于排查。
-    // 存起来:除了 yt-dlp 修时间戳,客户端的 HDR 检查也用它
+    // ffprobe:不是必需的（合并音视频只用 ffmpeg）,但 yt-dlp 修 m3u8 时间戳之类的
+    // 场合会用到它 —— 少了它只是降级 + 一条警告。找一下、记进日志，便于排查。
+    // 存起来：除了 yt-dlp 修时间戳，客户端的 HDR 检查也用它
     m_ffprobePath = findTool(QStringLiteral("ffmpeg"), {QStringLiteral("ffprobe")});
     if (!m_ffprobePath.isEmpty())
         LOG_INFO("Toolchain") << "ffprobe:" << m_ffprobePath;
@@ -113,9 +113,9 @@ void Toolchain::detect()
     m_ffmpegVersion.clear();
     m_pendingProbes = 0;
 
-    // 版本参数每个工具不一样,别想当然:
+    // 版本参数每个工具不一样，别想当然：
     //   yt-dlp 用 --version
-    //   ffmpeg 只认**单横线**的 -version;写成 --version 会被当成未知选项,
+    //   ffmpeg 只认**单横线**的 -version;写成 --version 会被当成未知选项，
     //   退出码 8
     if (!m_ytDlpPath.isEmpty()) {
         ++m_pendingProbes;

@@ -7,15 +7,17 @@
 #include <QJsonValue>
 #include <QCryptographicHash>
 
+#include "core/Log.h"
+
 namespace {
 
 // ---- 数值兜底 ----
-// yt-dlp 的 JSON 里这些字段可能是 null(拿不到),toDouble/toInteger 会当 0 ——
-// 但 filesize 为 0 和"没有 filesize"在界面上要区分,所以统一收进一个字段再判
+// yt-dlp 的 JSON 中这些字段可能为 null（取不到），toDouble/toInteger 会当作 0。
+// 但「filesize 为 0」与「没有 filesize」在界面上需要区分，故统一收进一个字段再判断。
 
 double doubleOf(const QJsonValue &value)
 {
-    // null / 缺字段都会到这里;toDouble 对 null 返回 0
+    // null 与缺失字段都到这里；toDouble 对 null 返回 0
     return value.isDouble() ? value.toDouble() : 0;
 }
 
@@ -26,8 +28,8 @@ qint64 int64Of(const QJsonValue &value)
     return static_cast<qint64>(value.toDouble());
 }
 
-// vcodec/acodec 在 yt-dlp 的 JSON 里是**字符串**:"none" 表示这一路没有。
-// 但也有站点给 null(少见),同样按 none 算
+// vcodec/acodec 在 yt-dlp 的 JSON 中是字符串，"none" 表示该路不存在。
+// 个别站点给 null（少见），同样按 none 处理。
 bool hasCodec(const QJsonValue &value)
 {
     const QString text = value.toString();
@@ -35,8 +37,8 @@ bool hasCodec(const QJsonValue &value)
 }
 
 // ---- 编码家族 ----
-// 把 vcodec/acodec 的完整串("avc1.640032" / "hvc1.1.6.L150.90" / "mp4a.40.2")
-// 归纳成用户能认的名字。分不清就原样返回,别硬编。
+// 把 vcodec/acodec 的完整串（"avc1.640032" / "hvc1.1.6.L150.90" / "mp4a.40.2"）
+// 归纳为用户可识别的名字。无法归类时原样返回，不做硬编码猜测。
 QString videoCodecName(const QString &vcodec)
 {
     if (vcodec.isEmpty() || vcodec == QLatin1String("none"))
@@ -124,7 +126,7 @@ QString resolutionText(const MediaFormat &format)
     return base;
 }
 
-// 分辨率档的标签。60 这种整数帧率标出来,其余不标(24/25/30 标出来是噪声)
+// 分辨率档的标签。仅标出 60 这类整数帧率，其余不标（24/25/30 标出即为噪声）
 QString tierLabel(int height, double fps)
 {
     QString label = QStringLiteral("%1P").arg(height);
@@ -134,8 +136,8 @@ QString tierLabel(int height, double fps)
 }
 
 // ---- 动态范围 ----
-// yt-dlp 的 dynamic_range 对 SDR 视频通常是 "SDR",HDR 是 "HDR"/"HLG",
-// 杜比视界是 "DV"。但**有的站点干脆给 null** —— 那就当 SDR,别误报。
+// yt-dlp 的 dynamic_range 通常为 "SDR"；HDR 为 "HDR"/"HLG"，杜比视界为 "DV"。
+// 部分站点返回 null，此时按 SDR 处理，避免误报。
 bool dynamicRangeIsHdr(const QString &range)
 {
     if (range.isEmpty() || range.compare(QLatin1String("SDR"), Qt::CaseInsensitive) == 0)
@@ -146,10 +148,9 @@ bool dynamicRangeIsHdr(const QString &range)
            || text.contains(QLatin1String("dovi"));
 }
 
-// 编码家族优先级:同分辨率下 h264 优先。
-// 理由:① 兼容性最好(Qt 和未来可能的推流都吃)② B 站的 avc 档常常就是高码率档
-// (实测 1080P 的 30112 avc ~3Mbps vs 30102 hevc ~1.5Mbps),码率高 → 画质好。
-// 想改偏好只改这张表的顺序。
+// 编码家族优先级：同分辨率下 h264 优先。理由：兼容性最好（Qt 与后续推流均可解码）；
+// 且 B 站的 avc 档通常就是高码率档（实测 1080P：30112 avc ≈3Mbps，30102 hevc ≈1.5Mbps），
+// 码率更高则画质更好。调整偏好只需修改本函数中的顺序。
 int vcodecRank(const QString &vcodec)
 {
     const QString name = videoCodecName(vcodec);
@@ -160,7 +161,7 @@ int vcodecRank(const QString &vcodec)
     return 4;
 }
 
-// 音频:同档位下 AAC 优先(兼容性),其次 Opus/Vorbis
+// 音频：同档位下 AAC 优先（兼容性考虑），其次 Opus/Vorbis
 int acodecRank(const QString &acodec)
 {
     const QString name = audioCodecName(acodec);
@@ -172,7 +173,7 @@ int acodecRank(const QString &acodec)
 
 bool isBetterKind(MediaFormat::Kind a, MediaFormat::Kind b)
 {
-    // 纯画面 优于 合一:合一格式不含高清(高清要分流),而且精确拿两路更可控
+    // 纯画面优于合一格式：合一格式不含高清（高清需分流），且精确获取两路更可控
     auto rank = [](MediaFormat::Kind kind) {
         switch (kind) {
         case MediaFormat::VideoOnly: return 0;
@@ -185,8 +186,8 @@ bool isBetterKind(MediaFormat::Kind a, MediaFormat::Kind b)
     return rank(a) < rank(b);
 }
 
-// 按"简单模式的优先级"比较两条流:分辨率 → 帧率 → 编码 → 种类。
-// 这是 `-S` 排序规则在本地的一份镜像(弹窗展示、手选兜底都用它)。
+// 按「简单模式的优先级」比较两条流：分辨率 → 帧率 → 编码 → 种类。
+// 这是 `-S` 排序规则在本地的一份镜像（弹窗展示、手选兜底都用它）。
 bool preferenceBetter(const MediaFormat &a, const MediaFormat &b)
 {
     if (a.height != b.height)
@@ -201,10 +202,10 @@ bool preferenceBetter(const MediaFormat &a, const MediaFormat &b)
         return acodecRank(a.acodec) < acodecRank(b.acodec);
     if (isBetterKind(a.kind, b.kind) != isBetterKind(b.kind, a.kind))
         return isBetterKind(a.kind, b.kind);
-    return a.formatId < b.formatId; // 兜底:让结果稳定,别人重跑也一样
+    return a.formatId < b.formatId; // 兜底：保证结果稳定，重跑一致
 }
 
-// 在 candidates 里挑优先级最高的;allowHdr=false 时只从非 HDR 里挑
+// 在 candidates 中挑选优先级最高的一条；allowHdr=false 时只从非 HDR 中挑选
 MediaFormat bestOf(const QList<MediaFormat> &candidates, bool allowHdr)
 {
     MediaFormat best;
@@ -230,8 +231,8 @@ QList<MediaFormat> filterKind(const QList<MediaFormat> &formats, MediaFormat::Ki
     return result;
 }
 
-// 按分辨率档挑画面:height = formats 里的 height 字段(HDR 视频在 B 站是
-// 另一条 hevc 流,`dynamic_range:sdr` 会把它筛掉,挑不到再放开)
+// 按分辨率档挑画面：height 取自 formats 的 height 字段。HDR 视频在 B 站是另一条
+// hevc 流，`dynamic_range:sdr` 会把它筛掉，此时放开 HDR 限制再挑一次。
 MediaFormat pickVideoTier(const MediaInfo &info, int height, bool allowHdr)
 {
     QList<MediaFormat> tier;
@@ -242,19 +243,35 @@ MediaFormat pickVideoTier(const MediaInfo &info, int height, bool allowHdr)
             continue;
         tier.append(format);
     }
+
     MediaFormat best = bestOf(tier, allowHdr);
-    if (best.formatId.isEmpty() && !allowHdr)
+    if (best.formatId.isEmpty() && !allowHdr) {
         best = bestOf(tier, true);
+        if (!best.formatId.isEmpty()) {
+            LOG_DEBUG("Format") << "该档位仅含 HDR 流，已放开 dynamic_range 限制:"
+                                << "height=" << height << " 选中=" << best.formatId;
+        }
+    }
+
+    if (best.formatId.isEmpty()) {
+        LOG_DEBUG("Format") << "档位无可用画面流: height=" << height
+                            << " 候选=" << tier.size()
+                            << " 源内视频流=" << filterKind(info.formats, MediaFormat::VideoOnly).size()
+                            << " 合一=" << filterKind(info.formats, MediaFormat::Combined).size();
+    }
     return best;
 }
 
 MediaFormat pickBestAudio(const MediaInfo &info, bool allowHdr)
 {
-    return bestOf(filterKind(info.formats, MediaFormat::AudioOnly), allowHdr);
+    const MediaFormat best = bestOf(filterKind(info.formats, MediaFormat::AudioOnly), allowHdr);
+    if (best.formatId.isEmpty())
+        LOG_DEBUG("Format") << "源内没有可用音频流，将依赖 yt-dlp 的 bv*+ba/b 兜底";
+    return best;
 }
 
-// 直播看的"清晰度"只能靠 yt-dlp 的 quality 序号(实测 B 站 原画=4 > 蓝光=3 > 超清=2)。
-// 有的站点会给 height,那就更准,优先用它。
+// 直播的清晰度只能依据 yt-dlp 的 quality 序号（实测 B 站：原画=4 > 蓝光=3 > 超清=2）。
+// 部分站点会提供 height，更准确，优先使用。
 int liveRank(const MediaFormat &format)
 {
     return format.height > 0 ? format.height : format.quality;
@@ -266,13 +283,13 @@ bool liveBetter(const MediaFormat &a, const MediaFormat &b)
     const int rankB = liveRank(b);
     if (rankA != rankB)
         return rankA > rankB;
-    // 同一清晰度有多条(不同协议/编码):
-    //   m3u8 优先 —— Qt 的播放器能直接拉 HLS;FLV/DASH 不行
+    // 同一清晰度有多条时（不同协议/编码）：
+    // m3u8 优先——Qt 播放器可直接拉取 HLS；FLV/DASH 不行
     const bool hlsA = a.protocol.contains(QLatin1String("m3u8"));
     const bool hlsB = b.protocol.contains(QLatin1String("m3u8"));
     if (hlsA != hlsB)
         return hlsA;
-    // 编码:avc 优先。实测 B 站直播的 HEVC variant 常常要 Referer,而 h264 那条不用
+    // 编码优先 avc：实测 B 站直播的 HEVC variant 常需要 Referer，h264 不需要
     const int codecA = vcodecRank(a.vcodec);
     const int codecB = vcodecRank(b.vcodec);
     if (codecA != codecB)
@@ -280,14 +297,17 @@ bool liveBetter(const MediaFormat &a, const MediaFormat &b)
     return a.formatId < b.formatId;
 }
 
-// 按清晰度分组,挑出每组代表(见 liveBetter);组号用来去重、组的代表决定顺序
+// 按清晰度分组，挑出每组代表（见 liveBetter）；组号用于去重，组的代表决定顺序
 QList<QPair<int, MediaFormat>> liveTiers(const MediaInfo &info)
 {
     QList<QPair<int, MediaFormat>> groups;
+    int skipped = 0;
     for (const MediaFormat &format : info.formats) {
-        // 只考虑"能直接拉"的(http(s) / HLS):FLV、DASH 那种播放器吃不下
-        if (!format.isDirectPlayable())
+        // 只考虑能直接拉取的（http(s) / HLS）：FLV、DASH 播放器吃不下
+        if (!format.isDirectPlayable()) {
+            ++skipped;
             continue;
+        }
         if (format.url.isEmpty() && format.manifestUrl.isEmpty())
             continue;
         const int rank = liveRank(format);
@@ -310,39 +330,54 @@ QList<QPair<int, MediaFormat>> liveTiers(const MediaInfo &info)
 
     std::sort(groups.begin(), groups.end(),
               [](const QPair<int, MediaFormat> &a, const QPair<int, MediaFormat> &b) {
-                  // 清晰度高的在前;一样就按协议/编码优先级
+                  // 清晰度高的在前；相同则按协议/编码优先级
                   if (a.first != b.first)
                       return a.first > b.first;
                   return liveBetter(a.second, b.second);
               });
+
+    if (groups.isEmpty()) {
+        LOG_WARN("Format") << "直播流中没有可直接拉取的地址: 总流数=" << info.formats.size()
+                           << " 非直连协议=" << skipped;
+    }
     return groups;
 }
 
-// 从直播 formats 里挑一条能拉的 HLS:清晰度最高的那一档里,
-// 优先 avc(实测 B 站直播 HEVC 那条要 Referer,h264 的不用);
-// 地址优先 manifest_url(master 清单能带 EXT-X-MEDIA、播放器自适应),
-// 它为空时用格式自己的 url —— 实测 B 站直播是后者。
+// 从直播 formats 中挑一条可拉取的 HLS：取清晰度最高档，优先 avc
+// （实测 B 站直播 HEVC 那条需要 Referer，h264 不需要）。地址优先 manifest_url
+// （master 清单可带 EXT-X-MEDIA、供播放器自适应），为空时用格式自身的 url。
 MediaFormat pickLiveHls(const MediaInfo &info)
 {
     const QList<QPair<int, MediaFormat>> groups = liveTiers(info);
-    MediaFormat fallback; // 没有 m3u8 时退而求其次(FLV 也拉不动,只是让上层有东西可报)
+    MediaFormat fallback; // 无 m3u8 时的退路（FLV 同样拉不动，仅让上层有内容可报错）
     for (const QPair<int, MediaFormat> &group : groups) {
         const MediaFormat &format = group.second;
         if (!format.protocol.contains(QLatin1String("m3u8")))
             continue;
-        if (vcodecRank(format.vcodec) == 0) // 已经是 avc,最优先
+        if (vcodecRank(format.vcodec) == 0) // 已是 avc，优先级最高
             return format;
         if (fallback.formatId.isEmpty())
             fallback = format;
     }
-    if (!fallback.formatId.isEmpty())
+    if (!fallback.formatId.isEmpty()) {
+        LOG_WARN("Format") << "直播流中没有 avc 的 HLS，退用非 avc 版本:"
+                           << fallback.formatId << fallback.protocol;
         return fallback;
-    return groups.isEmpty() ? MediaFormat() : groups.first().second;
+    }
+
+    if (groups.isEmpty()) {
+        LOG_ERROR("Format") << "直播流中找不到任何可播放的地址，无法直接播放";
+        return MediaFormat();
+    }
+
+    LOG_WARN("Format") << "直播流中没有 m3u8，退用清晰度最高的非 HLS 流:"
+                       << groups.first().second.protocol;
+    return groups.first().second;
 }
 
-// 按档位下:`-f` 交给 yt-dlp 的 `bv*+ba/b` 自己挑,画质由 `-S` 的排序说了算。
-// **不要把档位解析成具体 format_id 钉死** ——那样一旦对方 formats 变了(登录态不同),
-// 精确 id 下不到就白失败;`-S` 是"给我们这一档优先级最高的一条",永远有解。
+// 按档位下：`-f` 交给 yt-dlp 的 `bv*+ba/b` 自行挑选，画质由 `-S` 的排序决定。
+// 不要把档位解析成具体 format_id 钉死——一旦对方 formats 变化（登录态不同），
+// 精确 id 取不到就会失败；`-S` 表示「取该档位优先级最高的一条」，始终有解。
 MediaSelection tierSelection(const MediaInfo &info, int height, bool allowHdr)
 {
     const MediaFormat video = pickVideoTier(info, height, allowHdr);
@@ -353,9 +388,10 @@ MediaSelection tierSelection(const MediaInfo &info, int height, bool allowHdr)
     selection.video = video;
     selection.label = video.displayName();
 
-    // 这一档整档都是 HDR 的:Qt 播放要过一遍 HdrConverter,这里提前标出来
+    // 该档位整档为 HDR 时，Qt 播放需经 HdrConverter 转换，此处提前标记
     if (video.formatId.isEmpty()) {
-        // 一档都没挑出来(源里没这个高度):退回不设限
+        // 该高度在源中不存在，退回不设限
+        LOG_INFO("Format") << "档位 " << height << "P 在源中无对应流，退回不设限（最高画质）";
         return tierSelection(info, 0, allowHdr);
     }
 
@@ -468,7 +504,7 @@ QString label(const QString &spec, const MediaInfo &info)
     else if (text.startsWith(QLatin1String("http")))
         base = QStringLiteral("直播源");
     else if (text.contains(QLatin1Char('+'))) {
-        // 手选的 format_id 对:尽量还原成"什么分辨率",还原不了就只写"手选"
+        // 手选的 format_id 对：尽量还原出分辨率，无法还原时仅显示「手选」
         const QStringList ids = text.split(QLatin1Char('+'));
         int shortSide = 0;
         double fps = 0;
@@ -482,9 +518,9 @@ QString label(const QString &spec, const MediaInfo &info)
         base = shortSide > 0 ? QStringLiteral("手选 %1").arg(tierLabel(shortSide, fps))
                              : QStringLiteral("手选");
     } else if (text.toInt() > 0) {
-        // 档位里存的是 height 字段(竖屏 1080P 存的是 "1920")。要显示成
-        // "1080P" 得知道这条流的长宽比 —— 在 formats 里找同高的一条问短边;
-        // 列表那边手上没有 formats(传的是空 info),只能原样显示成 "1920P"
+        // 档位中存的是 height 字段（竖屏 1080P 存为 "1920"）。要显示为 "1080P"
+        // 需知道该流的长宽比，故在 formats 中查找同高度的一条取其短边；
+        // 列表侧没有 formats（传入空 info），只能原样显示为 "1920P"
         const int height = text.toInt();
         int labelHeight = height;
         for (const MediaFormat &format : info.formats) {
@@ -495,7 +531,7 @@ QString label(const QString &spec, const MediaInfo &info)
         }
         base = tierLabel(labelHeight, 0);
     } else {
-        base = text; // 认不出来就原样显示,总比空着强
+        base = text; // 无法识别时原样显示
     }
 
     if (hdrAllowed(spec))
@@ -519,14 +555,17 @@ namespace MediaFormats {
 QList<MediaFormat> parse(const QJsonArray &formats)
 {
     QList<MediaFormat> result;
+    int skipped = 0;
     for (const QJsonValue &value : formats) {
         const QJsonObject object = value.toObject();
 
         const bool hasVideo = hasCodec(object.value(QStringLiteral("vcodec")));
         const bool hasAudio = hasCodec(object.value(QStringLiteral("acodec")));
-        // 两个都没有 = 故事板/缩略图,不是媒体;有 vcodec 也可能来自 url 为空的项
-        if (!hasVideo && !hasAudio)
+        // 两者皆无表示故事板/缩略图，不是媒体
+        if (!hasVideo && !hasAudio) {
+            ++skipped;
             continue;
+        }
 
         MediaFormat format;
         format.formatId = object.value(QStringLiteral("format_id")).toString();
@@ -559,6 +598,10 @@ QList<MediaFormat> parse(const QJsonArray &formats)
 
         result.append(format);
     }
+
+    LOG_DEBUG("Format") << "解析流列表: 输入=" << formats.size()
+                        << " 有效=" << result.size()
+                        << " 丢弃(非媒体项)=" << skipped;
     return result;
 }
 
@@ -581,15 +624,16 @@ MediaInfo parseMediaInfo(const QJsonObject &root)
 
     info.formats = parse(root.value(QStringLiteral("formats")).toArray());
 
-    // ---- 多集(剧集/合集):顶层没有 formats,每一集自带 ----
-    // yt-dlp 的 _type 是 "playlist";判据是 **顶层 formats 为空 + entries 非空**。
-    // 不用 entries.length 单独判:单视频理论上也可能有 entries,而"顶层 formats
-    // 为空"能把那种情况排除掉
+    // ---- 多集（剧集/合集）：顶层没有 formats，每一集自带 ----
+    // yt-dlp 的 _type 为 "playlist"，判据是「顶层 formats 为空 + entries 非空」。
+    // 不单独以 entries.length 判定：单视频理论上也可能有 entries，
+    // 而「顶层 formats 为空」可排除该情况。
     const QJsonArray entries = root.value(QStringLiteral("entries")).toArray();
     if (info.formats.isEmpty() && !entries.isEmpty()) {
         info.playlistTitle = info.title;
-        info.title.clear();   // 顶层 title 是"整季"的名字,不是某一条的名字
+        info.title.clear();   // 顶层 title 是整季的名字，不是某一条的名字
         int index = 0;
+        int dropped = 0;
         for (const QJsonValue &value : entries) {
             const QJsonObject entry = value.toObject();
             ++index;
@@ -602,14 +646,21 @@ MediaInfo parseMediaInfo(const QJsonObject &root)
             episode.durationMs = static_cast<qint64>(seconds * 1000);
             episode.number = entry.value(QStringLiteral("episode_number")).toInt(0);
 
-            // 连播放地址都没有的条目(下架/占位)不算一集,列出来也点不动
-            if (episode.url.isEmpty())
+            // 没有播放地址的条目（下架/占位）不算一集，列出来也无法点击
+            if (episode.url.isEmpty()) {
+                ++dropped;
                 continue;
+            }
             info.episodes.append(episode);
         }
+
+        LOG_DEBUG("Format") << "识别为多集: 条目=" << entries.size()
+                            << " 有效=" << info.episodes.size()
+                            << " 无地址=" << dropped
+                            << " 标题=" << info.playlistTitle;
     }
 
-    // 如果 yt-dlp 没给 is_live,但 duration=0,且 formats 里有 m3u8,认为是直播
+    // yt-dlp 未提供 is_live，但 duration=0 且 formats 中含 m3u8 时，按直播处理
     if (!info.live && info.durationMs <= 0) {
         for (const MediaFormat &format : info.formats) {
             if (format.protocol.contains(QLatin1String("m3u8"))) {
@@ -622,7 +673,7 @@ MediaInfo parseMediaInfo(const QJsonObject &root)
 }
 
 // ============================
-// 剧集:itemId 与标题的生成规则
+// 剧集：itemId 与标题的生成规则
 // ============================
 
 namespace Episodes {
@@ -631,8 +682,8 @@ QString itemId(const Episode &episode)
 {
     if (!episode.id.isEmpty())
         return QStringLiteral("ep") + episode.id;
-    // 没有平台编号的源:用 URL 的哈希兜底(跨客户端仍然确定 —— 同一集 URL 相同)。
-    // 哈希而不是原样带上 url:itemId 要进协议,别塞一长串带签名的地址
+    // 没有平台编号的源：用 URL 的哈希兜底（跨客户端仍然确定 —— 同一集 URL 相同）。
+    // 哈希而不是原样带上 url:itemId 要进协议，别塞一长串带签名的地址
     const QByteArray digest = QCryptographicHash::hash(episode.url.toUtf8(),
                                                        QCryptographicHash::Sha1);
     return QStringLiteral("url") + QString::fromLatin1(digest.toHex().left(16));
@@ -641,7 +692,7 @@ QString itemId(const Episode &episode)
 QString displayTitle(const Episode &episode, int fallbackIndex)
 {
     const int number = episode.number > 0 ? episode.number : fallbackIndex;
-    // 平台的标题常常自带集号("1 闲聊的学生会")—— 那就别再叠一层"第 1 集"
+    // 平台的标题常常自带集号（"1 闲聊的学生会"）—— 那就别再叠一层"第 1 集"
     const QString trimmed = episode.title.trimmed();
     if (!trimmed.isEmpty()
         && trimmed.startsWith(QString::number(number), Qt::CaseInsensitive)) {
@@ -662,16 +713,16 @@ QList<QualityOption> qualityOptions(const MediaInfo &info)
 {
     QList<QualityOption> options;
 
-    // ---- 直播:HLS 的 variant 就是"清晰度档" ----
+    // ---- 直播：HLS 的 variant 就是"清晰度档" ----
     // **不能按 height 归纳**(直播的流没有 width/height),按 yt-dlp 的 quality
-    // 序号分组,每档只留一条代表(见 liveTiers)。返回的 spec 就是 m3u8 地址 ——
+    // 序号分组，每档只留一条代表（见 liveTiers）。返回的 spec 就是 m3u8 地址 ——
     // 直播没有"下载",选哪档就是拿哪条流去拉。
     if (info.live) {
         for (const QPair<int, MediaFormat> &group : liveTiers(info)) {
             const MediaFormat &format = group.second;
             QualityOption option;
-            // 记 format_id 而不是带签名的地址:`expires=` 那串会过期,
-            // 而条目可能在房间里挂很久 —— 播放时拿 id 重新解析,地址是新鲜的
+            // 记 format_id 而不是带签名的地址：`expires=` 那串会过期，
+            // 而条目可能在房间里挂很久 —— 播放时拿 id 重新解析，地址是新鲜的
             option.spec = format.formatId;
             option.label = !format.formatNote.isEmpty() ? format.formatNote
                            : format.height > 0 ? tierLabel(format.shortSide(), format.fps)
@@ -691,14 +742,11 @@ QList<QualityOption> qualityOptions(const MediaInfo &info)
         return options;
     }
 
-    // ---- 普通视频:按画面高度归纳 ----
-    //
-    // 注意这里用的是 formats 的 **height 字段**(视频像素高),档位 spec 记的
-    // 也是它 —— yt-dlp 的 `-S res:N` 拿它做比较。竖屏视频(1080x1920)的
-    // height 是 1920,所以"1080P 这一档"的 spec 是 "1920",选 720P 是 "1280"。
-    // **只有显示给人看的 label 用短边**(shortSide):用户说的 1080P 是短边。
-    // 播放时不再按 height 挑流,选中的档位由 `-S res:<height>` 交给 yt-dlp,
-    // 所以这里的数字和 formats 保持一致就不会错位。
+    // ---- 普通视频：按画面高度归纳 ----
+    // 使用 formats 的 height 字段（视频像素高），档位 spec 记录的也是它——
+    // yt-dlp 的 `-S res:N` 以此为比较依据。竖屏视频（1080x1920）的 height 为 1920，
+    // 故「1080P 档」的 spec 是 "1920"。**仅显示用的 label 取短边**（shortSide），
+    // 因为用户所说的 1080P 指短边。
     QList<int> heights;
     for (const MediaFormat &format : info.formats) {
         if (!format.isVideo() || format.height <= 0)
@@ -714,15 +762,15 @@ QList<QualityOption> qualityOptions(const MediaInfo &info)
             if (format.isVideo() && format.height == height)
                 tier.append(format);
         }
-        // 有 SDR 就展示 SDR 的(用户选"允许 HDR"是另一码事,档位本身不变)
+        // 有 SDR 就展示 SDR 的（用户选"允许 HDR"是另一码事，档位本身不变）
         MediaFormat best = bestOf(tier, /*allowHdr=*/false);
         const bool onlyHdr = best.formatId.isEmpty();
         if (onlyHdr)
             best = bestOf(tier, /*allowHdr=*/true);
 
         QualityOption option;
-        // spec 用 height 字段的数字 —— 它是 yt-dlp `-S res:N` 的比较对象,
-        // 必须和 formats 里的值一致(竖屏视频也在 1920/1280 这一列)
+        // spec 用 height 字段的数字 —— 它是 yt-dlp `-S res:N` 的比较对象，
+        // 必须和 formats 里的值一致（竖屏视频也在 1920/1280 这一列）
         option.spec = QString::number(height);
         // 显示用短边 —— 竖屏 1080x1920 要显示成 "1080P" 而不是 "1920P"
         option.label = tierLabel(best.shortSide(), best.fps);
@@ -753,9 +801,9 @@ QList<FormatChoice> detailChoices(const MediaInfo &info)
 {
     QList<FormatChoice> choices;
 
-    // ---- 直播:只列**能直接拉的** HLS,并按清晰度去重 ----
-    // 一个清晰度在 formats 里往往有 4 条(m3u8/flv × avc/hevc),全列出来是噪声;
-    // 而且 FLV 那几条 Qt 根本拉不动,列了也不能选。这里只留每档的 HLS 代表。
+    // ---- 直播：只列**能直接拉的** HLS,并按清晰度去重 ----
+    // 一个清晰度在 formats 里往往有 4 条（m3u8/flv × avc/hevc）,全列出来是噪声；
+    // 而且 FLV 那几条 Qt 根本拉不动，列了也不能选。这里只留每档的 HLS 代表。
     if (info.live) {
         QList<MediaFormat> playable;
         for (const MediaFormat &format : info.formats) {
@@ -843,7 +891,7 @@ QList<FormatChoice> detailChoices(const MediaInfo &info)
         choices.append(choice);
     };
 
-    // 视频 / 音频 / 合一分三组,组内都按优先级排
+    // 视频 / 音频 / 合一分三组，组内都按优先级排
     auto sortedKind = [&info](MediaFormat::Kind kind) {
         QList<MediaFormat> list = filterKind(info.formats, kind);
         std::sort(list.begin(), list.end(),
@@ -875,7 +923,11 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info)
     const bool allowHdr = StreamSpec::hdrAllowed(spec);
     const QString body = StreamSpec::body(spec);
 
-    // ---- 直播:spec 是 m3u8 的地址,或某条流的 format_id ----
+    LOG_DEBUG("Format") << "解析 spec: spec=" << (spec.isEmpty() ? "(空)" : spec)
+                        << " live=" << (info.live ? 1 : 0)
+                        << " 流数=" << info.formats.size();
+
+    // ---- 直播：spec 是 m3u8 的地址，或某条流的 format_id ----
     if (info.live) {
         if (body.startsWith(QLatin1String("http"))) {
             selection.valid = true;
@@ -885,7 +937,7 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info)
             return selection;
         }
 
-        // 手选了具体某条流(详情视图里的 format_id):用它的地址
+        // 手选了具体某条流（详情视图里的 format_id）:用它的地址
         if (!body.isEmpty()) {
             for (const MediaFormat &format : info.formats) {
                 if (format.formatId != body)
@@ -908,7 +960,7 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info)
         const MediaFormat chosen = pickLiveHls(info);
         const QString target = chosen.manifestUrl.isEmpty() ? chosen.url : chosen.manifestUrl;
         if (target.isEmpty())
-            return selection; // 没有能拉的流,交给上层报"这个直播源放不了"
+            return selection; // 没有可拉取的流，交由上层报「该直播源无法播放」
 
         selection.valid = true;
         selection.direct = true;
@@ -921,7 +973,7 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info)
 
     // ---- 普通视频 ----
 
-    // 1) 显式给了直链(手选的 url):直接交给播放器
+    // 1) 显式给了直链（手选的 url）:直接交给播放器
     if (body.startsWith(QLatin1String("http"))) {
         selection.valid = true;
         selection.direct = true;
@@ -930,7 +982,7 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info)
         return selection;
     }
 
-    // 2) 手选的 format_id 对:"30102+30280" / "30080"
+    // 2) 手选的 format_id 对："30102+30280" / "30080"
     const bool looksLikeIds = body.contains(QLatin1Char('+'))
                               || (!body.isEmpty() && StreamSpec::heightOf(spec) < 0);
     if (looksLikeIds) {
@@ -946,18 +998,21 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info)
                 audio = format;
         }
 
-        // 一个 id 都不匹配(对方登录态/会员等级不同)→ 退回按档位挑,
-        // 别让"这条下不到"变成"这条播不了"
-        if (video.formatId.isEmpty() && audio.formatId.isEmpty())
+        // 一个 id 都不匹配（对方登录态/会员等级不同）时退回按档位挑选，
+        // 避免「该条下不到」演变为「该条播不了」
+        if (video.formatId.isEmpty() && audio.formatId.isEmpty()) {
+            LOG_WARN("Format") << "手选的 format_id 均不在源中，退回按档位挑选: spec="
+                               << spec;
             return tierSelection(info, 0, allowHdr);
+        }
 
         if (video.formatId.isEmpty()) {
-            // 只给了音频:画面补优先级最高的一条
+            // 仅提供了音频时，画面补优先级最高的一条
             video = bestOf(filterKind(info.formats, MediaFormat::VideoOnly), allowHdr);
         }
 
         if (video.isCombined()) {
-            // 合一格式:不需要音频,而且能直链播放
+            // 合一格式：无需音频，且能直链播放
             selection.valid = true;
             selection.direct = true;
             selection.video = video;
@@ -968,8 +1023,10 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info)
             return selection;
         }
 
-        if (video.formatId.isEmpty())
-            return selection; // 连画面都挑不出来,交给上层报失败
+        if (video.formatId.isEmpty()) {
+            LOG_WARN("Format") << "手选条目中挑不出画面流，交由上层报失败: spec=" << spec;
+            return selection; // 连画面都挑不出，交由上层报失败
+        }
 
         if (audio.formatId.isEmpty())
             audio = pickBestAudio(info, allowHdr);
@@ -979,14 +1036,14 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info)
         selection.audio = audio;
         selection.hdr = video.isHdr();
         selection.label = video.displayName();
-        // 精确选择就是精确选择:缺哪一路就让 yt-dlp 报错,不要静默换成别的流
+        // 精确选择即精确选择：缺少任一路由 yt-dlp 报错，不静默替换为其他流
         selection.formatExpression = audio.formatId.isEmpty()
             ? video.formatId
             : QStringLiteral("%1+%2").arg(video.formatId, audio.formatId);
         return selection;
     }
 
-    // 3) 分辨率档("1080" → 不超过 1080 尽量接近)或空串(不设限)
+    // 3) 分辨率档（"1080" → 不超过 1080 且尽量接近）或空串（不设限）
     return tierSelection(info, StreamSpec::heightOf(spec), allowHdr);
 }
 

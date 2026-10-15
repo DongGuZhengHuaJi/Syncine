@@ -18,7 +18,7 @@
 
 namespace {
 
-// ── 文件策略,和客户端保持一致 ──────────────────────────────
+// ── 文件策略，与客户端保持一致 ──────────────────────────────
 constexpr long long kMaxFileBytes = 8LL * 1024 * 1024;
 constexpr int kMaxRolls = 3;
 constexpr int kKeepDays = 7;
@@ -33,10 +33,10 @@ struct State {
 };
 
 State g_state;
-std::mutex g_fileMutex; // 保护 g_state 里的文件与路径
+std::mutex g_fileMutex; // 保护 g_state 中的文件与路径
 std::atomic<int> g_level{static_cast<int>(Log::Level::Info)};
 
-// 线程编号:std::thread::id → 1,2,3……,日志里显示成 [t2] 这种
+// 线程编号：std::thread::id → 1,2,3……，日志中显示为 [t2]
 std::mutex g_threadMutex;
 std::map<std::thread::id, int> g_threadNumbers;
 int g_nextThreadNumber = 1;
@@ -68,7 +68,7 @@ const char *levelName(Log::Level level)
     return "?";
 }
 
-// 只在输出到终端时用,重定向到文件时不要这些转义序列
+// 仅用于输出到终端；重定向到文件时不应包含这些转义序列
 const char *levelColor(Log::Level level)
 {
     switch (level) {
@@ -156,7 +156,7 @@ void openFileLocked()
 
     g_state.file.open(g_state.path, std::ios::out | std::ios::app);
     if (!g_state.file.is_open()) {
-        // 文件打不开也不能把服务带崩:退化成"只写控制台"
+        // 文件打不开也不能把服务带崩：退化成"只写控制台"
         std::fprintf(stderr, "[Log] 无法打开日志文件 %s,本次只写控制台\n",
                      g_state.path.c_str());
         return;
@@ -232,7 +232,7 @@ void Log::init(const std::string &filePrefix)
         openFileLocked();
     }
 
-    LOG_INFO("Log") << "日志级别 " << levelName(level())
+    LOG_INFO("Log") << "日志级别: " << levelName(level())
                     << " 文件: " << std::filesystem::absolute(g_state.path).string();
 }
 
@@ -277,7 +277,7 @@ void Log::write(Level level, const char *tag, const std::string &message)
     if (!isEnabled(level))
         return;
 
-    // 线程号先取(它自己会锁线程表),文件锁最后才拿 —— 固定这个顺序不会死锁
+    // 线程号先取（它自己会锁线程表）,文件锁最后才拿 —— 固定这个顺序不会死锁
     const int number = threadNumber();
     const std::string stamp = timestamp();
     const std::string letter = levelLetter(level);

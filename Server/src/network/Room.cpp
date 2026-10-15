@@ -3,6 +3,7 @@
 //
 
 #include "Room.h"
+#include "Log.h"
 #include "Session.h"
 
 #include <algorithm>
@@ -24,6 +25,9 @@ const std::string &Room::mode() const {
 }
 
 void Room::setMode(const std::string &mode) {
+    if (m_mode == mode)
+        return;
+    LOG_DEBUG("Room") << "模式切换: " << m_mode << " → " << mode;
     m_mode = mode;
 }
 
@@ -42,16 +46,20 @@ bool Room::isEmpty() const {
 void Room::addMember(std::shared_ptr<Session> session,
                      std::string nickname,
                      bool isHost) {
+    LOG_DEBUG("Room") << "成员登记: " << nickname << " clientId=" << session->id()
+                      << (isHost ? " 房主" : " 观众");
     m_members.push_back({std::move(session), std::move(nickname), isHost, false, "", 0});
 }
 
 bool Room::removeMember(const std::shared_ptr<Session> &session) {
     for (auto it = m_members.begin(); it != m_members.end(); ++it) {
         if (it->session == session) {
+            LOG_DEBUG("Room") << "成员移除: " << it->nickname << " clientId=" << it->session->id();
             m_members.erase(it);
             return true;
         }
     }
+    LOG_DEBUG("Room") << "成员移除失败，不在成员表中: clientId=" << session->id();
     return false;
 }
 
@@ -107,12 +115,17 @@ void Room::setMemberVideo(const std::shared_ptr<Session> &session, bool loaded,
                           const std::string &hash, long long duration) {
     for (Member &member : m_members) {
         if (member.session == session) {
+            LOG_DEBUG("Room") << "成员视频状态: " << member.nickname
+                              << " loaded=" << (loaded ? 1 : 0)
+                              << " duration=" << duration
+                              << " hash=" << (hash.empty() ? "-" : hash.substr(0, 8));
             member.loaded = loaded;
             member.hash = loaded ? hash : std::string();
             member.duration = loaded ? duration : 0;
             return;
         }
     }
+    LOG_DEBUG("Room") << "视频状态上报来自非成员: clientId=" << session->id();
 }
 
 bool Room::updateMismatch() {
@@ -145,13 +158,13 @@ bool Room::updateMismatch() {
         }
     }
 
-    // 只有一个人加载视频时不存在"不一致"
+    // 只有一人加载视频时不存在不一致
     if (loadedCount < 2) {
         mismatched = false;
         shortest = 0;
     } else if (minDuration != std::numeric_limits<long long>::max()) {
         shortest = minDuration;
-        // 内容相同但时长差异超过 2 秒,视为不同版本(剪辑/编码不同)
+        // 内容相同但时长差异超过 2 秒，视为不同版本（剪辑/编码不同）
         if (maxDuration - minDuration > 2000)
             mismatched = true;
     }
@@ -161,6 +174,10 @@ bool Room::updateMismatch() {
 
     m_videoMismatched = mismatched;
     m_shortestDuration = shortest;
+
+    LOG_INFO("Room") << "视频一致性变化: mismatched=" << (mismatched ? 1 : 0)
+                     << " shortestDuration=" << shortest
+                     << " loadedCount=" << loadedCount;
     return true;
 }
 
@@ -181,12 +198,13 @@ long long Room::position() const {
 }
 
 void Room::updatePlayback(const std::string &action, long long position) {
+    LOG_DEBUG("Room") << "播放状态更新: action=" << action << " position=" << position;
     m_position = position;
     if (action == "play")
         m_playing = true;
     else if (action == "pause")
         m_playing = false;
-    // seek 只改位置,不改变播放状态(暂停中拖动进度条不应让房间变成播放中)
+    // seek 只改位置，不改变播放状态（暂停中拖动进度条不应使房间变为播放中）
 }
 
 json Room::membersArray() const {
@@ -210,8 +228,8 @@ json Room::stateJson(bool includePlaylist) const {
         {"position", m_position},
     };
 
-    // 播放列表随房间状态一起下发:新成员入房就能看到队列和"现在放到哪一条",
-    // 不需要另开一条同步路径。共享模式下的观众拿空列表(见头文件说明)。
+    // 播放列表随房间状态一起下发，新成员入房即可看到队列与当前条目，
+    // 无需另开一条同步路径。共享模式下的观众为空列表（见头文件说明）。
     state["playlist"] = includePlaylist ? playlistJson() : json::array();
     state["currentIndex"] = includePlaylist ? list.currentIndex : -1;
     return state;
@@ -226,7 +244,7 @@ Playlist &Room::currentPlaylist() {
 }
 
 const Playlist &Room::currentPlaylist() const {
-    // 只读路径不建表:这个模式还没被写过的话,返回一个空列表
+    // 只读路径不建表：该模式尚未被写过时返回一个空列表
     static const Playlist kEmpty;
     const auto it = m_playlists.find(m_mode);
     return it != m_playlists.end() ? it->second : kEmpty;
@@ -250,14 +268,17 @@ std::string Room::currentItemId() const {
 bool Room::addEntry(const PlaylistEntry &entry) {
     Playlist &list = currentPlaylist();
     list.entries.push_back(entry);
-    list.files[entry.itemId]; // 建一个空的上报表,后面成员逐个往里填
+    list.files[entry.itemId]; // 建一个空的上报表，成员后续逐个填入
 
-    // 这个模式的列表还没有"当前条目"(本来是空的)→ 第一条自动成为当前。
-    // 否则添加只是往队列后面排队,不打断正在放的片子。
+    // 该模式的列表原本为空时，第一条自动成为当前条目；
+    // 否则仅追加到队列末尾，不打断正在播放的条目。
     if (list.currentIndex < 0) {
         list.currentIndex = static_cast<int>(list.entries.size()) - 1;
+        LOG_DEBUG("Room") << "条目加入并成为当前(" << m_mode << "): " << entry.itemId
+                          << " " << entry.title;
         return true;
     }
+    LOG_DEBUG("Room") << "条目加入(" << m_mode << "): " << entry.itemId << " " << entry.title;
     return false;
 }
 
@@ -277,11 +298,15 @@ bool Room::removeEntry(const std::string &itemId) {
             --list.currentIndex;
         } else if (removedIndex == list.currentIndex
                    && list.currentIndex >= static_cast<int>(list.entries.size())) {
-            // 删掉的正好是当前条目:顺延到下一条(已经是最后一条就退回新的最后一条)
+            // 删除的是当前条目：顺延到下一条，已是最后一条则退回新的最后一条
             list.currentIndex = static_cast<int>(list.entries.size()) - 1;
         }
+        LOG_DEBUG("Room") << "条目移除(" << m_mode << "): " << itemId
+                          << " 剩余=" << list.entries.size()
+                          << " currentIndex=" << list.currentIndex;
         return true;
     }
+    LOG_WARN("Room") << "条目移除失败，列表中没有该条目(" << m_mode << "): " << itemId;
     return false;
 }
 
@@ -291,13 +316,19 @@ bool Room::switchTo(const std::string &itemId) {
         if (list.entries[i].itemId != itemId)
             continue;
         list.currentIndex = static_cast<int>(i);
+        LOG_DEBUG("Room") << "条目切换(" << m_mode << "): " << itemId
+                          << " index=" << list.currentIndex;
         return true;
     }
+    LOG_WARN("Room") << "条目切换失败，列表中没有该条目(" << m_mode << "): " << itemId;
     return false;
 }
 
 void Room::setMemberFile(const std::string &clientId, const std::string &itemId,
                          bool hasFile, const std::string &hash) {
+    LOG_DEBUG("Room") << "文件上报: itemId=" << itemId << " clientId=" << clientId
+                      << " hasFile=" << (hasFile ? 1 : 0)
+                      << " hash=" << (hash.empty() ? "-" : hash.substr(0, 8));
     currentPlaylist().files[itemId][clientId] = MemberFile{hasFile, hash};
 }
 
@@ -306,6 +337,7 @@ void Room::dropMemberFiles(const std::string &clientId) {
         for (auto &[itemId, reporters] : list.files)
             reporters.erase(clientId);
     }
+    LOG_DEBUG("Room") << "清理成员文件上报: clientId=" << clientId;
 }
 
 std::string Room::itemStatus(const std::string &itemId) const {
@@ -318,7 +350,7 @@ std::string Room::itemStatus(const std::string &itemId) const {
     bool haveHash = false;
     std::string commonHash;
 
-    // 逐成员看:还差一个没文件就是"未匹配";都有文件再比内容哈希
+    // 逐个成员检查：任一人没有文件即为未匹配；全员都有再比对内容哈希
     for (const Member &member : m_members) {
         const std::string clientId = member.session->id();
 
@@ -359,7 +391,7 @@ json Room::playlistJson() const {
             {"addedBy", entry.addedBy},
             {"live", entry.live},
             {"spec", entry.spec},
-            // 匹配状态由服务端聚合(它才知道所有成员的情况),客户端直接用
+            // 匹配状态由服务端聚合（只有它掌握所有成员的情况），客户端直接使用
             {"status", itemStatus(entry.itemId)},
         });
     }

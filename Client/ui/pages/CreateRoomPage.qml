@@ -11,7 +11,7 @@ Item {
         nameError = roomNameField.text.trim() === "" ? "请填写房间名称" : ""
         nickError = nickField.text.trim() === "" ? "请填写昵称" : ""
         if (nameError === "" && nickError === "") {
-            // 状态已在房间里但页面没跳过去:直接进房间
+            // 状态已在房间里但页面没跳过去：直接进房间
             if (roomSession.inRoom) {
                 stackView.push("RoomPage.qml")
                 return
@@ -58,7 +58,7 @@ Item {
 
         Label {
             anchors.horizontalCenter: parent.horizontalCenter
-            text: "创建一个新房间,邀请好友一起观看"
+            text: "创建新房间，邀请好友一同观看"
             font.pixelSize: 14
             color: Style.textSecondary
         }

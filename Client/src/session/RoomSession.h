@@ -1,13 +1,13 @@
 //
-// 房间会话 —— 只管「已经在房间里」之后的事。
+// 房间会话：只负责「已进入房间」之后的事务。
 //
-// 明确不属于这里的职责:
-//   * 建连、重连、create/join 请求的重试与等待   -> SessionController
-//   * 本地播放器的门禁、回声抑制、video_status 上报 -> PlaybackSync
-//   * WebRTC 信令的目标解析与转发                 -> SignalingChannel
-//   * JSON 编解码                                -> Protocol
+// 明确不属于此处的职责：
+//   * 建连、重连、create/join 请求的重试与等待   → SessionController
+//   * 本地播放器门禁、回声抑制、video_status 上报 → PlaybackSync
+//   * WebRTC 信令的目标解析与转发                → SignalingChannel
+//   * JSON 编解码                               → Protocol
 //
-// 所以它不认识 QMediaPlayer,不认识 QWebSocket(只认识一个"能发消息"的接口),
+// 因此它不认识 QMediaPlayer，不认识 QWebSocket（只依赖一个「能发消息」的接口），
 // 也不知道 WebRTC 的存在。
 //
 
@@ -61,7 +61,7 @@ class RoomSession : public QObject {
                READ members
                CONSTANT)
 
-    // 播放列表(房间共享的队列 + 本机自己的文件映射),同上
+    // 播放列表（房间共享的队列 + 本机自己的文件映射）,同上
     Q_PROPERTY(PlaylistModel *playlist
                READ playlist
                CONSTANT)
@@ -75,11 +75,11 @@ class RoomSession : public QObject {
                NOTIFY videoMismatchChanged)
 
 public:
-    // 三种观影模式:同步 / 房主共享媒体流 / 网链
+    // 三种观影模式：同步 / 房主共享媒体流 / 网链
     //
-    // 同步模式 = 大家各自都有同一部片子(以前叫"本地模式"),播放状态实时同步。
-    // 线路格式仍是 "local" —— 服务端不认识"同步"这个词,改名只改客户端这一侧,
-    // 映射集中在 modeToWire / modeFromWire 两个函数里。
+    // 同步模式指各端各自持有同一部片子（原称「本地模式」），播放状态实时同步。
+    // 线路格式仍为 "local"——服务端不认识「同步」这个名字，改名只涉及客户端一侧，
+    // 映射集中在 modeToWire / modeFromWire 两个函数中。
     enum class RoomMode {
         Sync,
         Share,
@@ -109,27 +109,27 @@ public:
     bool videoMismatched() const;
     qint64 shortestDuration() const;
 
-    // 某条目在本机对应的文件路径(空 = 没有)。PlaybackSync 解析播放源时用
+    // 某条目在本机对应的文件路径（空 = 没有）。PlaybackSync 解析播放源时使用
     QString localFileFor(const QString &itemId) const;
-    // 某条目的网链地址(空 = 这一条没有 URL)
+    // 某条目的网链地址（空 = 该条目没有 URL）
     QString urlFor(const QString &itemId) const;
 
-    // 除自己之外的成员是否都已加载视频(本地模式门禁用)
+    // 除自身外的成员是否都已加载视频（同步模式门禁使用）
     bool allOthersLoaded() const;
 
-    // 除自己之外的全部成员 ID。网状网要为每个对端各建一条 WebRTC 连接,
-    // 所以这里返回的是列表而不是单个 ID。
+    // 除自身外的全部成员 ID。网状网需为每个对端各建一条 WebRTC 连接，
+    // 故此处返回列表而非单个 ID。
     QList<QString> otherMemberIds() const;
 
-    // 入房时服务端下发的 ICE 配置(STUN + 带临时凭据的 TURN)。空 = 服务端没给
-    // (老服务端,或者它自己也拿不到凭据)。
+    // 入房时服务端下发的 ICE 配置（STUN + 带临时凭据的 TURN）。空 = 服务端未提供
+    // （旧版服务端，或它自身也拿不到凭据）。
     //
-    // 本类只保管、只转交,**不认识 WebRTC** —— 把它变成 PeerConnection 的配置
-    // 是 SignalingChannel + WebrtcManager 的事(和"播放列表条目不认识播放器"
-    // 是同一个原则)。
+    // 本类只保管与转交，不认识 WebRTC——将其转换为 PeerConnection 配置是
+    // SignalingChannel + WebrtcManager 的职责（与「播放列表条目不认识播放器」
+    // 同理）。
     QList<IceServerConfig> iceServers() const;
 
-    // ---- 生命周期:由 SessionController 在入场/离场时调用 ----
+    // ---- 生命周期：由 SessionController 在入场/离场时调用 ----
     void enterRoom(const RoomSnapshot &snapshot);
     void leaveRoom();
 
@@ -137,32 +137,32 @@ public:
     Q_INVOKABLE void setRoomMode(RoomMode mode);
     Q_INVOKABLE void sendChat(const QString &text);
 
-    // ---- 播放列表(QML 调用) ----
+    // ---- 播放列表（QML 调用） ----
     //
-    // 本地文件路径不进协议:addLocalFile / assignLocalFile 只把路径记在本地
-    // (itemId → 本机文件),服务端只收到条目的标题。
-    // 本地模式下每个人都要为自己那条选一次文件,共享模式下只有房主的映射有意义。
-    // 注意参数是 QUrl 而不是 QString:QML 的 FileDialog.selectedFile 是 url 类型,
-    // 传 QString 会被转成 "file:///..." 字符串,后续当路径用(读文件、算哈希)
-    // 全部失效 —— 媒体加载失败、匹配状态永远"未匹配"就是这么来的。
-    // 让 QML 原样传 QUrl,C++ 里 toLocalFile() 拿干净路径。
+    // 本地文件路径不进协议：addLocalFile / assignLocalFile 只把路径记在本地
+    // （itemId → 本机文件），服务端只收到条目标题。
+    // 同步模式下每人都要为自己的条目选一次文件；共享模式下只有房主的映射有意义。
+    // 参数为 QUrl 而非 QString：QML 的 FileDialog.selectedFile 是 url 类型，
+    // 传 QString 会被转成 "file:///…" 字符串，后续作为路径使用（读文件、算哈希）
+    // 将全部失效——媒体加载失败、匹配状态永远为未匹配即由此而来。
+    // 让 QML 原样传 QUrl，C++ 侧用 toLocalFile() 取得干净路径。
     Q_INVOKABLE void addLocalFile(const QUrl &fileUrl);
-    // live / durationMs / spec 都由探测(UrlInspector/UrlDownloader)得到:
-    //   直播没有时长、也不能下载合并;
-    //   durationMs 顺手带上,列表里就不用先显示 "--:--" 等有人加载完;
-    //   spec 是画质选择(**条目级**,语义见 FormatModel.h)—— 大家按同一条
-    //   spec 各自下载,选的不一样内容就对不上、会被判"不同步"。
+    // live / durationMs / spec 均由探测（UrlInspector/UrlDownloader）得到：
+    //   直播无时长，也不能下载合并；
+    //   一并带上 durationMs，列表便无需先显示 "--:--" 等待有人加载完成；
+    //   spec 是画质选择（条目级，语义见 FormatModel.h）——各端按同一条 spec
+    //   各自下载，选择不一致会导致内容对不上、被判为不同步。
     //
-    // **itemId 由调用方给**:同一条内容在不同客户端必须拿到同一个 id,否则
-    // 服务端查重(按 itemId 比)认不出来、房间列表里会出两条一样的。
-    // 自定义链接用 URL 算(见下),剧集用集号(见 FormatModel 的 Episodes::itemId)。
+    // itemId 由调用方提供：同一内容在不同客户端必须得到同一个 id，否则服务端
+    // 查重（按 itemId 比对）无法识别，房间列表中会出现两条相同条目。
+    // 自定义链接由 URL 计算（见下），剧集用集号（见 FormatModel 的 Episodes::itemId）。
     //
-    // 注意:QML 调这个方法必须把参数**全部传满** —— Q_INVOKABLE 的默认参数
-    // 不存在于 meta-object 里,QML 少传一个会直接报 "Insufficient arguments"。
+    // 注意：QML 调用此方法必须传满全部参数——Q_INVOKABLE 的默认参数不存在于
+    // meta-object 中，QML 少传一个会直接报 "Insufficient arguments"。
     Q_INVOKABLE void addUrlWithId(const QString &itemId, const QString &url,
                                   const QString &title, bool live,
                                   qint64 durationMs, const QString &spec);
-    // 自定义链接的便捷入口:itemId 由 URL 算出来(同一链接 = 同一条,各端一致)
+    // 自定义链接的便捷入口：itemId 由 URL 计算得出（同一链接即同一条，各端一致）
     Q_INVOKABLE void addUrl(const QString &url, const QString &title, bool live,
                             qint64 durationMs, const QString &spec);
     Q_INVOKABLE void assignLocalFile(const QString &itemId, const QUrl &fileUrl);
@@ -173,8 +173,8 @@ public:
     void sendPlayback(PlaybackAction action, qint64 position);
     void reportVideoStatus(bool loaded, const QString &hash, qint64 duration);
 
-    // 房主周期性广播自己的播放位置 —— 观众端据此画进度条。
-    // 只有房主/推流方调用,且只在共享/网链模式下有意义。
+    // 房主周期性广播自身播放位置，观众端据此绘制进度条。
+    // 仅房主/推流方调用，且仅在共享/网链模式下有意义。
     void sendPlaybackPosition(qint64 position, bool playing);
 
 signals:
@@ -186,7 +186,7 @@ signals:
     void isHostChanged();
     void videoMismatchChanged();
 
-    // 成员表内容发生变化(增删改),供 C++ 侧重算派生量
+    // 成员表内容变化（增删改），供 C++ 侧重算派生量
     void membersChanged();
 
     void entered();
@@ -198,12 +198,12 @@ signals:
     void chatReceived(const QString &from, const QString &text);
     void playbackCommandReceived(RoomSession::PlaybackAction action, qint64 position);
 
-    // 当前条目变了(或者原本的条目刚被指定了本机文件)—— 各端据此重新解析
-    // "这一条从哪儿来":本地/共享房主去读本地文件,网链读 url,观众什么都不做。
-    // itemId 为空表示当前没有条目(列表空了),此时应该把播放器卸载掉。
+    // 当前条目变化（或原条目刚被指定本机文件），各端据此重新解析该条目的来源：
+    // 同步模式与共享模式下的房主读取本地文件，网链模式读取 url，观众端不处理。
+    // itemId 为空表示当前无条目（列表已空），此时应卸载播放器。
     void playlistSwitched(const QString &itemId);
 
-    // 收到房主的位置广播(不是命令 —— 只用于更新界面,不驱动本地播放器)
+    // 收到房主的位置广播（非命令——仅用于更新界面，不驱动本地播放器）
     void playbackPositionReceived(qint64 position, bool playing);
 
     void errorOccurred(const QString &message);
@@ -220,10 +220,10 @@ private:
     void handlePlaylistChanged(const Protocol::Message &message);
     void handlePlaylistSwitched(const Protocol::Message &message);
     void handlePlaylistStatus(const Protocol::Message &message);
-    // 上报"这一条我这台机器上有没有文件"(只有同步模式发,服务端靠它算匹配状态)
+    // 上报「该条目本机是否有文件」（仅同步模式发送，服务端据此计算匹配状态）
     void reportPlaylistFile(const QString &itemId, const QString &path);
 
-    // 成员表变化后统一重算派生量,避免每个分支各写一遍 emit
+    // 成员表变化后统一重算派生量，避免各分支重复 emit
     void refreshDerivedState();
     void clearRoomState();
     bool send(const QString &text);

@@ -15,30 +15,30 @@ WebSocketServer::WebSocketServer(asio::io_context &ioc, const std::string &addre
 
     m_acceptor.open(endpoint.protocol(), ec);
     if (ec) {
-        LOG_ERROR("WebSocket") << "Error opening acceptor: " << ec.message();
+        LOG_FATAL("WebSocket") << "打开监听套接字失败：" << ec.message();
         return;
     }
 
     m_acceptor.set_option(asio::socket_base::reuse_address(true), ec);
     if (ec) {
-        LOG_ERROR("WebSocket") << "Error setting socket option: " << ec.message();
+        LOG_ERROR("WebSocket") << "设置 reuse_address 失败：" << ec.message();
         return;
     }
 
     m_acceptor.bind(endpoint, ec);
     if (ec) {
-        LOG_ERROR("WebSocket") << "Error binding acceptor: " << ec.message();
+        LOG_FATAL("WebSocket") << "绑定 " << address << ":" << port << " 失败："
+                               << ec.message();
         return;
     }
 
     m_acceptor.listen(asio::socket_base::max_listen_connections, ec);
     if (ec) {
-        LOG_ERROR("WebSocket") << "Error listening on acceptor: " << ec.message();
+        LOG_FATAL("WebSocket") << "开始监听失败：" << ec.message();
         return;
     }
 
-    LOG_INFO("WebSocket") << "WebSocket server initialized on " << address
-                          << ":" << port;
+    LOG_INFO("WebSocket") << "监听已就绪 " << address << ":" << port;
 }
 
 WebSocketServer::~WebSocketServer() {
@@ -50,14 +50,14 @@ void WebSocketServer::run() {
 }
 
 void WebSocketServer::stop() {
-    LOG_INFO("WebSocket") << "Stopping WebSocket server...";
+    LOG_INFO("WebSocket") << "正在停止服务，当前连接数=" << m_sessions.size();
     beast::error_code ec;
     m_acceptor.close(ec);
     if (ec) {
-        LOG_ERROR("WebSocket") << "Error closing acceptor: " << ec.message();
+        LOG_ERROR("WebSocket") << "关闭监听套接字失败：" << ec.message();
     }
 
-    // 关闭所有连接;先收集 id,避免关闭回调在遍历中修改 m_sessions
+    // 关闭所有连接；先收集 id，避免关闭回调在遍历过程中修改 m_sessions
     std::vector<std::string> sessionIds;
     sessionIds.reserve(m_sessions.size());
     for (const auto &[id, session] : m_sessions)
@@ -71,6 +71,7 @@ void WebSocketServer::stop() {
     m_sessions.clear();
 
     LogicSystem::getInstance().stop();
+    LOG_INFO("WebSocket") << "服务已停止";
 }
 
 void WebSocketServer::do_accept() {
@@ -84,17 +85,21 @@ void WebSocketServer::on_accept(beast::error_code ec, asio::ip::tcp::socket sock
         auto session = std::make_shared<Session>(std::move(socket));
         const std::string sessionId = session->id();
         session->setOnClose([this](std::shared_ptr<Session> closed) {
-            // 连接断开:从会话表移除,并让它退出所在房间
+            // 连接断开：从会话表移除，并让其退出所在房间
+            LOG_INFO("WebSocket") << "连接关闭: clientId=" << closed->id()
+                                  << " 剩余连接数=" << (m_sessions.size() - 1);
             m_sessions.erase(closed->id());
             LogicSystem::getInstance().handleDisconnect(closed);
         });
         m_sessions[sessionId] = session;
+        LOG_INFO("WebSocket") << "新连接: clientId=" << sessionId
+                              << " 当前连接数=" << m_sessions.size();
         session->start();
     } else if (ec != asio::error::operation_aborted) {
-        LOG_ERROR("WebSocket") << "Accept error: " << ec.message();
+        LOG_ERROR("WebSocket") << "接受连接失败：" << ec.message();
     }
 
-    // acceptor 仍打开就继续接受下一个连接
+    // acceptor 仍打开则继续接受下一个连接
     if (m_acceptor.is_open())
         do_accept();
 }

@@ -144,13 +144,13 @@ void UrlInspector::handleFinished(int exitCode)
     applyJson(document.object());
 }
 
-// json 解析结果,填充档位/详情列表,发 inspected 信号
+// json 解析结果，填充档位/详情列表，发 inspected 信号
 void UrlInspector::applyJson(const QJsonObject &root)
 {
     resetResults();
     m_info = MediaFormats::parseMediaInfo(root);
 
-    // ---- 多集链接:只列剧集,不挑流 ----
+    // ---- 多集链接：只列剧集，不挑流 ----
     if (m_info.isPlaylist()) {
         m_playlistTitle = m_info.playlistTitle;
         // 快照结果，返回剧集列表时直接恢复而不是再次解析
@@ -212,7 +212,7 @@ void UrlInspector::selectFormat(const QString &formatId, int role)
         return;
 
     if (role == 0) {
-        // 点视频流:清掉"合一"占位(它同时占着音频位)
+        // 点视频流：清掉"合一"占位（它同时占着音频位）
         m_pickedVideoId = m_pickedVideoId == formatId ? QString() : formatId;
         if (m_pickedVideoId.isEmpty())
             m_pickedAudioId.clear();
@@ -220,7 +220,7 @@ void UrlInspector::selectFormat(const QString &formatId, int role)
     } else if (role == 1) {
         m_pickedAudioId = m_pickedAudioId == formatId ? QString() : formatId;
     } else {
-        // 合一:同时占掉两项(它自己就带声音)
+        // 合一：同时占掉两项（它自己就带声音）
         const bool same = m_pickedVideoId == formatId && m_pickedAudioId == formatId;
         m_pickedVideoId = same ? QString() : formatId;
         m_pickedAudioId = same ? QString() : formatId;
@@ -246,10 +246,10 @@ void UrlInspector::pickEpisode(int index)
     if (url.isEmpty())
         return;
 
-    // 整季那份结果留着:界面点"返回全部剧集"时要直接恢复(见 backToPlaylist)
+    // 整季那份结果留着：界面点"返回全部剧集"时要直接恢复（见 backToPlaylist）
     if (m_playlistJson.isEmpty() && !m_info.isPlaylist()) {
-        // 理论上不会走到(剧集列表就是从整季结果来的);空快照时返回按钮会变成
-        // "重新解析"的语义,不至于卡死
+        // 理论上不会走到（剧集列表就是从整季结果来的）;空快照时返回按钮会变成
+        // "重新解析"的语义，不至于卡死
         LOG_WARN("UrlInspector") << "没有剧集快照,返回时要重新解析";
     }
 
@@ -267,20 +267,20 @@ void UrlInspector::backToPlaylist()
     }
 
     LOG_INFO("UrlInspector") << "返回整季列表:" << m_playlistTitle;
-    // 先拷出来:applyJson 内部的 resetResults 会把 m_playlistJson 清掉,
-    // 而它走到剧集分支时又会重新填上(这里递进去的就是它自己那份)
+    // 先拷出来：applyJson 内部的 resetResults 会把 m_playlistJson 清掉，
+    // 而它走到剧集分支时又会重新填上（这里递进去的就是它自己那份）
     const QJsonObject snapshot = m_playlistJson;
     applyJson(snapshot);   // 整份恢复,不重跑 yt-dlp(applyJson 会发 inspected)
 }
 
 void UrlInspector::selectTier(const QString &spec)
 {
-    // 换档位 = 放弃手选(两种选择是互斥的两套语义)
+    // 换档位 = 放弃手选（两种选择是互斥的两套语义）
     m_pickedVideoId.clear();
     m_pickedAudioId.clear();
 
-    // 直播的档位没有"不设限"这回事(每条 variant 都是具体的流):
-    // 界面上那个"最高画质"直接落到清晰度最高的一条,高亮才不会扑空
+    // 直播的档位没有"不设限"这回事（每条 variant 都是具体的流）:
+    // 界面上那个"最高画质"直接落到清晰度最高的一条，高亮才不会扑空
     if (m_info.live && (spec.isEmpty() || spec == QLatin1String("0"))) {
         m_tierSpec = m_qualities.isEmpty()
             ? QString()
@@ -291,7 +291,7 @@ void UrlInspector::selectTier(const QString &spec)
         return;
     }
 
-    // 普通视频的"最高画质"用 "0" 表示(和 AppSettings 的取值一致),
+    // 普通视频的"最高画质"用 "0" 表示（和 AppSettings 的取值一致）,
     // 内部统一成空串 —— 它就是 StreamSpec 里"不设限"的写法
     m_tierSpec = spec == QLatin1String("0") ? QString() : spec;
     m_tierChosen = true;
@@ -310,15 +310,15 @@ void UrlInspector::selectTier(const QString &spec)
 
 QString UrlInspector::selectionSpec() const
 {
-    // 手选的精确 id 优先(详情视图)
+    // 手选的精确 id 优先（详情视图）
     if (!m_pickedVideoId.isEmpty()) {
         return m_pickedAudioId.isEmpty() || m_pickedAudioId == m_pickedVideoId
             ? m_pickedVideoId
             : QStringLiteral("%1+%2").arg(m_pickedVideoId, m_pickedAudioId);
     }
 
-    // 直播:档位 spec 就是某条流的 format_id,不带 HDR 后缀(直播的 HDR 由清单决定)。
-    // 一条档位都没点过时,默认选清晰度最高的那条 —— 和以前"只给最高画质"的行为一致
+    // 直播：档位 spec 就是某条流的 format_id,不带 HDR 后缀（直播的 HDR 由清单决定）。
+    // 一条档位都没点过时，默认选清晰度最高的那条 —— 和以前"只给最高画质"的行为一致
     if (m_info.live) {
         if (m_tierChosen && m_tierIsLiveId)
             return m_tierSpec;
@@ -328,7 +328,7 @@ QString UrlInspector::selectionSpec() const
     }
 
     if (m_tierSpec.isEmpty()) {
-        // 还没选过任何东西 → 空(弹窗靠它判断"加入"按钮能不能点)
+        // 还没选过任何东西 → 空（弹窗靠它判断"加入"按钮能不能点）
         // "最高画质"档 → 显式的 "0"(它比空串多了"分辨率优先"的排序规则)
         return m_tierChosen ? QStringLiteral("0") : QString();
     }
@@ -342,8 +342,8 @@ QString UrlInspector::buildSpec(bool allowHdr) const
     if (body.isEmpty())
         return {};
 
-    // HDR 后缀只缀在普通视频的档位上:手选的 id 是用户在详情里看着"HDR"标点出来的,
-    // 不该再由开关改写;直播的 HDR 由清单自己决定
+    // HDR 后缀只缀在普通视频的档位上：手选的 id 是用户在详情里看着"HDR"标点出来的，
+    // 不该再由开关改写；直播的 HDR 由清单自己决定
     if (m_info.live || !m_pickedVideoId.isEmpty())
         return body;
     return StreamSpec::withHdr(body, allowHdr);

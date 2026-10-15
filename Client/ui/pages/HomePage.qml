@@ -3,7 +3,7 @@ import QtQuick.Controls
 import SyncineApp
 
 Item {
-    // 设置入口:挨着右上角的状态胶囊。全局设置都在这页里改
+    // 设置入口：挨着右上角的状态胶囊。全局设置都在这页里改
     // (房间内只放麦克风/听筒/cookie 那几项)。
     Button {
         id: settingsBtn
@@ -126,7 +126,7 @@ Item {
 
         // Label {
         //     anchors.horizontalCenter: parent.horizontalCenter
-        //     text: "与好友一起,同步每一帧"
+        //     text: "与好友一起，同步每一帧"
         //     font.pixelSize: 16
         //     color: Style.textSecondary
         // }
@@ -142,7 +142,7 @@ Item {
                 width: 268
                 height: 164
                 radius: 6
-                // 悬停只改颜色,不做缩放 —— 缩放在桌面端反而显得飘
+                // 悬停只改颜色，不做缩放 —— 缩放在桌面端反而显得飘
                 color: createArea.containsMouse ? Style.accentHover : Style.accent
 
                 Column {
@@ -187,7 +187,7 @@ Item {
 
                         Label {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            text: "新建房间,邀请好友加入"
+                            text: "新建房间，邀请好友加入"
                             font.pixelSize: 13
                             color: "#CCFFFFFF"
                         }
@@ -257,7 +257,7 @@ Item {
 
                         Label {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            text: "输入房间号,进入好友的房间"
+                            text: "输入房间号，进入好友的房间"
                             font.pixelSize: 13
                             color: Style.textSecondary
                         }

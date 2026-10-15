@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import SyncineApp
 
-// 主按钮:实心主色。禁用时用浅蓝线色,而不是变灰 —— 页面底色是白的,
+// 主按钮：实心主色。禁用时用浅蓝线色，而不是变灰 —— 页面底色是白的，
 // 灰按钮在浅色背景上几乎看不见。
 Button {
     id: root

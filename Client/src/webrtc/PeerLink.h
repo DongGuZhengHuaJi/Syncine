@@ -20,7 +20,7 @@
 class WebrtcManager;
 
 
-// 有两种连接:Voice(语音)和 Media(电影/视频)。每条连接只承载它该承载的轨,由 LinkKind 决定:
+// 有两种连接：Voice(语音)和 Media(电影/视频)。每条连接只承载它该承载的轨，由 LinkKind 决定：
 enum class LinkKind {
     Voice,
     Media,
@@ -51,7 +51,7 @@ public:
         return m_peerId;
     }
 
-    // 这条连接是哪一路。所有出站信令都带上它,好让对端知道该喂给哪条连接。
+    // 这条连接是哪一路。所有出站信令都带上它，好让对端知道该喂给哪条连接。
     LinkKind kind() const {
         return m_kind;
     }
@@ -64,34 +64,34 @@ public:
         return m_connection != nullptr;
     }
 
-    // ---- 信令入站(由 WebrtcManager 转发)----
+    // ---- 信令入站（由 WebrtcManager 转发）----
     void createOffer();
     void setRemoteDescription(const QString &sdp, const QString &type);
     void addIceCandidate(const QString &sdp, const QString &sdpMid, int sdpMLineIndex);
 
     // ---- 本地轨挂载 ----
-    // 每条连接只承载它该承载的轨,由 LinkKind 决定,调用错了会被挡下:
+    // 每条连接只承载它该承载的轨，由 LinkKind 决定，调用错了会被挡下：
     //   Voice → addLocalAudioTrack(麦克风)
     //   Media → addLocalVideoTrack + addLocalMovieAudioTrack
     static constexpr const char *kMovieStreamId = "syncine-movie";
     static constexpr const char *kChatStreamId = "syncine-mic";
 
-    // 添加本地音轨(只允许 Voice 连接调用)
+    // 添加本地音轨（只允许 Voice 连接调用）
     void addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track);
-    // 添加本地视频轨(只允许 Media 连接调用)
+    // 添加本地视频轨（只允许 Media 连接调用）
     void addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterface> track);
-    // 添加本地电影音轨(只允许 Media 连接调用)
+    // 添加本地电影音轨（只允许 Media 连接调用）
     void addLocalMovieAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track);
 
-    // 设置远端视频轨的渲染器。由 WebrtcManager 注入,生命周期比本对象长。
+    // 设置远端视频轨的渲染器。由 WebrtcManager 注入，生命周期比本对象长。
     void setRemoteVideoSink(webrtc::VideoSinkInterface<webrtc::VideoFrame> *sink);
 
-    // ---- 推送画质(共享模式下由房主设定)----
+    // ---- 推送画质（共享模式下由房主设定）----
     //
     // maxBitrateBps / maxFramerate 传 0 表示这一项不设限。
-    // 注意这只是**上限**:实际码率仍由拥塞控制在这个上限内跑,
-    // "不设限"也不等于无限 —— 那样拿到的是 WebRTC 的默认上限(540p 以上约 2.5Mbps)。
-    // 可随时调用(界面线程),内部会投递到信令线程。
+    // 注意这只是**上限**:实际码率仍由拥塞控制在这个上限内跑，
+    // "不设限"也不等于无限 —— 那样拿到的是 WebRTC 的默认上限（540p 以上约 2.5Mbps）。
+    // 可随时调用（界面线程）,内部会投递到信令线程。
     void applyVideoQuality(int maxBitrateBps, double maxFramerate);
 
     // 显式调用 setPlayoutEnabled(false)，让 NullAudioPoller 每隔约 10 毫秒请求一次音频数据
@@ -102,13 +102,13 @@ public:
     void setRemoteAudioSink(webrtc::AudioTrackSinkInterface *sink);
 
     // 设置远端音轨的音量。0.0 ~ 1.0,1.0 为原始音量。
-    // 可从任意线程调用 —— 内部会投递到 WebRTC 信令线程再执行,因为AudioRtpReceiver::OnSetVolume 要求运行在信令线程
+    // 可从任意线程调用 —— 内部会投递到 WebRTC 信令线程再执行，因为AudioRtpReceiver::OnSetVolume 要求运行在信令线程
     void setRemoteAudioVolume(double volume);
 
     // 临时闭麦
     void setAudioMuted(bool muted);
 
-    // 生命周期由 WebrtcManager 管理,Release返回 kOtherRefsRemained
+    // 生命周期由 WebrtcManager 管理，Release返回 kOtherRefsRemained
     void AddRef() const override {
         ++m_refCount;
     }
@@ -158,12 +158,12 @@ private:
         SetRemoteAnswer,
     };
 
-    // 远端描述设好之前到达的 ICE 先存着,否则 AddIceCandidate 会失败
+    // 远端描述设好之前到达的 ICE 先存着，否则 AddIceCandidate 会失败
     void flushPendingCandidates();
-    // 应答方专用:收到远端 offer 后生成本地 answer
+    // 应答方专用：收到远端 offer 后生成本地 answer
     void createAnswer();
     void emitError(const QString &message);
-    // 把当前画质档位写进视频 sender 的参数(内部会切到信令线程)
+    // 把当前画质档位写进视频 sender 的参数（内部会切到信令线程）
     void pushVideoQuality();
 
     QString m_peerId;
@@ -174,8 +174,8 @@ private:
     webrtc::scoped_refptr<webrtc::VideoTrackInterface> m_localVideoTrack;
     webrtc::scoped_refptr<webrtc::AudioTrackInterface> m_localMovieAudioTrack;
 
-    // 视频轨对应的 sender。画质档位(码率/帧率上限)只能通过它设置 ——
-    // AddTrack 的返回值以前是丢掉的,所以要单独留着。
+    // 视频轨对应的 sender。画质档位（码率/帧率上限）只能通过它设置 ——
+    // AddTrack 的返回值以前是丢掉的，所以要单独留着。
     webrtc::scoped_refptr<webrtc::RtpSenderInterface> m_videoSender;
     int m_videoMaxBitrateBps = 0;    // 0 = 不设上限(用 WebRTC 默认)
     double m_videoMaxFramerate = 0;  // 0 = 不设上限
@@ -183,11 +183,11 @@ private:
     // 对端的视频轨
     webrtc::scoped_refptr<webrtc::VideoTrackInterface> m_remoteVideoTrack;
 
-    // 对端的音频轨(每条连接只有一条),以及它的音量。
+    // 对端的音频轨（每条连接只有一条）,以及它的音量。
     //
-    // 为什么要加锁:轨由**信令线程**在 OnTrack 里写入,而音量滑块在
-    // **主线程**读写;m_remoteVolume 则是主线程写、信令线程在 OnTrack 里读。
-    // 两个方向都有交叉,所以这组成员统一由 m_remoteAudioLock 保护。
+    // 为什么要加锁：轨由**信令线程**在 OnTrack 里写入，而音量滑块在
+    // **主线程**读写；m_remoteVolume 则是主线程写、信令线程在 OnTrack 里读。
+    // 两个方向都有交叉，所以这组成员统一由 m_remoteAudioLock 保护。
     webrtc::Mutex m_remoteAudioLock;
     webrtc::scoped_refptr<webrtc::AudioTrackInterface>
         m_remoteAudioTrack RTC_GUARDED_BY(m_remoteAudioLock);
@@ -196,19 +196,19 @@ private:
     // 远端音轨往哪送。不设则交给 WebRTC 自己播。
     webrtc::AudioTrackSinkInterface *m_remoteAudioSink = nullptr;
 
-    // 远端画面往哪送。由 WebrtcManager 注入,生命周期比本对象长。
+    // 远端画面往哪送。由 WebrtcManager 注入，生命周期比本对象长。
     webrtc::VideoSinkInterface<webrtc::VideoFrame> *m_remoteVideoSink = nullptr;
 
     // 等待执行的操作
     PendingOperation m_pendingOperation = PendingOperation::None;
 
-    // 已设好远端描述?
+    // 已设好远端描述？
     bool m_remoteDescriptionSet = false;
     QVector<QString> m_pendingCandidateSdps;
     QVector<QString> m_pendingCandidateMids;
     QVector<int> m_pendingCandidateIndexes;
 
-    // 可变的,因为 AddRef/Release 是 const 方法
+    // 可变的，因为 AddRef/Release 是 const 方法
     mutable std::atomic<int> m_refCount{0};
 };
 

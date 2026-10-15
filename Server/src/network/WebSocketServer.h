@@ -34,7 +34,7 @@ private:
     asio::io_context& m_ioc;
     asio::ip::tcp::acceptor m_acceptor;
 
-    // 会话表:负责持有 Session 的生命周期
+    // 会话表：负责持有 Session 的生命周期
     std::unordered_map<std::string, std::shared_ptr<Session>> m_sessions;
 };
 

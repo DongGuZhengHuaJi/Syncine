@@ -2,13 +2,13 @@ import QtQuick
 import QtQuick.Controls
 import SyncineApp
 
-// 播放器控制条上的按钮(深色底那一套)。
-// 图标按钮给 icon,纯文字按钮(如 -10 / +10)给 text。
+// 播放器控制条上的按钮（深色底那一套）。
+// 图标按钮给 icon,纯文字按钮（如 -10 / +10）给 text。
 AbstractButton {
     id: root
 
     property string iconName: ""
-    // 激活态:麦克风开着、弹幕开着……用主色描出来
+    // 激活态：麦克风开着、弹幕开着……用主色描出来
     property bool active: false
     property string tip: ""
 

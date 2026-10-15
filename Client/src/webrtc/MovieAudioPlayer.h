@@ -1,45 +1,21 @@
 //
-// 接收端电影声的播放器 —— Media 连接那条假声卡的替代品。
+// 接收端电影声的播放器：Media 连接所用假声卡的替代品。
 //
-// 【为什么需要它】
+// media 连接使用假声卡（kDummyAudio），既不采集也不播放
+// （audio_device_dummy.cc 的 InitPlayout 与 StartPlayout 均返回 -1），这是有意为之。
+// 代价是 WebRTC 解码出远端电影声后无设备可放，故这一段自行接管：
+//   WebRTC 解码后的 PCM ──OnData()──> [缓冲] ──readData()──> QAudioSink ──> 扬声器
+// 语音轨不需要该机制，它走真实声卡由 WebRTC 自行播放。
 //
-// media 连接用的是一块"假声卡"(kDummyAudio),它既不采集也不能播放
-// (见 modules/audio_device/dummy/audio_device_dummy.cc:InitPlayout 与
-//  StartPlayout 都直接返回 -1)。这是故意的 —— 我们要的就是它不采集。
+// 必须使用拉模式：OnData() 由 WebRTC 音频线程调用，而 QAudioSink 的内部缓冲在其
+// 自身线程上访问，写入推模式的设备会冲突；拉模式下只需保证 readData() 线程安全。
+// readData() 无数据时返回静音而非 0 字节：QAudioSink 因而永不欠载、始终按 48kHz
+// 稳定拉取，成为时钟源；网络缓慢时表现为安静，而非播放器卡住或状态异常。
 //
-// 但代价随之而来:WebRTC 把远端电影声解码出来之后,没有设备可以放。
-// 所以这一段必须我们自己接:
-//
-//    WebRTC 解码后的 PCM ──OnData()──> [环形缓冲] ──readData()──> QAudioSink ──> 扬声器
-//
-// 而语音那条不需要这套东西 —— 它走真声卡,WebRTC 自己会放。
-//
-// 【为什么用"拉模式"】
-//
-// QAudioSink 有两种用法:start() 返回一个可写的 QIODevice(推模式),
-// 或 start(device) 让它从我们给的 QIODevice 里读(拉模式)。
-//
-// 这里必须用拉模式:OnData() 是 WebRTC 的音频线程调的,而 QAudioSink
-// 的内部缓冲在自己的线程上访问 —— 直接往推模式的设备里写会撞车。
-// 拉模式下我们只需要保证 readData() 是线程安全的,方向单一。
-//
-// 【缓冲耗尽时补静音,而不是返回 0】
-//
-// readData() 在没数据时返回静音而不是 0 字节。这样 QAudioSink 永远不会
-// 欠载、始终按 48kHz 的节奏稳定地拉数据 —— 它就成了我们的时钟源。
-// 网络慢时表现为"安静",而不是播放器卡住或状态乱跳。
-//
-// 【音量】
-//
-// 由 QAudioSink::setVolume() 控制。这是"接收端电影音量独立可调"的落点,
-// 和语音那条走 WebRTC 的 SetVolume 完全无关,所以两者天然互不影响。
-//
-// 【输出设备】
-//
-// 也不归 WebRTC 管 —— 语音那条的设备由 ADM 定,这里得自己选。
-// 默认跟系统默认输出,用户在设置里选了"听筒"之后由 WebrtcManager 调
-// setOutputDevice() 切过来:语音和电影声同属"我听别人"的声音,
-// 分成两个设备会出现"语音在耳机里、电影声在外放"。
+// 音量由 QAudioSink::setVolume() 控制，与语音走 WebRTC SetVolume 的路径无关。
+// 输出设备同样不归 WebRTC 管理，需自行选择：默认跟随系统，用户在设置中选择听筒后
+// 由 WebrtcManager 调用 setOutputDevice() 切换——语音与电影声同属「我听别人」的声音，
+// 分为两个设备会导致语音在耳机、电影声在外放。
 //
 
 #ifndef SYNCINE_MOVIEAUDIOPLAYER_H
@@ -66,20 +42,20 @@ public:
     explicit MovieAudioPlayer(QObject *parent = nullptr);
     ~MovieAudioPlayer() override;
 
-    // 换输出设备。传一个 isNull() 的设备 = 回到系统默认。
-    // 会停掉重开 QAudioSink(设备只能在构造 QAudioSink 时指定),音量保留。
-    // 只在 Qt 主线程上调用。
+    // 切换输出设备。传入 isNull() 的设备即回到系统默认。
+    // 会停止并重建 QAudioSink（设备只能在构造 QAudioSink 时指定），音量保留。
+    // 只在 Qt 主线程调用。
     void setOutputDevice(const QAudioDevice &device);
 
-    // 0.0 ~ 1.0,1.0 为原始音量。
+    // 0.0 ~ 1.0，1.0 为原始音量
     void setVolume(double volume);
     double volume() const;
 
-    // 已写入缓冲的字节数与当前缓冲深度(排障用)
+    // 已写入缓冲的字节数与当前缓冲深度（排查用）
     int queuedBytes() const;
 
     // ---- webrtc::AudioTrackSinkInterface ----
-    // 在 WebRTC 的音频线程被调用
+    // 由 WebRTC 的音频线程调用
     void OnData(const void *audio_data,
                 int bits_per_sample,
                 int sample_rate,
@@ -97,12 +73,12 @@ private:
     std::unique_ptr<MovieAudioDevice> m_device;
     std::unique_ptr<QAudioSink> m_sink;
 
-    // 输出设备。默认构造是空设备 = 用系统默认(见 startSink)。
+    // 输出设备。默认构造为空设备 = 使用系统默认（见 startSink）
     QAudioDevice m_outputDevice;
 
-    // 诊断:前几次 + 每隔一段打一条,避免淹没日志
+    // 诊断：前几帧 + 每隔一段记录一条，避免淹没日志
     int m_frameCount = 0;
-    // 因为格式或通道数不对而被丢弃的帧数
+    // 因格式或声道数不符而被丢弃的帧数
     int m_droppedCount = 0;
 };
 

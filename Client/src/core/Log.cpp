@@ -18,10 +18,10 @@
 
 namespace {
 
-// ── 文件策略,改这里就够了 ──────────────────────────────────
-constexpr qint64 kMaxFileBytes = 8 * 1024 * 1024; // 单个文件到 8MB 就切
-constexpr int kMaxRolls = 3;                      // 同一天最多留 .1 .2 .3
-constexpr int kKeepDays = 7;                      // 超过 7 天的旧日志启动时删掉
+// ── 文件策略，调整此处即可 ──────────────────────────────────
+constexpr qint64 kMaxFileBytes = 8 * 1024 * 1024; // 单文件达到 8MB 即切分
+constexpr int kMaxRolls = 3;                      // 同一天最多保留 .1 .2 .3
+constexpr int kKeepDays = 7;                      // 启动时删除超过 7 天的旧日志
 constexpr int kTagWidth = 10;                     // 标签对齐宽度
 
 struct State {
@@ -33,12 +33,11 @@ struct State {
 };
 
 State g_state;
-QMutex g_fileMutex; // 保护 g_state 里的文件与路径
+QMutex g_fileMutex; // 保护 g_state 中的文件与路径
 std::atomic<int> g_level{static_cast<int>(Log::Level::Info)};
 
-// 线程编号:Qt::HANDLE → 1,2,3……。日志里显示成 [t2] 这种,
-// 便于判断"这条回调到底在哪个线程"。查一次缓存到 thread_local,
-// 之后连锁都不用加。
+// 线程编号：Qt::HANDLE → 1,2,3……，日志中显示为 [t2]，用于确认回调所在线程。
+// 首次查询后缓存到 thread_local，后续无需加锁。
 QMutex g_threadMutex;
 QHash<Qt::HANDLE, int> g_threadNumbers;
 int g_nextThreadNumber = 1;
@@ -73,7 +72,7 @@ const char *levelName(Log::Level level)
     return "?";
 }
 
-// 控制台专用。只在输出到终端时用,重定向到文件时不要这些转义序列
+// 仅用于控制台。只在实际输出到终端时使用，重定向到文件时不应包含转义序列。
 const char *levelColor(Log::Level level)
 {
     switch (level) {
@@ -117,14 +116,14 @@ QString rollPath(int index)
     return QStringLiteral("%1.%2").arg(g_state.path).arg(index);
 }
 
-// 下面三个 open/rotate/cleanup 都要求已经持有 g_fileMutex
+// 以下 open/rotate/cleanup 三个函数均要求调用方已持有 g_fileMutex
 void openFileLocked()
 {
     QDir().mkpath(g_state.dir);
     g_state.file.setFileName(g_state.path);
 
     if (!g_state.file.open(QIODevice::WriteOnly | QIODevice::Append)) {
-        // 文件打不开也不能把应用带崩:退化成"只写控制台"
+        // 文件打不开也不能把应用带崩：退化成"只写控制台"
         std::fprintf(stderr, "[Log] 无法打开日志文件 %s,本次只写控制台\n",
                      qPrintable(g_state.path));
         return;
@@ -167,7 +166,7 @@ void cleanupOldFilesLocked()
     }
 }
 
-// 把 Qt 自己的消息(qDebug/qWarning、QML 的 console.log)也收编进同一个文件
+// 将 Qt 自身的消息（qDebug/qWarning、QML 的 console.log）收进同一文件
 void qtMessageHandler(QtMsgType type, const QMessageLogContext &context,
                       const QString &message)
 {
@@ -180,14 +179,14 @@ void qtMessageHandler(QtMsgType type, const QMessageLogContext &context,
     case QtFatalMsg:    level = Log::Level::Fatal; break;
     }
 
-    // 分类名当标签:QML 的 console.log 是 "qml",裸 qDebug 是 "default"
+    // 以分类名作为标签：QML 的 console.log 为 "qml"，裸 qDebug 为 "default"
     QByteArray tag = context.category ? QByteArray(context.category) : QByteArray("Qt");
     if (tag == "default")
         tag = "Qt";
 
     QString text = message;
     if (context.file) {
-        // 只留文件名 —— QML 给的是 qrc:/qt/qml/SyncineApp/ui/....qml 一长串
+        // 只保留文件名：QML 给出的是 qrc:/qt/qml/SyncineApp/ui/….qml 这样的长路径
         const QString file = QString::fromUtf8(context.file);
         text += QStringLiteral(" (%1:%2)")
                     .arg(file.mid(file.lastIndexOf(QLatin1Char('/')) + 1))
@@ -196,7 +195,7 @@ void qtMessageHandler(QtMsgType type, const QMessageLogContext &context,
 
     Log::write(level, tag.constData(), text);
 
-    // Qt 默认处理器在 fatal 之后会 abort,别把这个行为弄丢
+    // Qt 默认处理器在 fatal 之后会 abort，需保留该行为
     if (type == QtFatalMsg)
         abort();
 }
@@ -217,8 +216,8 @@ void Log::init(const QString &filePrefix)
 
     g_state.prefix = filePrefix;
 
-    // 默认跟系统走:~/.local/share/Syncine/logs/。
-    // SYNCINE_LOG_DIR 可以覆盖(比如指到工程目录里,方便边跑边 tail)
+    // 默认跟随系统路径：~/.local/share/Syncine/logs/。
+    // SYNCINE_LOG_DIR 可覆盖（例如指向工程目录，便于运行中 tail）
     const QByteArray envDir = qgetenv("SYNCINE_LOG_DIR");
     const QString baseDir = envDir.isEmpty()
         ? QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
@@ -237,7 +236,8 @@ void Log::init(const QString &filePrefix)
 
     g_previousHandler = qInstallMessageHandler(qtMessageHandler);
 
-    LOG_INFO("Log") << "日志级别" << levelName(level()) << "文件:" << g_state.path;
+    // 注意 QDebug 会在每个 << 之间插入一个空格，故此处字符串不带尾随空格
+    LOG_INFO("Log") << "日志级别:" << levelName(level()) << "文件:" << g_state.path;
 }
 
 void Log::shutdown()
@@ -287,8 +287,8 @@ void Log::write(Level level, const char *tag, const QString &message)
     if (!isEnabled(level))
         return;
 
-    // 线程号先取(它自己会锁线程表),文件锁最后才拿。
-    // 固定这个先后顺序:nameCurrentThread 里也是先线程表再写日志,不会死锁。
+    // 先取线程号（内部会锁线程表），最后才获取文件锁。顺序必须固定：
+    // nameCurrentThread 同样是先线程表后写日志，保持此顺序不会死锁。
     const int number = threadNumber();
     const QString stamp = QDateTime::currentDateTime().toString(
         QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"));
@@ -301,7 +301,7 @@ void Log::write(Level level, const char *tag, const QString &message)
     QMutexLocker locker(&g_fileMutex);
 
     if (g_state.console) {
-        // 警告以上走 stderr,其余走 stdout —— 保留原来"错误和普通输出分开"的习惯
+        // 警告及以上走 stderr，其余走 stdout，使错误输出与普通输出分离
         FILE *out = static_cast<int>(level) >= static_cast<int>(Level::Warn) ? stderr : stdout;
         if (isatty(fileno(out))) {
             const QString colored = stamp + QStringLiteral(" [")
@@ -318,7 +318,7 @@ void Log::write(Level level, const char *tag, const QString &message)
         const QByteArray bytes = plain.toUtf8() + '\n';
         rotateIfNeededLocked(bytes.size());
         g_state.file.write(bytes);
-        // 每行都 flush:日志文件的意义就是"程序崩了也能看到最后一行"
+        // 每行都 flush：日志文件的价值在于程序崩溃后仍能看到最后一行
         g_state.file.flush();
     }
 }
@@ -330,7 +330,7 @@ Log::Line::Line(Level level, const char *tag)
 {
     if (m_active) {
         m_stream = std::make_unique<QDebug>(&m_buffer);
-        m_stream->noquote(); // QDebug 默认给 QString 加双引号,日志里不要
+        m_stream->noquote(); // QDebug 默认给 QString 加双引号，日志中不需要
     }
 }
 
@@ -339,11 +339,11 @@ Log::Line::~Line()
     if (!m_active)
         return;
 
-    // 先让它析构 —— QDebug 到这一步才把攒的内容写进 m_buffer
+    // 先释放它——QDebug 到这一步才把内容写入 m_buffer
     m_stream.reset();
 
     QString text = QString::fromUtf8(m_buffer);
-    // QDebug 每写一个值都会跟一个空格(包括最后一个),行尾的空格要去掉
+    // QDebug 每写一个值都会追加一个空格（含最后一个），需去掉行尾空格
     while (text.endsWith(QLatin1Char('\n')) || text.endsWith(QLatin1Char(' ')))
         text.chop(1);
 

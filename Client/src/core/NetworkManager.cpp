@@ -9,11 +9,11 @@
 
 namespace {
 
-// 单次连接的超时。WebSocket 没有内建超时,不自己掐的话要等 OS 级的 TCP
-// 超时(几十秒)—— 那期间界面一直"连接中…",用户只能干等
+// 单次连接的超时。WebSocket 没有内建超时，不自己掐的话要等 OS 级的 TCP
+// 超时（几十秒）—— 那期间界面一直"连接中…",用户只能干等
 constexpr int kConnectTimeoutMs = 8000;
 
-// 整轮失败后的重试间隔:第一次 15 秒,之后每次翻倍,60 秒封顶
+// 整轮失败后的重试间隔：第一次 15 秒，之后每次翻倍，60 秒封顶
 constexpr int kRetryBaseMs = 15 * 1000;
 constexpr int kRetryMaxMs = 60 * 1000;
 
@@ -62,7 +62,7 @@ NetworkManager::NetworkManager(AppSettings *settings, QObject *parent)
         &QWebSocket::disconnected,
         this,
         [this]() {
-            // 连接**尝试**失败时 Qt 也可能发这个信号(各版本不一致)。
+            // 连接**尝试**失败时 Qt 也可能发这个信号（各版本不一致）。
             // 只有"真的连上过再断"才算"掉线",否则由 handleAttemptFailed 处理
             if (!m_connected)
                 return;
@@ -93,7 +93,7 @@ NetworkManager::NetworkManager(AppSettings *settings, QObject *parent)
         [this](QAbstractSocket::SocketError error) {
             Q_UNUSED(error);
 
-            // 自己 abort 触发的那一次不算失败(切换地址时必然发生)
+            // 自己 abort 触发的那一次不算失败（切换地址时必然发生）
             if (m_switching) {
                 m_switching = false;
                 return;
@@ -165,13 +165,13 @@ void NetworkManager::startRound() {
     const QString fallbackUrl = m_settings != nullptr ? m_settings->fallbackServerUrl()
                                                       : QString();
 
-    // 用户地址优先;和兜底一样就不重复试一遍
+    // 用户地址优先；和兜底一样就不重复试一遍
     if (!userUrl.isEmpty() && userUrl != fallbackUrl)
         m_attempts << userUrl;
     if (!fallbackUrl.isEmpty())
         m_attempts << fallbackUrl;
 
-    // 一个都没有(用户把地址清空、兜底又是空的):别再空转
+    // 一个都没有（用户把地址清空、兜底又是空的）:别再空转
     if (m_attempts.isEmpty()) {
         LOG_ERROR("Network") << "没有可用的服务器地址";
         emit connectionFailed(QStringLiteral("没有可用的服务器地址"));
@@ -185,8 +185,8 @@ void NetworkManager::startRound() {
 
 void NetworkManager::tryNextUrl() {
     if (m_attemptIndex >= m_attempts.size()) {
-        // 正常不会走到这儿(试完了由 handleAttemptFailed 安排重试),
-        // 留着只是防御 —— 别在这里再排一次重试,会和那边重复
+        // 正常不会走到这儿（试完了由 handleAttemptFailed 安排重试）,
+        // 留着只是防御 —— 别在这里再排一次重试，会和那边重复
         LOG_ERROR("Network") << "地址列表全部连接失败";
         return;
     }

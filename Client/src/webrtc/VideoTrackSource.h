@@ -1,18 +1,12 @@
 //
-// 视频轨道的"源" —— 帧的入口。
+// 视频轨道的源：帧的入口。
 //
-// 为什么需要它:
+// WebRTC 音频侧有现成的 ADM（麦克风采集），视频侧则只提供接口，数据须自行喂入，
+// 本类即该喂入口：
+//   Qt 解码帧 ──(格式转换)──→ 本类 ──→ 编码器 ──→ RTP（由 VideoBroadcaster 分发）
 //
-//   WebRTC 音频侧有现成的 ADM(麦克风采集),视频侧却没有"从别处拿帧"的实现 ——
-//   WebRTC 只给接口,数据必须自己喂。这个类就是那个喂入口。
-//
-//   Qt 解码帧 ──(格式转换)──→ 本类 ──→ 编码器 ──→ RTP
-//        将来接                        ↑
-//                                  VideoBroadcaster 负责分发
-//
-// 当前阶段:只做"接收并广播",**不做格式转换** —— 调用方直接给
-// webrtc::VideoFrame。这样能先把链路验证通,转换那一层等链路稳了再加,
-// 出问题时才分得清是链路错还是转换错。
+// 当前只做「接收并广播」，不做格式转换——调用方直接提供 webrtc::VideoFrame。
+// 先打通链路，待稳定后再加入转换层，出问题时才能区分链路错误与转换错误。
 //
 
 #ifndef SYNCINE_VIDEOTRACKSOURCE_H
@@ -42,10 +36,11 @@ public:
     VideoTrackSource &operator=(const VideoTrackSource &) = delete;
 
 
-    // 喂一帧 WebRTC 格式的帧并广播给所有订阅者。
+    // 喂入一帧 WebRTC 格式的帧并广播给所有订阅者
     void pushFrame(const webrtc::VideoFrame &frame);
 
-    // 喂一帧 Qt 格式的帧。由 PlaybackController 的 videoFrameAvailable 信号驱动(main.cpp 里接线)。
+    // 喂入一帧 Qt 格式的帧。由 PlaybackController 的 videoFrameAvailable
+    // 信号驱动（接线在 main.cpp）。
     void pushQtFrame(const QVideoFrame &frame);
 
     // 当前订阅者数量
@@ -72,7 +67,7 @@ public:
     void AddEncodedSink(webrtc::VideoSinkInterface<webrtc::RecordableEncodedFrame> *sink) override;
     void RemoveEncodedSink(webrtc::VideoSinkInterface<webrtc::RecordableEncodedFrame> *sink) override;
 
-    // 生命周期由 WebrtcManager 掌握,Release 永远返回 kOtherRefsRemained
+    // 生命周期由 WebrtcManager 掌握，Release 永远返回 kOtherRefsRemained
     void AddRef() const override {
         ++m_refCount;
     }
@@ -85,11 +80,11 @@ public:
 private:
     webrtc::VideoBroadcaster m_broadcaster;
 
-    // 可变的,因为 AddRef/Release 是 const 方法
+    // 可变的，因为 AddRef/Release 是 const 方法
     mutable std::atomic<int> m_refCount{0};
 
-    // VideoBroadcaster 不暴露订阅者数量,自己记一个。
-    // 按指针去重:同一根轨道重复注册时 AddOrUpdateSink 也会被调用。
+    // VideoBroadcaster 不暴露订阅者数量，故自行记录。
+    // 按指针去重：同一轨道重复注册时 AddOrUpdateSink 也会被调用。
     int m_sinkCount = 0;
     std::set<webrtc::VideoSinkInterface<webrtc::VideoFrame> *> m_registeredSinks;
 
@@ -97,7 +92,7 @@ private:
     int m_height = 0;
     bool m_hasReceivedFrame = false;
 
-    // 上一帧的单调时间戳,用来保证严格递增
+    // 上一帧的单调时间戳，用于保证严格递增
     int64_t m_lastTimestampUs = 0;
 };
 

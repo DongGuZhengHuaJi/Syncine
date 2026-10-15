@@ -10,8 +10,8 @@
 
 namespace {
 
-// ⚠️ 部署后改这一行:用户没在设置里填地址时就连它。
-// 将来要用 wss:// 也在这里改(客户端已经允许 ws/wss 两种 scheme)。
+// 部署后需修改此项：用户未在设置中填写地址时连接该地址。
+// 改用 wss:// 同样在此处修改（客户端已允许 ws/wss 两种 scheme）。
 const char *kFallbackServerUrl = "ws://localhost:8765";
 
 const char *kKeyServerUrl = "server/userUrl";
@@ -55,8 +55,8 @@ AppSettings::AppSettings(QObject *parent)
     m_lastCookieBrowser = m_settings->value(QLatin1String(kKeyLastCookieBrowser)).toString();
     m_cookieSource = m_settings->value(QLatin1String(kKeyCookieSource)).toString();
     m_cookieImportedAt = m_settings->value(QLatin1String(kKeyCookieImportedAt)).toString();
-    // 老版本这里存的是 int(高度上限,0 = 最高);现在存字符串,读法兼容两者:
-    // "0" 归一成空串(两种写法语义相同:不设限)
+    // 旧版本此处存 int（高度上限，0 = 最高），现为字符串，读取兼容两种写法：
+    // "0" 归一化为空串（两者语义相同，均为不设限）
     m_defaultQuality = m_settings->value(QLatin1String(kKeyQuality)).toString().trimmed();
     if (m_defaultQuality == QLatin1String("0"))
         m_defaultQuality.clear();
@@ -66,7 +66,11 @@ AppSettings::AppSettings(QObject *parent)
     m_logLevel = m_settings->value(QLatin1String(kKeyLogLevel),
                                    QStringLiteral("info")).toString().toLower();
 
-    LOG_INFO("Settings") << "配置文件:" << filePath();
+    LOG_INFO("Settings") << "配置文件:" << filePath()
+                         << " 服务器地址:" << (m_serverUrl.isEmpty() ? "(兜底)" : m_serverUrl)
+                         << " 画质:" << (m_defaultQuality.isEmpty() ? "(不设限)" : m_defaultQuality)
+                         << " HDR:" << (m_hdrAllowed ? 1 : 0)
+                         << " 日志级别:" << m_logLevel;
 }
 
 QString AppSettings::fallbackServerUrl() const
@@ -81,7 +85,7 @@ QString AppSettings::filePath() const
 
 QString AppSettings::logDirectory() const
 {
-    // Log 那边的文件名是按天的(syncine-2026-10-12.log),这里要的是它所在的目录
+    // Log 的文件名按天划分（syncine-2026-10-12.log），此处需要的是其所在目录
     const QString file = Log::filePath();
     return file.isEmpty() ? QString() : QFileInfo(file).absolutePath();
 }
@@ -89,11 +93,13 @@ QString AppSettings::logDirectory() const
 void AppSettings::openLogDirectory()
 {
     const QString dir = logDirectory();
-    if (dir.isEmpty())
+    if (dir.isEmpty()) {
+        LOG_WARN("Settings") << "日志目录不可用，无法打开";
         return;
+    }
 
     LOG_INFO("Settings") << "打开日志目录:" << dir;
-    // 交给桌面环境用默认的文件管理器打开(打不开也不影响程序,不用管返回值)
+    // 交给桌面环境用默认文件管理器打开；打不开不影响程序，无需处理返回值
     QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
 }
 
@@ -133,7 +139,7 @@ void AppSettings::setCookieImportedAt(const QString &isoTime)
     if (m_cookieImportedAt == isoTime)
         return;
 
-    // 存 ISO 字符串而不是 QDateTime:ini 里就是纯文本,跨版本也不会变格式
+    // 存 ISO 字符串而非 QDateTime：ini 中本就是纯文本，跨版本不会变格式
     m_cookieImportedAt = isoTime;
     m_settings->setValue(QLatin1String(kKeyCookieImportedAt), m_cookieImportedAt);
     emit cookieImportedAtChanged();
@@ -141,7 +147,7 @@ void AppSettings::setCookieImportedAt(const QString &isoTime)
 
 void AppSettings::setDefaultQuality(const QString &quality)
 {
-    // "0" 和空串是同一个意思(不设限),归一成空串,免得界面两种取值来回跳
+    // "0" 与空串语义相同（均为不设限），统一归一化为空串，避免界面取值反复切换
     const QString normalized = quality == QLatin1String("0") ? QString() : quality;
     if (m_defaultQuality == normalized)
         return;
@@ -163,7 +169,7 @@ void AppSettings::setHdrAllowed(bool allowed)
 
 void AppSettings::setMicDevice(const QString &deviceName)
 {
-    // 空串是合法值(= 跟随系统默认),不做归一化
+    // 空串是合法值（= 跟随系统默认），不作归一化
     if (m_micDevice == deviceName)
         return;
 
@@ -198,16 +204,16 @@ void AppSettings::setLogLevel(const QString &level)
 void AppSettings::applyLogLevel()
 {
     if (qEnvironmentVariableIsSet("SYNCINE_LOG_LEVEL")) {
-        // 环境变量是"临时改一下看日志"用的,优先级高于 ini —— 否则开发时
-        // 改了环境变量却毫无效果,会怀疑人生
-        LOG_INFO("Settings") << "SYNCINE_LOG_LEVEL 已设置,忽略设置里的日志级别:"
+        // 环境变量用于临时调整日志，优先级高于 ini，否则开发时设置环境变量
+        // 将毫无效果
+        LOG_INFO("Settings") << "SYNCINE_LOG_LEVEL 已设置，忽略设置中的日志级别:"
                              << m_logLevel;
         return;
     }
 
-    // 先打日志再改级别:"我改了级别"这件事本身要能被看见 ——
-    // 反过来的话调成 warn/error 时这行会把自己过滤掉,日志里一片安静,
-    // 会让人怀疑设置到底生效没有
+    // 先记录日志再切换级别：级别切换本身需要可见。若顺序颠倒，
+    // 调至 warn/error 时本行会被自身过滤掉，日志中无任何痕迹，
+    // 无法确认设置是否生效。
     LOG_INFO("Settings") << "日志级别:" << m_logLevel;
     Log::setLevel(levelFromName(m_logLevel));
 }

@@ -30,7 +30,7 @@ SignalingChannel::SignalingChannel(RoomSession *session,
         return;
 
 
-    // ---- 入站:信令消息 -> WebRTC 状态机 ----
+    // ---- 入站：信令消息 -> WebRTC 状态机 ----
     connect(m_networkManager, &NetworkManager::messageReceived,
             this, &SignalingChannel::onMessage);
 
@@ -38,7 +38,7 @@ SignalingChannel::SignalingChannel(RoomSession *session,
     connect(m_session, &RoomSession::entered, this, &SignalingChannel::onRoomEntered);
     connect(m_session, &RoomSession::left, this, &SignalingChannel::onRoomLeft);
 
-    // 成员一变就重新对齐。成员表是"谁该连着"的唯一事实来源,
+    // 成员一变就重新对齐。成员表是"谁该连着"的唯一事实来源，
     // 分开监听 memberJoined / memberLeft 会漏掉 room_joined 时的整表下发。
     connect(m_session, &RoomSession::membersChanged,
             this, &SignalingChannel::onMembersChanged);
@@ -56,7 +56,7 @@ SignalingChannel::SignalingChannel(RoomSession *session,
                 emit videoQualityChanged(static_cast<int>(quality));
             });
 
-    // 音频设备:列表变了两个属性都要重算(QML 一次只看得见一个列表,
+    // 音频设备：列表变了两个属性都要重算(QML 一次只看得见一个列表，
     // 但分开成两个信号没有意义 —— 枚举本来就不分侧)
     connect(m_webrtcManager, &WebrtcManager::audioDevicesChanged, this, [this] {
         emit micDevicesChanged();
@@ -126,7 +126,7 @@ void SignalingChannel::setChatVolume(double volume) {
 }
 
 // ============================
-// 音频设备(麦克风 / 听筒)
+// 音频设备（麦克风 / 听筒）
 // ============================
 
 void SignalingChannel::refreshAudioDevices() {
@@ -140,9 +140,9 @@ void SignalingChannel::setMicDevice(const QString &name) {
     if (m_webrtcManager == nullptr)
         return;
 
-    // 值没变就什么都不做。启动时 main.cpp 会把存下来的偏好喂进来一次,
-    // 若是空串(从没选过)这里就静悄悄地过去 —— 否则每次启动都会白白
-    // 把声卡拉起来,还会在日志里留一行看着像"用户切换了设备"的记录。
+    // 值没变就什么都不做。启动时 main.cpp 会把存下来的偏好喂进来一次，
+    // 若是空串（从没选过）这里就静悄悄地过去 —— 否则每次启动都会白白
+    // 把声卡拉起来，还会在日志里留一行看着像"用户切换了设备"的记录。
     if (m_webrtcManager->recordingDeviceName() == name)
         return;
 
@@ -178,7 +178,7 @@ QString SignalingChannel::speakerDevice() const {
 }
 
 // ============================
-// 连接的对齐:该建谁、该删谁
+// 连接的对齐：该建谁、该删谁
 // ============================
 
 bool SignalingChannel::shouldInitiate(const QString &peerId) const {
@@ -196,12 +196,12 @@ bool SignalingChannel::ensurePeer(const QString &peerId) {
     if (m_webrtcManager == nullptr || peerId.isEmpty())
         return false;
 
-    // 建连前把当前的 ICE 配置(STUN/TURN)交给 WebrtcManager。
+    // 建连前把当前的 ICE 配置（STUN/TURN）交给 WebrtcManager。
     //
     // 放这里而不是 syncPeers():ensurePeer 是**唯一**的建连入口 ——
-    // syncPeers() 走它,收到 offer 的 onMessage() 也直接走它(那条路根本不经过
-    // syncPeers),放别处会漏。QList 隐式共享,这个赋值是 O(1);
-    // 配置只在 CreatePeerConnection 那一刻生效,已连上的对端不受影响。
+    // syncPeers() 走它，收到 offer 的 onMessage() 也直接走它(那条路根本不经过
+    // syncPeers),放别处会漏。QList 隐式共享，这个赋值是 O(1);
+    // 配置只在 CreatePeerConnection 那一刻生效，已连上的对端不受影响。
     if (m_session != nullptr)
         m_webrtcManager->setIceServers(m_session->iceServers());
 
@@ -211,7 +211,7 @@ bool SignalingChannel::ensurePeer(const QString &peerId) {
     if (!m_webrtcManager->createPeerConnection(peerId))
         return false;
 
-    // 一个对端现在有两条连接,各自独立协商,所以要分别监听它们的信号。
+    // 一个对端现在有两条连接，各自独立协商，所以要分别监听它们的信号。
     for (LinkKind kind : {LinkKind::Voice, LinkKind::Media}) {
         PeerLink *link = m_webrtcManager->peer(peerId, kind);
         if (link == nullptr)
@@ -255,7 +255,7 @@ void SignalingChannel::syncPeers() {
         if (!shouldInitiate(peerId))
             continue;
 
-        // 两条连接各自独立发起 —— 它们是两次完全独立的 SDP 协商,
+        // 两条连接各自独立发起 —— 它们是两次完全独立的 SDP 协商，
         // 各有各的 offer/answer/ICE,状态也互不相干。
         for (LinkKind kind : {LinkKind::Voice, LinkKind::Media}) {
             const QString key = offerKey(peerId, linkKindId(kind));
@@ -294,10 +294,10 @@ void SignalingChannel::onRoomLeft() {
 }
 
 // ============================
-// 出站:WebRTC -> 信令
+// 出站：WebRTC -> 信令
 // ============================
 //
-// 每条消息都带 peerId(编码进 "to" 字段),服务端据此定向转发,
+// 每条消息都带 peerId(编码进 "to" 字段),服务端据此定向转发，
 // 不再需要"猜对端是谁"。
 
 void SignalingChannel::onOfferCreated(const QString &peerId, const QString &link,
@@ -319,11 +319,11 @@ void SignalingChannel::onIceCandidateCreated(const QString &peerId,
 }
 
 // ============================
-// 入站:信令 -> WebRTC
+// 入站：信令 -> WebRTC
 // ============================
 //
 // 每条消息的 from 字段就是这条信令属于哪个对端。
-// 路由不需要状态,从消息本身读出来即可 —— 这也是为什么
+// 路由不需要状态，从消息本身读出来即可 —— 这也是为什么
 // SignalingChannel 里没有任何"当前对端"之类的成员。
 
 void SignalingChannel::onMessage(const QString &text) {
@@ -338,7 +338,7 @@ void SignalingChannel::onMessage(const QString &text) {
             return;
 
         // 对端先发起了。即使按规则"该我发起",也照样收下 ——
-        // 死锁的破解就在这一步(见 shouldInitiate 的说明)。
+        // 死锁的破解就在这一步（见 shouldInitiate 的说明）。
         if (!ensurePeer(from))
             return;
 
@@ -357,8 +357,8 @@ void SignalingChannel::onMessage(const QString &text) {
 
         auto *link = m_webrtcManager->peer(from, linkKindOf(message->link));
         if (link == nullptr) {
-            // 收到了一个我们不认识的 answer —— 说明它对应的 offer 不是我们发的,
-            // 或者连接已经被拆了。静默忽略,不新建连接(否则会凭空多出一条)。
+            // 收到无法识别的 answer——说明其对应的 offer 并非本端发出，
+            // 或连接已被拆除。静默忽略，不新建连接（否则会凭空产生一条）。
             LOG_WARN("Signaling") << "忽略来自未知连接的回答:" << from << ":" << message->link;
             return;
         }
@@ -372,8 +372,8 @@ void SignalingChannel::onMessage(const QString &text) {
         if (from.isEmpty())
             return;
 
-        // ICE 与 SDP 是两条独立通道,候选可能先于 offer 到达。
-        // 这里若连接还不存在就先丢掉 —— 重新收集的候选随后就到,
+        // ICE 与 SDP 是两条独立通道，候选可能先于 offer 到达。
+        // 这里若连接还不存在就先丢掉 —— 重新收集的候选随后就到，
         // 而为一条可能永远不来的 offer 提前建连接是更糟的赌注。
         auto *link = m_webrtcManager->peer(from, linkKindOf(message->link));
         if (link == nullptr)
@@ -399,15 +399,15 @@ void SignalingChannel::onPeerConnected(const QString &peerId, const QString &lin
 }
 
 void SignalingChannel::onPeerClosed(const QString &peerId, const QString &link) {
-    // 两条连接各自会发这个信号 —— 一条断了不代表对端没了,所以这里不
-    // 直接对外报"对端断开",只记日志。真正判断对端是否还在,看成员表。
+    // 两条连接各自会发这个信号 —— 一条断了不代表对端没了，所以这里不
+    // 直接对外报"对端断开",只记日志。真正判断对端是否还在，看成员表。
     LOG_DEBUG("Signaling") << "对端" << peerId << "的" << link << "连接已关闭";
 }
 
 void SignalingChannel::onPeerError(const QString &peerId, const QString &link,
                                    const QString &message) {
-    // 连接级错误(ICE 失败、协商失败)不弹给用户:网状网里一个人掉线
-    // 不该打断其他人。只报给上层,由它决定怎么处理。
+    // 连接级错误（ICE 失败、协商失败）不弹给用户：网状网里一个人掉线
+    // 不该打断其他人。只报给上层，由它决定怎么处理。
     LOG_ERROR("Signaling") << "对端" << peerId << "的" << link << "连接出错:" << message;
     emit errorOccurred(message);
 }

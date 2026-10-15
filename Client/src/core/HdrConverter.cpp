@@ -12,19 +12,19 @@
 
 namespace {
 
-// 色调映射链。这是 mpv 那套(libplacebo),不是手搓的 —— 实测差距很大:
+// 色调映射链。这是 mpv 那套（libplacebo）,不是手搓的 —— 实测差距很大：
 //   libplacebo bt.2390:亮度 167.36 / 彩度 14.43(无损参考是 167.34 / 14.45)
 //   手搓 hable+npl=100:亮度 150.04 / 彩度 13.86(亮度低 10%)
-// 三个关键点:
-//   gamut_mode=perceptual —— BT.2020 → BT.709 按感知映射,而不是硬裁
-//   peak_detect=1  —— 逐帧检测实际峰值亮度(动态映射)
+// 三个关键点：
+//   gamut_mode=perceptual —— BT.2020 → BT.709 按感知映射，而不是硬裁
+//   peak_detect=1  —— 逐帧检测实际峰值亮度（动态映射）
 //   format=yuv420p —— 输出 8bit SDR
 const char *kTonemapFilter =
     "libplacebo=tonemapping=bt.2390:gamut_mode=perceptual:peak_detect=1:"
     "colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:format=yuv420p";
 
-// 目标码率的上下限(kbps)。下限 4000:再低 1080p 的动态画面会糊;
-// 上限 16000:再高对"看一遍"没意义,只会把文件撑大
+// 目标码率的上下限（kbps）。下限 4000:再低 1080p 的动态画面会糊；
+// 上限 16000:再高对"看一遍"没意义，只会把文件撑大
 constexpr int kMinBitrateKbps = 4000;
 constexpr int kMaxBitrateKbps = 16000;
 
@@ -45,7 +45,7 @@ HdrConverter::~HdrConverter()
             process->waitForFinished(1000);
         }
     }
-    // 析构里不打日志:main() 里这些对象是在 Log::shutdown() 之后才析构的
+    // 析构里不打日志：main() 里这些对象是在 Log::shutdown() 之后才析构的
 }
 
 bool HdrConverter::promptVisible() const
@@ -57,7 +57,7 @@ qint64 HdrConverter::estimatedBytes() const
 {
     if (m_durationMs <= 0)
         return 0;
-    // 码率(kbps) × 时长(秒) / 8 → 字节
+    // 码率（kbps） × 时长（秒） / 8 → 字节
     return static_cast<qint64>(targetBitrateKbps()) * 1000 / 8 * (m_durationMs / 1000);
 }
 
@@ -68,8 +68,8 @@ QUrl HdrConverter::outputUrl() const
 
 int HdrConverter::targetBitrateKbps() const
 {
-    // 跟着源走(×2 留余量),但夹在上下限之间。
-    // 实测:2.5Mbps 就已经和"未经编码的滤波输出"测不出差别,4M 是留了安全边际
+    // 跟着源走（×2 留余量）,但夹在上下限之间。
+    // 实测：2.5Mbps 就已经和"未经编码的滤波输出"测不出差别，4M 是留了安全边际
     const int fromSource = static_cast<int>(m_sourceBitrateBps * 2 / 1000);
     return qBound(kMinBitrateKbps, fromSource, kMaxBitrateKbps);
 }
@@ -85,7 +85,7 @@ void HdrConverter::check(const QUrl &fileUrl)
 
     const QString path = fileUrl.toLocalFile();
     if (path.isEmpty()) {
-        // 远端画面 / 直链流:没有本地文件可查,清空状态
+        // 远端画面 / 直链流：没有本地文件可查，清空状态
         if (!m_sourcePath.isEmpty()) {
             resetForNewSource();
             emit stateChanged();
@@ -115,7 +115,7 @@ void HdrConverter::check(const QUrl &fileUrl)
         }
     });
 
-    // 只问需要的三个字段:传输曲线(判断 HDR)、时长、码率(定转码目标)
+    // 只问需要的三个字段：传输曲线（判断 HDR）、时长、码率（定转码目标）
     m_probe->setProgram(m_toolchain->ffprobePath());
     m_probe->setArguments({
         QStringLiteral("-v"), QStringLiteral("error"),
@@ -159,8 +159,8 @@ void HdrConverter::handleProbeFinished()
             m_durationMs = static_cast<qint64>(
                 text.section(QLatin1Char('='), 1).trimmed().toDouble() * 1000);
         } else if (text.startsWith(QLatin1String("bit_rate="))) {
-            // stream 的 bit_rate 经常是 N/A,那行会被 ffprobe 直接省略;
-            // format 的那条一般有,当兜底
+            // stream 的 bit_rate 经常是 N/A,那行会被 ffprobe 直接省略；
+            // format 的那条一般有，当兜底
             const qint64 rate = text.section(QLatin1Char('='), 1).trimmed().toLongLong();
             if (rate > 0)
                 m_sourceBitrateBps = rate;
@@ -191,7 +191,7 @@ void HdrConverter::convert()
         return;
     }
 
-    // 输出放在源文件旁边,名字加 _SDR 后缀
+    // 输出放在源文件旁边，名字加 _SDR 后缀
     const QFileInfo info(m_sourcePath);
     m_outputPath = info.absolutePath() + QLatin1Char('/') + info.completeBaseName()
                    + QStringLiteral("_SDR.mkv");
@@ -221,7 +221,7 @@ void HdrConverter::convert()
 
     connect(m_convert, &QProcess::readyReadStandardOutput, this, [this]() {
         m_progressBuffer += QString::fromUtf8(m_convert->readAllStandardOutput());
-        // 按行切开处理,最后一段不完整的留在缓冲里等下一批
+        // 按行切开处理，最后一段不完整的留在缓冲里等下一批
         int newline = -1;
         while ((newline = m_progressBuffer.indexOf(QLatin1Char('\n'))) >= 0) {
             handleProgressLine(m_progressBuffer.left(newline).trimmed());
@@ -252,7 +252,7 @@ void HdrConverter::convert()
 
 void HdrConverter::handleProgressLine(const QString &line)
 {
-    // -progress 的输出形如:
+    // -progress 的输出形如：
     //     out_time_us=5088417
     //     speed=3.39x
     //     progress=continue
@@ -273,14 +273,14 @@ void HdrConverter::handleProgressLine(const QString &line)
 
 void HdrConverter::handleConvertFinished(int exitCode)
 {
-    // 别把局部变量叫 finished —— 会和同名信号撞上,`emit finished(...)` 直接编译不过
+    // 别把局部变量叫 finished —— 会和同名信号撞上，`emit finished(...)` 直接编译不过
     QProcess *process = m_convert;
     m_convert = nullptr;
     if (process != nullptr)
         process->deleteLater();
 
     const QFileInfo output(m_outputPath);
-    // 不看退出码:ffmpeg 有时非零退出但产物是完整的 —— 以"文件在且不为空"为准
+    // 不看退出码：ffmpeg 有时非零退出但产物是完整的 —— 以"文件在且不为空"为准
     if (exitCode != 0 || !output.exists() || output.size() <= 0) {
         const QStringList lines = m_outputTail.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
         fail(lines.isEmpty() ? QStringLiteral("转码失败(ffmpeg 退出码 %1)").arg(exitCode)
@@ -302,7 +302,7 @@ void HdrConverter::cancel()
 
     LOG_INFO("Hdr") << "取消转码";
     m_convert->kill();
-    // 半截的产物删掉,免得下次被当成"转好的"
+    // 半截的产物删掉，免得下次被当成"转好的"
     QFile::remove(m_outputPath);
     m_outputPath.clear();
     m_progress = -1;

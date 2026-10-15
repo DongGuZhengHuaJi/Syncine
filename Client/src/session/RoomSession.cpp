@@ -23,7 +23,7 @@ RoomSession::RoomSession(NetworkManager *networkManager, QObject *parent)
                 this, &RoomSession::onMessage);
     }
 
-    // 成员表一变就重算派生量,调用方不需要记得补 emit
+    // 成员表一变就重算派生量，调用方不需要记得补 emit
     connect(m_members, &MemberModel::changed,
             this, &RoomSession::refreshDerivedState);
 }
@@ -106,21 +106,20 @@ void RoomSession::enterRoom(const RoomSnapshot &snapshot) {
     m_roomName = snapshot.roomName;
     m_clientId = snapshot.clientId;
 
-    // ICE 配置必须存**在成员表之前**:m_members->reset() 会发 membersChanged,
-    // SignalingChannel 收到就 syncPeers() 建连。首次进房那次会被
-    // onMembersChanged 里的"不在房间就返回"挡掉,但**换房**时(已在房间 A
-    // 直接进房间 B)m_inRoom 仍是 true,那次建连会真的发生 —— 配置塞在后面
-    // 就拿着上一个房间的凭据去建了,而且表面上看不出任何异常。
+    // ICE 配置必须先于成员表赋值：m_members->reset() 会发出 membersChanged，
+    // SignalingChannel 收到后调 syncPeers() 建连。首次进房那次会被
+    // onMembersChanged 中「不在房间则返回」挡掉，但换房时（已在房间 A 直接进
+    // 房间 B）m_inRoom 仍为 true，该次建连会真实发生——若配置赋值在后，
+    // 就会带着上一个房间的凭据建连，且表面上无任何异常。
     m_iceServers = snapshot.iceServers;
 
-    // 服务端下发的 ICE 配置在这里落账,顺手记一行 —— 跨网络连不上时,
-    // "凭据到底下来没有"是第一个要确认的事(看日志比抓包快得多)。
-    // 放在收下的当下而不是建连的时候:一个人待在房间里是不会有 PeerConnection 的,
-    // 那种情况下也得看得见。
+    // ICE 配置在此落账并记录一行：跨网络连接失败时，「凭据是否下发」是需要
+    // 首先确认的事项。记录时机选在接收当下而非建连时——单独一人在房间内不会
+    // 建立 PeerConnection，该情况下也需要可见。
     //
-    // **只打 URL**:username/credential 是临时密钥,任何级别都不写进日志。
+    // 只记录 URL：username/credential 是临时密钥，任何级别都不写入日志。
     if (m_iceServers.isEmpty()) {
-        LOG_WARN("Room") << "服务端没有下发 ICE 配置,只能靠直连(对称 NAT 后面的对端会连不上)";
+        LOG_WARN("Room") << "服务端未下发 ICE 配置，只能直连（对称 NAT 后的对端将无法连接）";
     } else {
         QStringList groups;
         for (const IceServerConfig &server : m_iceServers) {
@@ -156,13 +155,13 @@ void RoomSession::enterRoom(const RoomSnapshot &snapshot) {
     if (!wasInRoom)
         emit inRoomChanged();
 
-    // 播放列表随房间状态一起下发:队列 + 现在放到第几条
+    // 播放列表随房间状态一并下发：队列 + 当前条目
     m_playlist->reset(snapshot.playlist, snapshot.currentIndex);
 
-    // 先发 entered,让 PlaybackSync 有机会上报自己的视频状态
+    // 先发 entered，使 PlaybackSync 有机会上报自身的视频状态
     emit entered();
 
-    // 服务端附带房间当前播放状态,新成员据此对齐:先 seek 再 play/pause
+    // 服务端附带房间当前播放状态，新成员据此对齐：先 seek 再 play/pause
     if (snapshot.hasState) {
         emit playbackCommandReceived(PlaybackAction::Seek, snapshot.position);
         emit playbackCommandReceived(
@@ -170,17 +169,23 @@ void RoomSession::enterRoom(const RoomSnapshot &snapshot) {
             snapshot.position);
     }
 
-    // 入房时房间可能已经在放某一条了 —— 通知下游去解析并加载
-    // (本地模式下就是"请选择你这台机器上的对应文件")
+    // 入房时房间可能已在播放某一条，通知下游解析并加载
+    // （本地模式下即为「请选择本机对应的文件」）
     const QString currentItem = m_playlist->currentItemId();
     if (!currentItem.isEmpty())
         emit playlistSwitched(currentItem);
+
+    LOG_INFO("Room") << "进入房间完成: roomId=" << m_roomId
+                     << " mode=" << snapshot.mode
+                     << " 成员=" << snapshot.members.size()
+                     << " 当前条目=" << (currentItem.isEmpty() ? "(无)" : currentItem);
 }
 
 void RoomSession::leaveRoom() {
     if (!m_inRoom)
         return;
 
+    LOG_INFO("Room") << "退出房间: roomId=" << m_roomId;
     clearRoomState();
     emit left();
 }
@@ -189,9 +194,9 @@ void RoomSession::clearRoomState() {
     m_roomId.clear();
     m_roomName.clear();
     m_inRoom = false;
-    m_iceServers.clear();   // 凭据是跟着这次入房来的,退房就作废(反正下次进房会重新下发)
-    m_members->clear();     // 触发 refreshDerivedState,顺带修正 isHost
-    m_playlist->clear();    // 播放列表和本地文件映射都是跟着房间走的
+    m_iceServers.clear();   // 凭据随本次入房而来，退房即作废（下次进房会重新下发）
+    m_members->clear();     // 触发 refreshDerivedState，同时修正 isHost
+    m_playlist->clear();    // 播放列表与本地文件映射都随房间走
 
     const bool modeChanged = m_roomMode != RoomMode::Sync;
     m_roomMode = RoomMode::Sync;
@@ -215,15 +220,18 @@ void RoomSession::clearRoomState() {
 
 void RoomSession::setRoomMode(RoomMode mode) {
     if (!m_inRoom) {
-        emit errorOccurred("你不在房间里");
+        LOG_WARN("Room") << "切换模式被拒：当前不在房间中";
+        emit errorOccurred("当前不在房间中");
         return;
     }
     if (!isHost()) {
+        LOG_WARN("Room") << "切换模式被拒：非房主";
         emit errorOccurred("只有房主可以更改房间模式");
         return;
     }
 
-    // 本地状态等服务端的 room_mode_changed 广播回来再改,保证全员一致
+    LOG_INFO("Room") << "请求切换房间模式: " << modeToWire(mode);
+    // 本地状态等服务端的 room_mode_changed 广播回来再改，保证全员一致
     if (!send(Protocol::encodeSetRoomMode(modeToWire(mode))))
         emit errorOccurred("未连接到服务器");
 }
@@ -234,7 +242,8 @@ void RoomSession::sendChat(const QString &text) {
         return;
 
     if (!m_inRoom) {
-        emit errorOccurred("你不在房间里");
+        LOG_WARN("Room") << "发送聊天被拒：当前不在房间中";
+        emit errorOccurred("当前不在房间中");
         return;
     }
 
@@ -280,12 +289,14 @@ void RoomSession::addLocalFile(const QUrl &fileUrl) {
 
     const QString itemId = QUuid::createUuid().toString(QUuid::WithoutBraces);
 
-    // **先记本地映射再发网络**:服务端会立刻把权威列表广播回来(包括发给我自己),
-    // 那一刻本机必须已经能把"这条 → 我的文件"解析出来,否则会闪一下"未匹配"
+    // 必须先记本地映射再发网络：服务端会立即把权威列表广播回来（含发给自身），
+    // 那一刻本机必须已能将「该条 → 我的文件」解析出来，否则会短暂显示为未匹配
     m_playlist->setLocalFile(itemId, path);
 
+    LOG_INFO("Room") << "添加本地文件到播放列表: itemId=" << itemId
+                     << " 文件=" << QFileInfo(path).fileName();
     send(Protocol::encodePlaylistAdd(itemId, QFileInfo(path).fileName(),
-                                     QString(), 0, /*live=*/false, /*quality=*/0));
+                                     QString(), 0, /*live=*/false, /*spec=*/QString()));
     reportPlaylistFile(itemId, path);
 }
 
@@ -293,16 +304,17 @@ void RoomSession::reportPlaylistFile(const QString &itemId, const QString &path)
     if (!m_inRoom || itemId.isEmpty())
         return;
 
-    // 只有同步模式需要"匹配":共享模式里条目就是房主自己的文件,
-    // 网链模式大家读的是同一个 URL,都不存在"你有没有"这个问题
+    // 仅同步模式需要「匹配」：共享模式下条目就是房主自己的文件，
+    // 网链模式各端读同一 URL，都不存在「是否持有」的问题
     if (m_roomMode != RoomMode::Sync)
         return;
 
     const QString hash = MediaHash::forFile(path);
     if (hash.isEmpty()) {
-        // 文件读不了(被删/没权限)—— 如实报"没有",让状态显示成未匹配,
-        // 而不是报个空哈希冒充"有"
-        LOG_WARN("Playlist") << "指定的文件读不了,按未匹配上报:" << path;
+        // 文件不可读（被删/无权限）时如实上报「没有」，使状态显示为未匹配，
+        // 而不是上报空哈希冒充「有」
+        LOG_WARN("Playlist") << "文件不可读，按未匹配上报: itemId=" << itemId
+                             << " 路径=" << path;
     }
 
     send(Protocol::encodePlaylistStatus(itemId, !hash.isEmpty(), hash));
@@ -314,6 +326,10 @@ void RoomSession::addUrlWithId(const QString &itemId, const QString &url,
     if (!m_inRoom || url.isEmpty() || itemId.isEmpty())
         return;
 
+    LOG_INFO("Room") << "添加网链条目: itemId=" << itemId
+                     << " live=" << (live ? 1 : 0)
+                     << " spec=" << (spec.isEmpty() ? "(默认)" : spec)
+                     << " title=" << title;
     send(Protocol::encodePlaylistAdd(itemId,
                                      title.isEmpty() ? url : title,
                                      url, durationMs, live, spec));
@@ -324,9 +340,9 @@ void RoomSession::addUrl(const QString &url, const QString &title, bool live,
     if (!m_inRoom || url.isEmpty())
         return;
 
-    // itemId 由 URL 算:**同一链接 = 同一个条目**,各端各加一次不会变成两条
-    // (服务端查重按 itemId 比)。哈希而不是原样带 url:它要进协议。
-    // 剧集不用这条 —— 它们用平台集号(见 FormatModel 的 Episodes::itemId)
+    // itemId 由 URL 计算：同一链接即同一条目，各端各加一次不会变成两条
+    // （服务端按 itemId 查重）。使用哈希而非原样携带 url，因为该值要进入协议。
+    // 剧集不走此路径，它们使用平台集号（见 FormatModel 的 Episodes::itemId）。
     const QByteArray digest = QCryptographicHash::hash(url.toUtf8(),
                                                        QCryptographicHash::Sha1);
     const QString itemId = QStringLiteral("url")
@@ -342,12 +358,13 @@ void RoomSession::assignLocalFile(const QString &itemId, const QUrl &fileUrl) {
     if (path.isEmpty())
         return;
 
+    LOG_INFO("Room") << "为条目指定本地文件: itemId=" << itemId << " 文件=" << path;
     m_playlist->setLocalFile(itemId, path);
-    // 每次指定/重选都重新上报(哈希可能变了 —— 用户可能换了个文件)
+    // 每次指定或重选都重新上报（用户可能更换了文件，哈希随之改变）
     reportPlaylistFile(itemId, path);
 
-    // 补的正好是当前条目(比如入房后才发现要选文件)→ 立刻重新解析并加载。
-    // 复用 playlistSwitched 这条路径,下游不用再加一个分支。
+    // 若补上的正是当前条目（例如入房后才发现需要选文件），立即重新解析并加载。
+    // 复用 playlistSwitched 这条路径，下游无需新增分支。
     if (itemId == m_playlist->currentItemId())
         emit playlistSwitched(itemId);
 }
@@ -356,6 +373,7 @@ void RoomSession::removeFromPlaylist(const QString &itemId) {
     if (!m_inRoom || itemId.isEmpty())
         return;
 
+    LOG_INFO("Room") << "从播放列表移除条目: itemId=" << itemId;
     send(Protocol::encodePlaylistRemove(itemId));
 }
 
@@ -363,6 +381,7 @@ void RoomSession::switchTo(const QString &itemId) {
     if (!m_inRoom || itemId.isEmpty())
         return;
 
+    LOG_INFO("Room") << "请求切换到条目: itemId=" << itemId;
     send(Protocol::encodePlaylistSwitch(itemId));
 }
 
@@ -373,8 +392,8 @@ void RoomSession::switchTo(const QString &itemId) {
 void RoomSession::onMessage(const QString &text) {
     const std::optional<Protocol::Message> message = Protocol::decode(text);
     if (!message) {
-        // 解析失败由 SessionController 报告(它是消息管道的唯一入口),
-        // 这里静默跳过,避免同一个错误弹两次
+        // 解析失败由 SessionController 上报（它是消息管道的唯一入口），
+        // 此处静默跳过，避免同一错误提示两次
         return;
     }
 
@@ -430,7 +449,7 @@ void RoomSession::onMessage(const QString &text) {
 
     default:
         // welcome / room_created / room_joined / room_left / error
-        // 属于会话建立阶段,归 SessionController
+        // 属会话建立阶段，由 SessionController 处理
         break;
     }
 }
@@ -443,19 +462,26 @@ void RoomSession::handleMemberJoined(const Protocol::Message &message) {
     member.loaded = message.loaded;
     member.duration = message.duration;
 
-    // 自己加入时 room_joined 已经带了完整名单,这里会重复;
+    // 自身加入时 room_joined 已携带完整名单，此处会重复；
     // MemberModel::append 对已存在的 clientId 直接忽略
-    if (!m_members->append(member))
+    if (!m_members->append(member)) {
+        LOG_DEBUG("Room") << "成员已存在，忽略重复的加入通知: " << member.nickname;
         return;
+    }
 
+    LOG_INFO("Room") << "成员加入: " << member.nickname
+                     << (member.isHost ? "（房主）" : "");
     emit memberJoined(member.nickname);
 }
 
 void RoomSession::handleMemberLeft(const Protocol::Message &message) {
     const std::optional<Member> removed = m_members->remove(message.clientId);
-    if (!removed)
+    if (!removed) {
+        LOG_DEBUG("Room") << "成员离开通知对应的成员不存在: clientId=" << message.clientId;
         return;
+    }
 
+    LOG_INFO("Room") << "成员离开: " << removed->nickname;
     emit memberLeft(removed->nickname);
 }
 
@@ -466,8 +492,8 @@ void RoomSession::handlePlayback(const Protocol::Message &message) {
 void RoomSession::handleVideoStatus(const Protocol::Message &message) {
     m_members->setVideoStatus(message.clientId, message.loaded, message.duration);
 
-    // 条目时长在添加时是不知道的 —— 谁把它加载起来,谁就顺手把时长告诉列表。
-    // video_status 不带 itemId,但只有"当前条目"会被加载,所以对应到当前条目。
+    // 条目时长在添加时未知，由加载它的成员一并告知列表。
+    // video_status 不带 itemId，但只有当前条目会被加载，故对应到当前条目。
     if (message.loaded && message.duration > 0) {
         const QString itemId = m_playlist->currentItemId();
         if (!itemId.isEmpty())
@@ -476,20 +502,22 @@ void RoomSession::handleVideoStatus(const Protocol::Message &message) {
 }
 
 void RoomSession::handlePlaylistChanged(const Protocol::Message &message) {
+    LOG_INFO("Room") << "播放列表更新: 条目数=" << message.playlist.size()
+                     << " currentIndex=" << message.currentIndex;
     m_playlist->setEntries(message.playlist, message.currentIndex);
 }
 
 void RoomSession::handlePlaylistSwitched(const Protocol::Message &message) {
     m_playlist->setCurrentIndex(message.currentIndex);
 
-    // 以 model 里的状态为准(itemId 和 currentIndex 一致);
-    // 列表空了就是空串 —— 下游据此把播放器卸载掉
+    // 以 model 中的状态为准（itemId 与 currentIndex 一致）；
+    // 列表为空时即为空串，下游据此卸载播放器
     emit playlistSwitched(m_playlist->currentItemId());
 }
 
 void RoomSession::handlePlaylistStatus(const Protocol::Message &message) {
-    // 服务端聚合好的"每条匹配到哪一步",直接铺到 model 上。
-    // 打日志是为了排查"为什么这条显示未匹配" —— 光看界面看不出是谁还没选文件
+    // 服务端已聚合好的各条匹配状态，直接铺到 model 上。
+    // 记录日志是为了排查「该条为何显示未匹配」——仅看界面无法判断是谁尚未选文件
     for (const PlaylistEntry &entry : message.playlist)
         LOG_DEBUG("Playlist") << "匹配状态:" << entry.itemId.left(8) << "→" << entry.status;
 
@@ -502,6 +530,8 @@ void RoomSession::handleVideoMismatch(const Protocol::Message &message) {
         return;
     }
 
+    LOG_INFO("Room") << "视频一致性变化: mismatched=" << (message.videoMismatched ? 1 : 0)
+                     << " shortestDuration=" << message.shortestDuration;
     m_videoMismatched = message.videoMismatched;
     m_shortestDuration = message.shortestDuration;
     emit videoMismatchChanged();
@@ -522,10 +552,16 @@ void RoomSession::refreshDerivedState() {
 }
 
 bool RoomSession::send(const QString &text) {
-    if (m_networkManager == nullptr)
+    if (m_networkManager == nullptr) {
+        LOG_WARN("Room") << "网络模块不可用，消息未发送";
         return false;
+    }
 
-    return m_networkManager->sendMessage(text);
+    if (!m_networkManager->sendMessage(text)) {
+        LOG_WARN("Room") << "消息发送失败（连接不可用）";
+        return false;
+    }
+    return true;
 }
 
 QString RoomSession::modeToWire(RoomMode mode) {

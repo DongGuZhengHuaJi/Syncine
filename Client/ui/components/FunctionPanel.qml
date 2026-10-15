@@ -3,17 +3,17 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import SyncineApp
 
-// 右侧功能框:评论 / 播放列表 / 成员 三个页签,顶部切换。
+// 右侧功能框：评论 / 播放列表 / 成员 三个页签，顶部切换。
 //
 // 评论和弹幕是**同一份消息**(messages 由 RoomPage 传入):
-// 这里发的会飘过画面,弹幕框发的会出现在这个列表里。
+// 这里发的会飘过画面，弹幕框发的会出现在这个列表里。
 Rectangle {
     id: root
 
     property var messages: null
     property string currentTab: "comment"
 
-    // 共享模式下只有房主能添加:别人的机器上没有那个文件,加进来谁也播不了
+    // 共享模式下只有房主能添加：别人的机器上没有那个文件，加进来谁也播不了
     readonly property bool canAddToPlaylist: roomSession.roomMode !== RoomSession.Share
                                              || roomSession.isHost
 
@@ -22,7 +22,7 @@ Rectangle {
     signal addRequested()
     // 网链模式加条目要粘链接、挑画质 → 由 RoomPage 弹那个两页的窗口
     signal urlAddRequested()
-    // 要给某一条指定本机文件(本地模式下每人补自己的那一份)
+    // 要给某一条指定本机文件（本地模式下每人补自己的那一份）
     signal localFileRequested(string itemId)
 
     color: Style.card
@@ -30,7 +30,7 @@ Rectangle {
     border.width: 1
     border.color: Style.border
 
-    // 复制房间号要用剪贴板,而 QML 里能碰到剪贴板的只有 TextField/TextEdit
+    // 复制房间号要用剪贴板，而 QML 里能碰到剪贴板的只有 TextField/TextEdit
     TextField {
         id: clipboard
         visible: false
@@ -124,8 +124,8 @@ Rectangle {
                         }
                     }
 
-                    // body 只按 top 定位,高度由正文撑 ——
-                    // 如果改成 verticalCenter 就会和父项高度互相依赖,绑定成环。
+                    // body 只按 top 定位，高度由正文撑 ——
+                    // 如果改成 verticalCenter 就会和父项高度互相依赖，绑定成环。
                     Item {
                         id: body
                         visible: model.who !== "系统"
@@ -260,37 +260,37 @@ Rectangle {
 
         // ── 播放列表 ────────────────────────────────
         //
-        // 三种模式**各存一份**列表(服务端分的),这里显示的是当前模式那一份:
-        //   同步模式  房间共享的队列,每条要显示"大家都有没有"
-        //   共享模式  只有房主有(条目就是他本机的文件),没有"匹配"这回事
-        //   网链模式  房间共享的队列,大家读同一个 URL
+        // 三种模式**各存一份**列表（服务端分的）,这里显示的是当前模式那一份：
+        //   同步模式  房间共享的队列，每条要显示"大家都有没有"
+        //   共享模式  只有房主有（条目就是他本机的文件）,没有"匹配"这回事
+        //   网链模式  房间共享的队列，大家读同一个 URL
         Item {
             id: playlistTab
             Layout.fillWidth: true
             Layout.fillHeight: true
             visible: root.currentTab === "playlist"
 
-            // "匹配"只在同步模式下有意义 —— 共享模式里条目本来就是房主自己的文件,
-            // 网链模式大家读的是同一个 URL,都不存在"你有没有这一条"
+            // 匹配仅在同步模式下有意义——共享模式中条目本就是房主自己的文件，
+            // 网链模式各端读取同一 URL，均不存在「是否持有该条」的问题
             readonly property bool showsMatching: roomSession.roomMode === RoomSession.Sync
 
-            // 网链模式:加条目要粘链接、挑画质,交给 RoomPage 的弹窗
+            // 网链模式：加条目要粘链接、挑画质，交给 RoomPage 的弹窗
             // (同步模式还是走"选本地文件"的对话框)
             readonly property bool isUrlMode: roomSession.roomMode === RoomSession.Url
 
             function subtitleFor(dur, url, isLive, label) {
                 const parts = []
-                // 直播没有时长:标"直播"
+                // 直播没有时长：标"直播"
                 parts.push(isLive ? "直播" : (dur > 0 ? Style.formatTime(dur) : "--:--"))
                 parts.push(url !== "" ? "网链" : "本地文件")
-                // 画质标签("1080P"/"手选 720P")。最高画质和直播不显示 ——
-                // 免得每条都拖一句看不出信息的话(specLabel 里那两种就是它们)
+                // 画质标签（"1080P"/"手选 720P"）。最高画质和直播不显示 ——
+                // 免得每条都拖一句看不出信息的话（specLabel 里那两种就是它们）
                 if (url !== "" && label !== "" && label !== "最高画质" && label !== "直播")
                     parts.push(label)
                 return parts.join(" · ")
             }
 
-            // 匹配状态是**服务端聚合**后下发的(它才知道所有成员的情况):
+            // 匹配状态是**服务端聚合**后下发的（它才知道所有成员的情况）:
             //   全员都有且内容一致 → 绿"已匹配"
             //   还有人没有         → 灰"未匹配"
             //   都有但内容不一样   → 红"不同步"
@@ -310,7 +310,7 @@ Rectangle {
                 return Style.textFaint
             }
 
-            // 头部:数量 + 权限说明 + 添加
+            // 头部：数量 + 权限说明 + 添加
             RowLayout {
                 id: listHead
                 anchors.left: parent.left
@@ -343,7 +343,7 @@ Rectangle {
                         onClicked: {
                             if (!root.canAddToPlaylist)
                                 return
-                            // 网链模式:弹"粘链接 + 选画质"的窗口;其它模式:选本机文件
+                            // 网链模式：弹"粘链接 + 选画质"的窗口；其它模式：选本机文件
                             if (playlistTab.isUrlMode)
                                 root.urlAddRequested()
                             else
@@ -387,7 +387,7 @@ Rectangle {
                         acceptedButtons: Qt.NoButton
                     }
 
-                    // 行内容固定在顶部 54px:失败时下面还要摊开错误信息,
+                    // 行内容固定在顶部 54px:失败时下面还要摊开错误信息，
                     // 不能让这一行跟着整块高度一起居中
                     RowLayout {
                         anchors.left: parent.left
@@ -434,7 +434,7 @@ Rectangle {
                                     color: Style.textFaint
                                 }
 
-                                // 匹配状态:只有同步模式显示
+                                // 匹配状态：只有同步模式显示
                                 Text {
                                     visible: playlistTab.showsMatching
                                     text: playlistTab.statusText(status)
@@ -444,7 +444,7 @@ Rectangle {
                             }
                         }
 
-                        // 网链模式:当前条目的准备状态(解析中/下载中 42%/合并中/失败)
+                        // 网链模式：当前条目的准备状态（解析中/下载中 42%/合并中/失败）
                         Text {
                             visible: playlistTab.isUrlMode && isCurrent
                                      && playbackSync.downloadStageText !== ""
@@ -455,7 +455,7 @@ Rectangle {
                                    ? Style.danger : Style.textFaint
                         }
 
-                        // 失败时给一个重试(每个人下自己的那份,所以谁都能点)
+                        // 失败时给一个重试（每个人下自己的那份，所以谁都能点）
                         Text {
                             visible: playlistTab.isUrlMode && isCurrent
                                      && playbackSync.downloadStage === "failed"
@@ -471,7 +471,7 @@ Rectangle {
                             }
                         }
 
-                        // 当前条目:一个状态标记,不给操作
+                        // 当前条目：一个状态标记，不给操作
                         Rectangle {
                             visible: isCurrent
                             Layout.preferredWidth: 42
@@ -488,7 +488,7 @@ Rectangle {
                             }
                         }
 
-                        // 非当前条目:房主可以切过去
+                        // 非当前条目：房主可以切过去
                         Text {
                             visible: !isCurrent && roomSession.isHost
                             Layout.alignment: Qt.AlignVCenter
@@ -503,9 +503,9 @@ Rectangle {
                             }
                         }
 
-                        // 指定/重选本机文件:同步模式下每个人给自己补那一份。
+                        // 指定/重选本机文件：同步模式下每个人给自己补那一份。
                         // 已经选过的条目悬停时会变成"重新选择" —— 换了版本、
-                        // 文件挪了位置都要能改,不能一次定终身
+                        // 文件挪了位置都要能改，不能一次定终身
                         Text {
                             visible: playlistTab.showsMatching
                                      && (!hasLocalFile || rowHover.containsMouse)
@@ -521,7 +521,7 @@ Rectangle {
                             }
                         }
 
-                        // 删除:只有房主,且悬停在这一行时才出现,平时不占视觉
+                        // 删除：只有房主，且悬停在这一行时才出现，平时不占视觉
                         Text {
                             visible: roomSession.isHost && rowHover.containsMouse
                             Layout.alignment: Qt.AlignVCenter
@@ -558,7 +558,7 @@ Rectangle {
 
                         Text {
                             width: parent.width
-                            text: "如果反复失败,试试更新 yt-dlp(命令见 tools/README.md)"
+                            text: "若反复失败，请更新 yt-dlp（命令见 tools/README.md）"
                             wrapMode: Text.Wrap
                             font.pixelSize: 11
                             color: Style.textFaint
@@ -595,7 +595,7 @@ Rectangle {
                     width: parent.width
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
-                    text: root.canAddToPlaylist ? "添加一部影片,大家一起看"
+                    text: root.canAddToPlaylist ? "添加一部影片，大家一起看"
                                                 : ""
                     font.pixelSize: 11
                     color: Style.textFaint
@@ -662,7 +662,7 @@ Rectangle {
                                     color: Style.textPrimary
                                 }
 
-                                // 房主用品牌粉,和主色区分开
+                                // 房主用品牌粉，和主色区分开
                                 Rectangle {
                                     visible: isHost
                                     anchors.verticalCenter: parent.verticalCenter
@@ -793,7 +793,7 @@ Rectangle {
         }
     }
 
-    // ── 页签按钮(只有这个文件用到,就近定义) ──────────
+    // ── 页签按钮（只有这个文件用到，就近定义） ──────────
     component PanelTab: Item {
         id: tab
 

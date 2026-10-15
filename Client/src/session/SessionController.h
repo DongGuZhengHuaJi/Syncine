@@ -1,18 +1,17 @@
 //
-// 会话控制器 —— 只负责「进入房间的过程」,不负责「房间里的状态」。
+// 会话控制器：只负责「进入房间的过程」，不负责「房间内的状态」。
 //
-// 为什么要和 RoomSession 分开:
-//   建连、等待应答、失败重试都是**瞬态过程**,房间成员表是**稳态状态**。
-//   两者混在一个类里,就会出现一个 isConnecting 同时表示
-//   "正在连服务器"和"正在等房间应答"两种含义的情况。
+// 与 RoomSession 分开的原因：建连、等待应答、失败重试属于瞬态过程，
+// 而房间成员表属于稳态状态。两者混在一类中会导致同一个 isConnecting
+// 同时表示「正在连服务器」与「正在等房间应答」两种含义。
 //
-// 它负责:
-//   * WebSocket 的连接/断开时机(必要时自动发起连接)
+// 职责范围：
+//   * WebSocket 的连接与断开时机（必要时自动发起连接）
 //   * create_room / join_room / leave_room 的请求状态机
 //   * welcome / room_created / room_joined / room_left / error 这几类消息
 //
-// 因为管的是「过程」,入场成功后它就把结果(RoomSnapshot)交给 RoomSession,
-// 自己的待发状态立刻清空 —— 之后房间怎么变,它一概不关心。
+// 由于管理的是过程，入场成功后即将结果（RoomSnapshot）交给 RoomSession，
+// 自身的待发状态立即清空，此后不再关心房间的变化。
 //
 
 #ifndef SYNCINE_SESSIONCONTROLLER_H
@@ -34,7 +33,7 @@ class SessionController : public QObject {
     QML_ELEMENT
     QML_UNCREATABLE("由 main 创建并注入")
 
-    // 有请求在传输,界面据此禁用按钮
+    // 有请求正在传输，界面据此禁用按钮
     Q_PROPERTY(bool busy
                READ busy
                NOTIFY busyChanged)
@@ -90,7 +89,7 @@ private:
     NetworkManager *m_networkManager = nullptr;
     RoomSession *m_roomSession = nullptr;
 
-    QString m_clientId;     // welcome 握手拿到的身份
+    QString m_clientId;     // welcome 握手得到的身份
     QString m_nickname;
 
     PendingRequest m_pending = PendingRequest::None;

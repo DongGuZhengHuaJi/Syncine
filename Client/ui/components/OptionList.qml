@@ -1,23 +1,19 @@
 import QtQuick
 import SyncineApp
 
-// 可点击的单选行列表(设置页里的"日志级别""设备选择""默认画质"都用它)。
+// 可点击的单选行列表（设置页的「日志级别」「设备选择」「默认画质」均使用它）。
+// 自行实现是因为项目未引入 ComboBox/Switch，且下拉框在浅色卡片中观感不佳。
 //
-// 为什么自己写:项目里没有 ComboBox/Switch 这些控件,而下拉框在浅色卡片里
-// 也不好看。这个列表的写法来自 AddVideoDialog 里的画质行,抽出来两边共用。
-//
-// 用法:
+// 用法：
 //     OptionList {
 //         options: [{ label: "最高画质", value: 0 }, { label: "720P", value: 720 }]
 //         selectedValue: appSettings.defaultQuality
 //         onPicked: (value) => appSettings.setDefaultQuality(value)
 //     }
 //
-// 两条踩过的坑(改这个文件时别踩回去):
-//   · **用 Repeater + Column,不要用 ListView**。ListView 是 Flickable,没有
-//     隐式高度,放进自适应高度的容器(比如 Popup)里会整块塌成 0。
-//   · options 是 JS 数组/delegate 里**只有 modelData**,没有角色名
-//     (`model.label` 取不到值,那是 QAbstractListModel 才有的)。
+// 两处约束：**使用 Repeater + Column，不要用 ListView**（ListView 是 Flickable，
+// 无隐式高度，放入 Popup 等自适应容器会塌陷为 0）；options 是 JS 数组，
+// delegate 中**只有 modelData**、没有角色名（`model.label` 取不到值）。
 Column {
     id: root
 

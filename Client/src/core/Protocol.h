@@ -26,13 +26,13 @@ enum class MessageType {
     MemberLeft,
     Chat,
     Playback,
-    PlaybackPosition,   // 房主周期性广播的播放位置(观众据此画进度条)
+    PlaybackPosition,   // 房主周期性广播的播放位置（观众据此绘制进度条）
     RoomModeChanged,
     VideoStatus,
     VideoMismatch,
-    PlaylistChanged,    // 列表内容变了(增/删);带完整列表 + currentIndex
-    PlaylistSwitched,   // 当前条目变了;各端据此重新解析"这一条从哪儿来"
-    PlaylistStatus,     // 各条目的匹配状态(服务端聚合后下发)
+    PlaylistChanged,    // 列表内容变化（增/删）；带完整列表 + currentIndex
+    PlaylistSwitched,   // 当前条目变化；各端据此重新解析该条目的来源
+    PlaylistStatus,     // 各条目的匹配状态（服务端聚合后下发）
 
     // WebRTC 信令
     WebrtcOffer,
@@ -42,10 +42,9 @@ enum class MessageType {
 
 // 解码后的一条服务端消息。
 //
-// 这里刻意用"扁平结构 + type 判别",而不是 std::variant<每种消息一个 struct>:
-// 代价是字段没有按 type 隔离(读错字段会拿到默认值),
-// 换来的是调用方一个 switch 就能读完,不需要模板分发。
-// 消息种类在 20 以内时这个取舍是划算的。
+// 刻意采用扁平结构 + type 判别，而非 std::variant<每种消息一个 struct>：
+// 代价是字段未按 type 隔离（读错字段会得到默认值），换来调用方一次 switch
+// 即可读完，无需模板分发。消息种类在 20 以内时该取舍是划算的。
 struct Message {
     MessageType type = MessageType::Unknown;
 
@@ -55,7 +54,7 @@ struct Message {
     // room_created / room_joined
     QString roomId;
     QString roomName;
-    QString mode;               // 线路格式:"local" / "share" / "url"
+    QString mode;               // 线路格式："local" / "share" / "url"
     QList<Member> members;
     bool videoMismatched = false;
     qint64 shortestDuration = 0;
@@ -65,12 +64,12 @@ struct Message {
     int currentIndex = -1;
     QString itemId;
 
-    // room_created / room_joined 的顶层字段:服务端下发的 ICE 服务器列表
-    // (STUN + 带临时凭据的 TURN)。core 层只搬运,不认识 WebRTC ——
-    // 真正把它变成 PeerConnection 配置的是 WebrtcManager。
+    // room_created / room_joined 的顶层字段：服务端下发的 ICE 服务器列表
+    // （STUN + 带临时凭据的 TURN）。core 层只搬运，不认识 WebRTC；
+    // 将其转换为 PeerConnection 配置的是 WebrtcManager。
     QList<IceServerConfig> iceServers;
 
-    // member_joined / member_left(clientId + 下面这几个字段)
+    // member_joined / member_left（clientId + 下面这几个字段）
     QString nickname;
     bool isHost = false;
     bool loaded = false;
@@ -80,8 +79,8 @@ struct Message {
     QString from;
     QString text;
 
-    // playback:action + position
-    // room_joined 里 state.playing / state.position 也复用这两个字段
+    // playback：action + position
+    // room_joined 中的 state.playing / state.position 也复用这两个字段
     QString action;
     bool hasState = false;
     bool playing = false;
@@ -89,10 +88,9 @@ struct Message {
 
     // webrtc_*
     //
-    // link 指明这条信令属于哪条 PeerConnection。
-    // 一个对端现在有两条连接:"voice"(语音)和"media"(视频+电影)。
-    // 两者是各自独立的 SDP/ICE 协商,所以必须分开路由,否则会串。
-    // 服务端只是原样转发这个字段,不解释它。
+    // link 指明该信令属于哪条 PeerConnection。一个对端有两条连接：
+    // "voice"（语音）与 "media"（视频 + 电影）。两者是各自独立的 SDP/ICE 协商，
+    // 必须分开路由，否则会串。服务端原样转发该字段，不解释其内容。
     QString link;
     QString sdp;
     QString sdpMid;
@@ -103,10 +101,10 @@ struct Message {
     QString errorMessage;
 };
 
-// 解析失败(非法 JSON / 没有 type)返回 nullopt
+// 解析失败（非法 JSON / 缺少 type）返回 nullopt
 std::optional<Message> decode(const QString &text);
 
-// ---- 客户端 -> 服务端:组包并序列化成可直接发送的文本 ----
+// ---- 客户端 → 服务端：组包并序列化成可直接发送的文本 ----
 
 QString encodeCreateRoom(const QString &roomId,
                          const QString &roomName,
@@ -130,9 +128,9 @@ QString encodePlaybackPosition(qint64 position, bool playing);
 QString encodeVideoStatus(bool loaded, const QString &hash, qint64 duration);
 
 // ---- 播放列表 ----
-// itemId 由客户端生成(UUID),服务端只保证不重复。
-// 本地文件路径**不进协议** —— 那是各人自己的事(见 docs/playlist-design.md)
-// spec 是画质选择(字符串),语义见 FormatModel.h;服务端只存转发、不解释
+// itemId 由客户端生成（UUID），服务端只保证不重复。
+// 本地文件路径不进协议，属各端自己的映射（见 docs/playlist-design.md）。
+// spec 为画质选择字符串，语义见 FormatModel.h；服务端只存转发、不解释。
 QString encodePlaylistAdd(const QString &itemId,
                           const QString &title,
                           const QString &url,
@@ -144,11 +142,11 @@ QString encodePlaylistRemove(const QString &itemId);
 
 QString encodePlaylistSwitch(const QString &itemId);
 
-// 同步模式下成员上报"这一条我这台机器上有没有文件"。
-// hash 由 MediaHash::forFile 算,和 video_status 用的是同一套算法
+// 同步模式下成员上报「这一条本机是否有文件」。
+// hash 由 MediaHash::forFile 计算，与 video_status 使用同一套算法
 QString encodePlaylistStatus(const QString &itemId, bool hasFile, const QString &hash);
 
-// link:"voice" / "media",见 Message::link 的说明
+// link："voice" / "media"，见 Message::link 的说明
 QString encodeWebrtcOffer(const QString &to, const QString &link, const QString &sdp);
 
 QString encodeWebrtcAnswer(const QString &to, const QString &link, const QString &sdp);

@@ -6,31 +6,31 @@ import QtQuick.Dialogs
 import QtQuick.Layouts
 import SyncineApp
 
-// 全局设置页(从首页右上角的齿轮进来)。
+// 全局设置页（从首页右上角的齿轮进来）。
 //
-// 两栏:左边分类、右边当前分类的内容。分类用下面的 sections 列表声明 ——
+// 两栏：左边分类、右边当前分类的内容。分类用下面的 sections 列表声明 ——
 // 加一类就是加一行 + 写一张 Card,不用动布局。
 //
-// 一条约定:**这里的每一项都是"立刻生效"的** —— 控件直接读/写 appSettings
-// 的属性,不需要"保存"按钮。QML 里属性赋值(appSettings.logLevel = x)和
-// 调 setter(appSettings.setLogLevel(x))都可以,后者要记得 C++ 那边标了
+// 一条约定：**这里的每一项都是"立刻生效"的** —— 控件直接读/写 appSettings
+// 的属性，不需要"保存"按钮。QML 里属性赋值（appSettings.logLevel = x）和
+// 调 setter(appSettings.setLogLevel(x))都可以，后者要记得 C++ 那边标了
 // Q_INVOKABLE(否则会抛 "is not a function",还会中断同一处后面的语句)。
 //
 // `pragma ComponentBehavior: Bound` 是为了让左侧分类项能读到 root.section
-// (不写的话能用,但 qmllint 会提示"嵌套组件里访问外部 id")。
+// (不写的话能用，但 qmllint 会提示"嵌套组件里访问外部 id")。
 Item {
     id: root
 
-    // 当前分类,取 sections 里的 key
+    // 当前分类，取 sections 里的 key
     property string section: "general"
 
-    // cookie 卡片里选中的浏览器(记住上次用的,但要和当前探测结果核对 ——
+    // cookie 卡片里选中的浏览器(记住上次用的，但要和当前探测结果核对 ——
     // 用户可能把浏览器卸了)
     property string cookieBrowser: ""
 
-    // 切分类时的"进页面初始化"。写成一处:QML 不允许同一个信号有两个处理函数。
-    //   · 播放与下载 → 重新探测一次浏览器(装了新的不用重启程序)
-    //   · 音频       → 重新枚举设备(可能刚插上/拔掉耳机)。
+    // 切分类时的"进页面初始化"。写成一处：QML 不允许同一个信号有两个处理函数。
+    //   · 播放与下载 → 重新探测一次浏览器（装了新的不用重启程序）
+    //   · 音频       → 重新枚举设备（可能刚插上/拔掉耳机）。
     //                 没进过房间也能列出来 —— C++ 那边会先把 WebRTC 的声卡拉起来
     onSectionChanged: {
         if (section === "playback")
@@ -87,7 +87,7 @@ Item {
         return "未连接"
     }
 
-    // 左侧分类项。用内联组件(和 FunctionPanel 的 PanelTab 一个路子)
+    // 左侧分类项。用内联组件（和 FunctionPanel 的 PanelTab 一个路子）
     component SectionItem: Rectangle {
         required property var modelData
 
@@ -115,7 +115,7 @@ Item {
         }
     }
 
-    // ══ 右侧:当前分类的内容(可滚动)══
+    // ══ 右侧：当前分类的内容（可滚动）══
     Flickable {
         id: contentFlick
         anchors.left: parent.left
@@ -134,7 +134,7 @@ Item {
             width: Math.min(parent.width, 560)
             spacing: 12
 
-            // ── 通用:服务器 ──────────────────────
+            // ── 通用：服务器 ──────────────────────
             Card {
                 width: parent.width
                 visible: root.section === "general"
@@ -155,8 +155,8 @@ Item {
                         wrapMode: Text.Wrap
                         font.pixelSize: 12
                         color: Style.textFaint
-                        text: "留空就用内置地址 " + appSettings.fallbackServerUrl
-                              + "。填了你自己的服务器之后,连不上会自动回退到内置地址"
+                        text: "留空则使用内置地址 " + appSettings.fallbackServerUrl
+                              + "。填写自建服务器后，连接失败时仍会回退到内置地址。"
                     }
 
                     RowLayout {
@@ -223,7 +223,7 @@ Item {
                 }
             }
 
-            // ── 播放与下载:画质 ──────────────────
+            // ── 播放与下载：画质 ──────────────────
             Card {
                 width: parent.width
                 visible: root.section === "playback"
@@ -244,13 +244,13 @@ Item {
                         wrapMode: Text.Wrap
                         font.pixelSize: 12
                         color: Style.textFaint
-                        text: "网链模式加条目时的默认档位(1080 = 不超过 1080P,"
-                              + "下载时按\"分辨率优先、H.264 优先、AAC 优先\"的规则挑选)。"
-                              + "条目上会记下当时选的档位,改这里不影响已经加好的条目"
+                        text: "网链模式添加条目时的默认档位（1080 = 不超过 1080P，"
+                              + "下载时按「分辨率优先、H.264 优先、AAC 优先」的规则挑选）。"
+                              + "条目会记录添加时所选的档位，修改此处不影响已添加的条目。"
                     }
 
                     OptionList {
-                        // value 是 spec 的"主体"("" = 最高画质,见 FormatModel.h)
+                        // value 是 spec 的"主体"("" = 最高画质，见 FormatModel.h)
                         options: [
                             { label: "最高画质", value: "" },
                             { label: "2160P(4K)", value: "2160" },
@@ -270,10 +270,9 @@ Item {
                         wrapMode: Text.Wrap
                         font.pixelSize: 12
                         color: Style.textFaint
-                        text: "动态范围(HDR / 杜比视界)。开着的话,"
-                              + "画质档会优先挑带 HDR 的流 —— 下载没问题,"
-                              + "但当前播放器要先离线转成 SDR 才能正常显示(亮处会过曝);"
-                              + "关了则只挑 SDR 流。详情视图里看到的 HDR 标不受这个开关限制"
+                        text: "动态范围（HDR / 杜比视界）。开启后画质档会优先选择带 HDR 的流，"
+                              + "下载不受影响，但播放前需离线转为 SDR 才能正常显示（高光部分会过曝）；"
+                              + "关闭则只选择 SDR 流。详情视图中的 HDR 标记不受该开关限制。"
                     }
 
                     OptionList {
@@ -287,7 +286,7 @@ Item {
                 }
             }
 
-            // ── 播放与下载:Cookie ────────────────
+            // ── 播放与下载：Cookie ────────────────
             Card {
                 width: parent.width
                 visible: root.section === "playback"
@@ -308,9 +307,9 @@ Item {
                         wrapMode: Text.Wrap
                         font.pixelSize: 12
                         color: Style.textFaint
-                        text: "下载需要登录的站点时,让 yt-dlp 带上你的登录态。"
-                              + "从浏览器导入会把该浏览器里的「全部」cookie 导到本机一个文件里"
-                              + "(只有你自己的账号能读)。用完之后可以在这里清除"
+                        text: "供 yt-dlp 下载需要登录的站点时使用。"
+                              + "从浏览器导入会将该浏览器中的全部 cookie 导出至本机文件"
+                              + "（仅当前用户可读）。使用完毕后可在此清除。"
                     }
 
                     // 状态行
@@ -333,14 +332,14 @@ Item {
                         }
                     }
 
-                    // 导进来的快照会过期,超过一个月提醒一次
+                    // 导进来的快照会过期，超过一个月提醒一次
                     Label {
                         width: parent.width
                         visible: cookieManager.stale
                         wrapMode: Text.Wrap
                         font.pixelSize: 12
                         color: Style.danger
-                        text: "这份 cookie 已经超过一个月没更新了。下载时提示需要登录的话,重新导入一次"
+                        text: "该 cookie 已超过一个月未更新。若下载时提示需要登录，请重新导入。"
                     }
 
                     Label {
@@ -364,7 +363,7 @@ Item {
                         wrapMode: Text.Wrap
                         font.pixelSize: 12
                         color: Style.textFaint
-                        text: "没检测到常见浏览器(检测不到也能用 —— 可以「从文件导入」)"
+                        text: "未检测到浏览器，可从文件导入"
                     }
 
                     RowLayout {
@@ -406,7 +405,7 @@ Item {
                         }
                     }
 
-                    // 失败原因(已经在 C++ 里翻译成人话了)
+                    // 失败原因（已经在 C++ 里翻译成人话了）
                     Label {
                         width: parent.width
                         visible: cookieManager.errorText !== ""
@@ -418,7 +417,7 @@ Item {
                 }
             }
 
-            // ── 音频:麦克风 / 听筒 ──────────────────
+            // ── 音频：麦克风 / 听筒 ──────────────────
             Card {
                 width: parent.width
                 visible: root.section === "audio"
@@ -434,7 +433,7 @@ Item {
                         color: Style.textPrimary
                     }
 
-                    // 两个设备列表。房间里的齿轮弹窗用的是同一个组件,
+                    // 两个设备列表。房间里的齿轮弹窗用的是同一个组件，
                     // 免得两处显示不一致
                     AudioDeviceSettings {
                         width: parent.width
@@ -442,7 +441,7 @@ Item {
                 }
             }
 
-            // ── 日志与诊断:级别 + 运行环境 ────────
+            // ── 日志与诊断：级别 + 运行环境 ────────
             Card {
                 width: parent.width
                 visible: root.section === "log"
@@ -463,9 +462,9 @@ Item {
                         wrapMode: Text.Wrap
                         font.pixelSize: 12
                         color: Style.textFaint
-                        text: "级别是「从这一档往上都记」:选 warn 就只剩警告和错误。"
-                              + "排查问题时调成「调试」,调完记得改回来 —— 级别越细日志越大。"
-                              + "(环境变量 SYNCINE_LOG_LEVEL 存在时会盖过这里)"
+                        text: "记录该级别及以上的日志：选 warn 则仅记录警告与错误。"
+                              + "排查问题时可调为「调试」，完成后请改回——级别越细日志越大。"
+                              + "（环境变量 SYNCINE_LOG_LEVEL 存在时优先生效）"
                     }
 
                     OptionList {
@@ -502,7 +501,7 @@ Item {
                         wrapMode: Text.Wrap
                         font.pixelSize: 12
                         color: Style.textSecondary
-                        text: "外部工具:" + toolchain.statusText
+                        text: "外部工具：" + toolchain.statusText
                     }
 
                     Label {
@@ -510,7 +509,7 @@ Item {
                         wrapMode: Text.Wrap
                         font.pixelSize: 12
                         color: Style.textFaint
-                        text: "配置文件:" + appSettings.filePath()
+                        text: "配置文件：" + appSettings.filePath()
                     }
 
                     Label {
@@ -518,7 +517,7 @@ Item {
                         wrapMode: Text.Wrap
                         font.pixelSize: 12
                         color: Style.textFaint
-                        text: "日志目录:" + appSettings.logDirectory()
+                        text: "日志目录：" + appSettings.logDirectory()
                     }
 
                     GhostButton {
@@ -532,7 +531,7 @@ Item {
         }
     }
 
-    // ══ 左侧:标题 + 分类 ══
+    // ══ 左侧：标题 + 分类 ══
     Label {
         anchors.left: parent.left
         anchors.leftMargin: 28
@@ -567,9 +566,9 @@ Item {
         onAccepted: cookieManager.importFromFile(selectedFile)
     }
 
-    // ⚠️ 返回按钮**必须定义在 Flickable 后面**(QML 里后声明的兄弟节点在上面,
-    // 也先拿到鼠标事件)。放在前面的话,铺满整页的 Flickable 会把手按事件
-    // 抢走(它要靠拖动才能滚动),按钮点了完全没反应 —— 而且**不报任何错**。
+    // ⚠️ 返回按钮**必须定义在 Flickable 后面**(QML 里后声明的兄弟节点在上面，
+    // 也先拿到鼠标事件)。放在前面的话，铺满整页的 Flickable 会把手按事件
+    // 抢走（它要靠拖动才能滚动）,按钮点了完全没反应 —— 而且**不报任何错**。
     GhostButton {
         anchors.left: parent.left
         anchors.leftMargin: 28

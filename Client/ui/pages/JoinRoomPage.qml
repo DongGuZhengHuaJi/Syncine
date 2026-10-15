@@ -11,7 +11,7 @@ Item {
         codeError = roomCodeField.text.trim().length !== 6 ? "房间号是 6 位数字" : ""
         nickError = nickField.text.trim() === "" ? "请填写昵称" : ""
         if (codeError === "" && nickError === "") {
-            // 状态已在房间里但页面没跳过去:直接进房间
+            // 状态已在房间里但页面没跳过去：直接进房间
             if (roomSession.inRoom) {
                 stackView.push("RoomPage.qml")
                 return
@@ -58,7 +58,7 @@ Item {
 
         Label {
             anchors.horizontalCenter: parent.horizontalCenter
-            text: "输入 6 位房间号,进入好友的房间"
+            text: "输入 6 位房间号，进入好友的房间"
             font.pixelSize: 14
             color: Style.textSecondary
         }

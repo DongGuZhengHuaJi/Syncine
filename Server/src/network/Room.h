@@ -16,41 +16,33 @@ class Session;
 
 using json = nlohmann::json;
 
-// 播放列表里的一条。
-//
-// **不带本地文件路径** —— 那是每个人自己的事:
-//   本地模式  各人把 itemId 映射到自己机器上的某个文件
-//   共享模式  只有房主的映射有意义(它就是推流源)
-//   网链模式  直接用 url,不需要映射
-// 所以服务端只存"大家共同认可的那一份条目定义"。
+// 播放列表里的一条。不带本地文件路径——那是各端自己的映射：
+// 本地模式映射到本机文件，共享模式只有房主的映射有意义，网链模式直接用 url。
+// 服务端只存各端共同认可的条目定义。
 struct PlaylistEntry {
-    std::string itemId;   // 客户端生成的 UUID,服务端只保证不重复
-    std::string title;    // 显示名:本地/共享条目是文件名,网链条目是标题
-    std::string url;      // 可选,网链模式的源
-    long long duration = 0; // 加载过一次之后才知道(video_status 回报),0 表示未知
+    std::string itemId;   // 客户端生成的 UUID，服务端只保证不重复
+    std::string title;    // 显示名：本地/共享条目是文件名，网链条目是标题
+    std::string url;      // 可选，网链模式的源
+    long long duration = 0; // 由 video_status 回报，0 表示未知
     std::string addedBy;  // 添加者的 clientId
-    // 直播:没有时长、不能下载合并(没有"下完"这一刻),各端都靠 QMediaPlayer
-    // 直接拉流。服务端只存这个标志并转发,不解释它。
+    // 直播：无时长、不能下载合并，各端用 QMediaPlayer 直接拉流。
+    // 服务端只存该标志并转发，不解释。
     bool live = false;
-    // 画质选择(客户端定义的 spec 字符串,语义见客户端 FormatModel.h)。
-    // **条目级**而不是个人偏好:各人各自下载自己那份,选择不一致会导致内容
-    // 哈希不同、被判"不同步"。服务端只存转发,**不解释它的内容** ——
-    // 所以客户端改选择方式(加 ":h"、换 format_id)服务端都不用跟着改。
+    // 画质选择（客户端定义的 spec 字符串，语义见客户端 FormatModel.h）。
+    // 条目级而非个人偏好：各端选择不一致会导致内容哈希不同、被判为不同步。
+    // 服务端只存转发，不解释内容——客户端改选择方式无需服务端跟着改。
     std::string spec;
 };
 
-// 某成员对某条目"我这台机器上有没有对应文件"的上报(只有同步模式用得上):
-//   同步模式  每个人都要有一条,谁没有这一条就播不了
-//   共享模式  只有房主的文件有意义,不存在"匹配"这回事
-//   网链模式  大家读的是同一个 URL,也不需要
+// 某成员对某条目「本机是否有对应文件」的上报，仅同步模式使用。
+// 共享模式只有房主的文件有意义；网链模式各端读同一 URL，都不存在「匹配」。
 struct MemberFile {
     bool hasFile = false;
-    std::string hash;   // 内容哈希(和 video_status 用的是同一套算法),用于发现"不同步"
+    std::string hash;   // 内容哈希（与 video_status 同一套算法），用于发现不同步
 };
 
-// 一个模式下的播放列表。三种模式**各存一份**:换模式时列表跟着换,但各自保留
-// (切回来东西还在)。这正是三种模式语义不同的地方 ——
-// 同步模式是"我们各自都有这几部片子",共享模式是"房主有这几部片子"。
+// 一个模式下的播放列表。三种模式各存一份：换模式时列表跟着换，切回时仍保留。
+// 同步模式是「各端都有这几部片子」，共享模式是「房主有这几部片子」。
 struct Playlist {
     std::vector<PlaylistEntry> entries;
     int currentIndex = -1;
@@ -58,7 +50,7 @@ struct Playlist {
     std::map<std::string, std::map<std::string, MemberFile>> files;
 };
 
-// 一个房间:成员列表、密码、模式、播放状态、成员视频信息、播放列表
+// 一个房间：成员列表、密码、模式、播放状态、成员视频信息、播放列表
 class Room {
 public:
     Room(std::string roomName, std::string password, std::string mode = "local");
@@ -78,54 +70,55 @@ public:
     bool hasNickname(const std::string &nickname) const;
     std::string nicknameOf(const std::shared_ptr<Session> &session) const;
     std::vector<std::shared_ptr<Session>> sessions() const;
-    // 按 clientId 查找成员(用于 WebRTC 信令等定向转发)
+    // 按 clientId 查找成员（用于 WebRTC 信令等定向转发）
     std::shared_ptr<Session> findSession(const std::string &clientId) const;
-    // 房主的会话(房间里没有房主时返回 nullptr)
+    // 房主的会话（房间里没有房主时返回 nullptr）
     std::shared_ptr<Session> hostSession() const;
 
-    // 成员视频信息(加载状态/内容哈希/时长)
+    // 成员视频信息（加载状态/内容哈希/时长）
     void setMemberVideo(const std::shared_ptr<Session> &session, bool loaded,
                         const std::string &hash, long long duration);
 
-    // 重新计算成员视频是否一致;返回状态是否发生变化
+    // 重新计算成员视频是否一致；返回状态是否发生变化
     bool updateMismatch();
     bool videoMismatched() const;
     long long shortestDuration() const;
 
-    // 播放状态(用于新成员加入时对齐)
+    // 播放状态（用于新成员加入时对齐）
     bool playing() const;
     long long position() const;
     void updatePlayback(const std::string &action, long long position);
 
-    // ---- 播放列表(都作用于"当前模式"那一份)----
+    // ---- 播放列表（都作用于当前模式那一份）----
     const std::vector<PlaylistEntry> &playlist() const;
     int currentIndex() const;
-    // 当前条目的 itemId;没有当前条目(列表空)时返回空串
+    // 当前条目的 itemId；列表为空时返回空串
     std::string currentItemId() const;
-    // 追加到末尾。列表原本没有当前条目(currentIndex < 0)时,新条目自动成为当前,
-    // 返回 true —— 调用方据此补发一条 playlist_switched
+    // 追加到末尾。列表原本没有当前条目时新条目自动成为当前并返回 true，
+    // 调用方据此补发一条 playlist_switched
     bool addEntry(const PlaylistEntry &entry);
+    // 条目不存在返回 false
     bool removeEntry(const std::string &itemId);
-    // 条目存在就切过去(已经是当前条目也算成功);不存在返回 false
+    // 条目存在就切过去（已是当前条目也算成功）；不存在返回 false
     bool switchTo(const std::string &itemId);
 
-    // 成员上报"这一条我这台机器上有没有文件"(仅同步模式)
+    // 成员上报「这一条本机是否有文件」（仅同步模式）
     void setMemberFile(const std::string &clientId, const std::string &itemId,
                        bool hasFile, const std::string &hash);
-    // 成员离开/断开时清掉他的全部上报 —— 否则"全员都加载了"会把已经走掉的人也算进去
+    // 成员离开时清掉其全部上报，否则「全员都已加载」会把已离开的成员算进去
     void dropMemberFiles(const std::string &clientId);
-    // 条目在当前成员下的匹配状态:"missing" 还有人没有 / "matched" 全员都有且内容一致 /
-    // "mismatch" 全员都有但内容不一致
+    // 条目在当前成员下的匹配状态：missing 尚有人无文件 / matched 全员一致 /
+    // mismatch 全员都有但内容不一致
     std::string itemStatus(const std::string &itemId) const;
 
     // 协议序列化
     json membersArray() const;
     json playlistJson() const;
-    // includePlaylist=false 用于共享模式下的观众:他们不参与播放列表,
-    // 拿到空列表就行(entries 是房主本机的文件,对他们没有意义)
+    // includePlaylist=false 用于共享模式下的观众：条目的本地文件是房主的，
+    // 对他们没有意义，返回空列表即可
     json stateJson(bool includePlaylist = true) const;
 
-    // 广播给所有成员(except 不回发,通常传发送者)
+    // 广播给所有成员（except 不回发，通常传发送者）
     void broadcast(const json &message, const std::shared_ptr<Session> &except = nullptr);
 
 private:
@@ -149,7 +142,7 @@ private:
     bool m_videoMismatched = false;
     long long m_shortestDuration = 0;
 
-    // mode → 该模式下的播放列表(三种模式各存一份,互不干扰)
+    // mode → 该模式下的播放列表（三种模式各存一份，互不干扰）
     std::map<std::string, Playlist> m_playlists;
 
     Playlist &currentPlaylist();

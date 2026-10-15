@@ -21,20 +21,20 @@
 #include "rtc_base/checks.h"
 
 // ----------------------------------------------------------------------
-// ABI 护栏:客户端看到的类布局必须和 libwebrtc.a 编译时的一致。
+// ABI 护栏：客户端看到的类布局必须与 libwebrtc.a 编译时一致。
 //
-// WebRTC 头文件里存在 `#if RTC_DCHECK_IS_ON` 包裹的条件成员
-// (见 rtc_base/thread.h 中 webrtc::Thread 的字段声明)。这个宏两边不一致时,
-// webrtc::Thread 之类的类在客户端和库里 sizeof 不同、成员偏移整体错位,
-// 症状是运行时随机段错误,极难定位。
+// WebRTC 头文件中存在由 `#if RTC_DCHECK_IS_ON` 包裹的条件成员
+// （见 rtc_base/thread.h 中 webrtc::Thread 的字段声明）。该宏在两侧不一致时，
+// webrtc::Thread 等类在客户端与库中的 sizeof 不同、成员偏移整体错位，
+// 症状为运行时随机段错误，极难定位。
 //
-// libwebrtc.a 为 Release 构建(is_debug = false),RTC_DCHECK_IS_ON 必须为 0;
-// 由 Client/CMakeLists.txt 第 7 节的 NDEBUG 保证。这里编译失败时:
-//   - 若你确实把 WebRTC 重编成了带 DCHECK 的版本,请同步去掉那边的 NDEBUG
-//   - 否则就是 NDEBUG 被误删了,加回去
+// libwebrtc.a 为 Release 构建（is_debug = false），RTC_DCHECK_IS_ON 必须为 0，
+// 由 Client/CMakeLists.txt 第 7 节的 NDEBUG 保证。此处编译失败时：
+//   - 若确实将 WebRTC 重编为带 DCHECK 的版本，请同步移除该处的 NDEBUG
+//   - 否则即为 NDEBUG 被误删，需加回
 // ----------------------------------------------------------------------
 #if RTC_DCHECK_IS_ON
-#error "RTC_DCHECK_IS_ON 应为 0:libwebrtc.a 是 Release(is_debug = false)构建,详见 Client/CMakeLists.txt 第 7 节"
+#error "RTC_DCHECK_IS_ON 应为 0：libwebrtc.a 为 Release（is_debug = false）构建，详见 Client/CMakeLists.txt 第 7 节"
 #endif
 
 namespace {
@@ -48,8 +48,7 @@ bool startThreadSet(std::unique_ptr<webrtc::Thread> &network,
     worker = webrtc::Thread::Create();
 
     if (!network->Start() || !signaling->Start() || !worker->Start()) {
-        LOG_ERROR("WebRTC") << which << "线程启动失败";
-        // 线程启动失败，直接关闭
+        LOG_ERROR("WebRTC") << which << "线程启动失败，正在停止已启动的线程";
         network->Stop();
         signaling->Stop();
         worker->Stop();
@@ -78,14 +77,14 @@ void stopThreadSet(std::unique_ptr<webrtc::Thread> &network,
     }
 }
 
-// 服务端**什么都没给**时的兜底(老服务端、或者它的字段没解析出来)。
-// 一个公共 STUN:不知道自己的公网映射地址时,STUN 至少能问出来,
-// 局域网和普通 NAT 照样直连 —— 少的只是对称 NAT 下的中继。
+// 服务端未提供任何配置时的兜底（旧版服务端，或其字段未解析出来）。
+// 使用一个公共 STUN：无法得知自身公网映射地址时，STUN 至少能探测出来，
+// 局域网与普通 NAT 仍可直连，缺少的只是对称 NAT 下的中继。
 //
-// **STUN 的 URL 不能带 query**。libwebrtc 的 ICE URL 解析明确拒绝
-// "stun:host:port?transport=tcp" 这种写法,而且那是硬错误:任何一个 URL
-// 不合法,**整条 PeerConnection 都建不起来**(不是跳过这一项),
-// 症状只是 PeerLink 里一句"连接创建失败",极难往这上面想。
+// STUN 的 URL 不能带 query。libwebrtc 的 ICE URL 解析明确拒绝
+// "stun:host:port?transport=tcp" 这类写法，且属硬错误：任一 URL 不合法即导致
+// 整条 PeerConnection 无法建立（不会跳过该项），症状仅为 PeerLink 中的一句
+// 「连接创建失败」，难以联想到此处。
 const QList<IceServerConfig> &defaultIceServers() {
     static const QList<IceServerConfig> servers = [] {
         IceServerConfig stun;
@@ -96,45 +95,21 @@ const QList<IceServerConfig> &defaultIceServers() {
 }
 
 // ----------------------------------------------------------------------
-// 立体声 Opus 编解码器工厂包装 —— media 工厂专用
+// 立体声 Opus 编解码器工厂包装——media 工厂专用
 //
-// 【为什么需要这两个包装】
+// SDP 中 Opus 的「2 声道」与「立体声」是两个概念：rtpmap 的 opus/48000/2 仅表示
+// 「最多 2 声道」，决定编码器声道数的是 fmtp 中的 stereo=1（audio_encoder_opus.cc
+// 的 GetChannelCount）。内置工厂不带该参数，故协商结果恒为单声道，推入立体声 PCM
+// 亦被 ACM 下混（ReMixFrame）。解法：补上 stereo=1 使其进入 SDP fmtp
+// （media/base/codec.cc 的 Codec(SdpAudioFormat) 会拷贝全部参数）。
 //
-// SDP 里 Opus 的"2 声道"和"立体声"是两个概念:rtpmap 的 opus/48000/2
-// 只是"最多 2 声道"的能力声明;真正决定编码器开几个声道的是 fmtp 里的
-// stereo=1 参数(modules/audio_coding/codecs/opus/audio_encoder_opus.cc
-// 的 GetChannelCount:参数不是 "1" 一律按 1 声道编码)。
+// 编解码器两个工厂都必须包装：电影音轨的 m-line 为 sendrecv，codec 列表由收发两个
+// 列表合并，参数取自 recv 列表那份（pc/codec_vendor.cc），仅包装编码器工厂时
+// stereo=1 位于 send 列表、合并时被丢弃（实测）。
+// 仅对 media 工厂包装：麦克风为单声道，voice 工厂协商立体声只会无谓上混。
 //
-// 而内置工厂通告的 Opus 格式**不带** stereo=1(同文件 AppendSupportedEncoders
-// 只写了 minptime 和 useinbandfec)—— 所以用内置工厂协商出来的 Opus 永远
-// 单声道:推立体声 PCM 进去也会被 ACM 按编码器声道数下混(ReMixFrame)。
-//
-// 解法:把 Opus 格式的参数补上 stereo=1,让它进 SDP fmtp(media/base/
-// codec.cc 的 Codec(SdpAudioFormat) 拷贝全部参数)。两端都传,协商结果
-// 就带 stereo=1,编码器按 2 声道工作(webrtc_voice_engine.cc 的
-// UpdateSendCodecSpec:stereo=1 → num_encoded_channels_ = 2)。
-//
-// 【为什么编码器和解码器两个工厂都要包】
-//
-// 电影音轨的 m-line 是 sendrecv,它的 codec 列表是发送、接收两个列表合并
-// 出来的(pc/codec_vendor.cc 的 audio_sendrecv_codecs)。合并用的是
-// NegotiateCodecs(recv 列表, send 列表),而它产出的是
-// `Codec negotiated = ours` —— **参数取的是 recv 列表那份**。
-// 只包编码器工厂时,stereo=1 在 send 列表里,合并时被丢掉,协商结果仍是
-// 单声道 —— 这是实测踩过的坑。所以解码器工厂必须一起包。
-//
-// 【为什么只给 media 工厂】
-//
-// voice 工厂继续用内置工厂:麦克风是单声道,给它协商立体声只会让编码器
-// 白白上混、白花带宽。电影音频才需要立体声,而这两个包装只影响传给它的
-// 那一套工厂 —— 两条连接、两种声道配置,互不干扰。
-//
-// 【顺带的音质参数】
-//
-// maxaveragebitrate:Opus 默认目标码率(约 32kbps)对音乐偏低。电影配乐
-// 值得提到 64kbps,局域网共享带宽不是瓶颈。想再高可以调,范围 6~510kbps
-// (见 audio_encoder_opus.cc 的 CalculateBitrate 钳制)。它同样由
-// recv 列表的参数主导,所以两个包装里都写。
+// maxaveragebitrate：Opus 默认码率（约 32kbps）对音乐偏低，提高到 64kbps；
+// 可调范围为 6~510kbps（见同文件 CalculateBitrate 钳制），同样需两处都写。
 // ----------------------------------------------------------------------
 
 class StereoOpusAudioEncoderFactory : public webrtc::AudioEncoderFactory {
@@ -156,7 +131,7 @@ public:
 
     std::optional<webrtc::AudioCodecInfo> QueryAudioEncoder(
         const webrtc::SdpAudioFormat &format) override {
-        // 内置工厂本来就认得 stereo/maxaveragebitrate 参数,直接转发。
+        // 内置工厂本已识别 stereo/maxaveragebitrate 参数，直接转发
         return m_inner->QueryAudioEncoder(format);
     }
 
@@ -171,7 +146,7 @@ private:
     const webrtc::scoped_refptr<webrtc::AudioEncoderFactory> m_inner;
 };
 
-// 解码器侧的同款包装。见上面"为什么两个工厂都要包"。
+// 解码器侧的同类包装，原因见上方说明
 class StereoOpusAudioDecoderFactory : public webrtc::AudioDecoderFactory {
 public:
     StereoOpusAudioDecoderFactory()
@@ -205,15 +180,11 @@ private:
 };
 
 // 画质档位 → 编码参数。
-//
-// 只调两个旋钮:**码率上限**和**帧率上限**,分辨率不动 ——
-// 让编码器按码率自己降(过载时它本来就会先降分辨率),
-// 比我们猜一个缩放系数更准。
-//
-// 关于"原画":WebRTC 里**不设上限不等于无限**。没设时它会用自己按分辨率算的
-// 默认上限(video/config/encoder_stream_factory.cc 的 GetMaxDefaultVideoBitrateKbps:
-// 540p 以上一律 2500kbps)——那比"高清"还低,所以"原画"必须显式给一个高上限,
-// 真正的天花板交给带宽估计决定。
+// 只调整码率上限与帧率上限，不改变分辨率——让编码器按码率自行下调（过载时它本就会
+// 优先降低分辨率），比自行推测缩放系数更准确。
+// 关于「原画」：WebRTC 中不设上限并非无限，未设置时会采用按分辨率计算的默认上限
+// （encoder_stream_factory.cc 的 GetMaxDefaultVideoBitrateKbps：540p 以上一律
+// 2500kbps），比「高清」还低；故「原画」须显式给出较高上限，实际上限交由带宽估计。
 struct VideoQualityPreset {
     int maxBitrateBps = 0;   // 0 = 用 WebRTC 默认上限
     double maxFramerate = 0; // 0 = 不限制
@@ -222,16 +193,16 @@ struct VideoQualityPreset {
 VideoQualityPreset presetForQuality(WebrtcManager::VideoQuality quality) {
     switch (quality) {
     case WebrtcManager::VideoQuality::Smooth:
-        // 流畅:320~480p 观感,帧率留 24(电影本身也就 24)
+        // 流畅：320~480p 观感，帧率留 24(电影本身也就 24)
         return {800'000, 24.0};
     case WebrtcManager::VideoQuality::Standard:
-        // 标准:720p 观感
+        // 标准：720p 观感
         return {2'000'000, 30.0};
     case WebrtcManager::VideoQuality::Hd:
-        // 高清:1080p 观感。已经高于 WebRTC 的默认天花板(2.5Mbps)
+        // 高清：1080p 观感。已高于 WebRTC 的默认上限（2.5Mbps）
         return {4'000'000, 30.0};
     case WebrtcManager::VideoQuality::Original:
-        // 原画:上限抬到很高,由网络决定能跑多少;帧率不限制
+        // 原画：上限设得很高，实际速率由网络决定；不限制帧率
         return {10'000'000, 0.0};
     }
     return {10'000'000, 0.0};
@@ -247,33 +218,33 @@ QString qualityName(WebrtcManager::VideoQuality quality) {
     return {};
 }
 
-// ---- 音频设备的三个小工具 ----
+// ---- 音频设备的两个小工具 ----
 
-// 按名字在设备表里找索引。空名字(= 系统默认)或找不到都返回 0。
+// 按名字在设备表中查找索引。名字为空（= 系统默认）或未找到时均返回 0。
 //
-// 找不到时退回 0 而不是报错:设备被拔掉是常态(上次用的 USB 耳机这次没插),
-// 退回"跟随系统默认"总比一个都不出声强。
+// 未找到时退回 0 而非报错：设备被拔出是常态（上次使用的 USB 耳机本次未插入），
+// 退回「跟随系统默认」优于完全不出声。
 int indexOfDeviceName(const QString &name,
                       const std::vector<WebrtcManager::DeviceInfo> &devices) {
     if (name.isEmpty())
         return 0;
 
     for (const WebrtcManager::DeviceInfo &device : devices) {
-        // 0 号是 "default: xxx" 伪设备 —— 它由空名字表示,不参与按名字匹配
+        // 0 号为 "default: xxx" 伪设备，由空名字表示，不参与按名字匹配
         if (device.index > 0 && device.name == name)
             return device.index;
     }
     return 0;
 }
 
-// 设备表 → OptionList 要的 [{label, value}]。
+// 设备表 → OptionList 所需的 [{label, value}]
 QVariantList devicesToVariant(const std::vector<WebrtcManager::DeviceInfo> &devices) {
     QVariantList list;
     for (const WebrtcManager::DeviceInfo &device : devices) {
         QVariantMap item;
         item[QStringLiteral("label")] = device.name;
-        // 0 号在界面上就是"跟随系统默认",值用**空串**表示:它在 ADM 里的名字
-        // 是 "default: <当前默认设备>",会随系统默认设备变化,存下来就会失效。
+        // 0 号在界面上表示「跟随系统默认」，取值用空串：它在 ADM 中的名字为
+        // "default: <当前默认设备>"，会随系统默认设备变化，存储后会失效。
         item[QStringLiteral("value")] = device.index == 0 ? QString() : device.name;
         list.append(item);
     }
@@ -297,25 +268,25 @@ bool WebrtcManager::initialize() {
     if (m_initialized)
         return true;
 
-    // 在voice和media 工厂初始化前创建环境和adm
+    // 在 voice 与 media 工厂初始化之前创建环境与 ADM
     m_mediaEnvironment.emplace(webrtc::CreateEnvironment());
 
     m_voiceAdm = webrtc::CreateAudioDeviceModule(*m_mediaEnvironment, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
     if (m_voiceAdm == nullptr) {
-        LOG_ERROR("WebRTC") << "创建 voice 声卡失败,放弃初始化";
+        LOG_ERROR("WebRTC") << "创建 voice 声卡失败，放弃初始化";
         m_mediaEnvironment.reset();
         return false;
     }
     m_dummyAdm = webrtc::CreateAudioDeviceModule(*m_mediaEnvironment, webrtc::AudioDeviceModule::kDummyAudio);
     if (m_dummyAdm == nullptr) {
-        LOG_ERROR("WebRTC") << "创建 media 声卡失败,放弃初始化";
+        LOG_ERROR("WebRTC") << "创建 media 声卡失败，放弃初始化";
         m_mediaEnvironment.reset();
         return false;
     }
 
     if (!initializeVoiceFactory()) {
-        LOG_ERROR("WebRTC") << "初始化 voice 工厂失败,放弃初始化";
-        // 两个 ADM 都引用了 Environment,必须比它先释放
+        LOG_ERROR("WebRTC") << "初始化 voice 工厂失败，放弃初始化";
+        // 两个 ADM 都引用了 Environment，必须早于它释放
         m_voiceAdm = nullptr;
         m_dummyAdm = nullptr;
         m_mediaEnvironment.reset();
@@ -323,7 +294,7 @@ bool WebrtcManager::initialize() {
     }
 
     if (!initializeMediaFactory()) {
-        LOG_ERROR("WebRTC") << "初始化 media 工厂失败,放弃初始化";
+        LOG_ERROR("WebRTC") << "初始化 media 工厂失败，放弃初始化";
         m_dummyAdm = nullptr;
         m_mediaEnvironment.reset();
         destroy();
@@ -333,19 +304,19 @@ bool WebrtcManager::initialize() {
     m_initialized = true;
     LOG_INFO("WebRTC") << "WebRTC 初始化成功";
 
-    // 预创建各条轨
+    // 预创建各条轨道
     if (getOrCreateAudioTrack() == nullptr) {
-        LOG_WARN("WebRTC") << "推流语音轨预创建失败,本次运行将无法共享麦克风声音";
+        LOG_WARN("WebRTC") << "推流语音轨预创建失败，本次运行将无法共享麦克风声音";
     }
     if (getOrCreateVideoTrack() == nullptr) {
-        LOG_WARN("WebRTC") << "推流视频轨预创建失败,本次运行将无法共享视频画面";
+        LOG_WARN("WebRTC") << "推流视频轨预创建失败，本次运行将无法共享视频画面";
     }
     if (getOrCreateMovieAudioTrack() == nullptr) {
-        LOG_WARN("WebRTC") << "推流音频轨预创建失败,本次运行将没有共享视频声音";
+        LOG_WARN("WebRTC") << "推流电影音轨预创建失败，本次运行将没有共享视频声音";
     }
 
-    // 预创建共享模式下接收侧的画面渲染器和声音播放器
-    // todo: 实现音画同步
+    // 预创建共享模式下接收侧的画面渲染器与声音播放器
+    // TODO: 实现音画同步
     m_remoteRenderer = std::make_unique<RemoteVideoRenderer>();
     m_movieAudioPlayer = std::make_unique<MovieAudioPlayer>();
     m_movieAudioPlayer->setVolume(m_remoteMovieVolume);
@@ -358,14 +329,14 @@ bool WebrtcManager::initialize() {
 // ============================
 
 void WebrtcManager::setIceServers(const QList<IceServerConfig> &servers) {
-    // 成员一变就会走一遍"建连前刷配置",内容没变时不重复刷日志
+    // 成员每次变化都会走一遍「建连前刷新配置」，内容未变时不重复记录日志
     if (servers == m_iceServers)
         return;
     m_iceServers = servers;
 
     if (servers.isEmpty()) {
-        LOG_WARN("WebRTC") << "服务端没有下发 ICE 配置,退回兜底 STUN;"
-                              "对称 NAT 后面的对端可能连不上";
+        LOG_WARN("WebRTC") << "服务端未下发 ICE 配置，退回兜底 STUN；"
+                              "对称 NAT 后的对端可能无法连接";
         return;
     }
 
@@ -377,9 +348,9 @@ void WebrtcManager::setIceServers(const QList<IceServerConfig> &servers) {
             hasTurn = hasTurn || url.startsWith(QLatin1String("turn"));
     }
 
-    // 只记条数:username/credential 是临时密钥,任何级别都不写进日志
+    // 只记录条数：username/credential 是临时密钥，任何级别都不写入日志
     LOG_INFO("WebRTC") << "ICE 配置已更新:" << servers.size() << "组服务器 /"
-                       << urlCount << "个 URL" << (hasTurn ? "(含 TURN)" : "(仅 STUN)");
+                       << urlCount << "个 URL" << (hasTurn ? "（含 TURN）" : "（仅 STUN）");
 }
 
 std::vector<webrtc::PeerConnectionInterface::IceServer> WebrtcManager::buildIceServers() const {
@@ -398,8 +369,8 @@ std::vector<webrtc::PeerConnectionInterface::IceServer> WebrtcManager::buildIceS
             server.urls.push_back(url.toStdString());
 
         server.username = entry.username.toStdString();
-        // 协议里叫 credential(Cloudflare 的字段名),libwebrtc 的 IceServer
-        // 里叫 password —— 同一件事,全项目只在这里翻译一次。
+        // 协议中名为 credential（Cloudflare 的字段名），libwebrtc 的 IceServer
+        // 中名为 password，实为同一项，全项目只在此处转换一次。
         server.password = entry.credential.toStdString();
 
         servers.push_back(std::move(server));
@@ -419,31 +390,31 @@ PeerLink *WebrtcManager::createLink(const QString &peerId, LinkKind kind,
         isVoice ? m_voiceFactory : m_mediaFactory;
 
     if (factory == nullptr) {
-        LOG_ERROR("WebRTC") << (isVoice ? "voice" : "media") << "工厂为空,无法建立连接";
+        LOG_ERROR("WebRTC") << (isVoice ? "voice" : "media") << " 工厂为空，无法建立连接";
         return nullptr;
     }
 
-    // ICE 配置(STUN + 可能带临时凭据的 TURN)在进房时由 SignalingChannel 交过来,
-    // 见 setIceServers。配置是在下面 CreatePeerConnection 那一刻生效的 ——
-    // 之后改 m_iceServers 不会影响这条连接。
+    // ICE 配置（STUN + 可能带临时凭据的 TURN）在进房时由 SignalingChannel 传入，
+    // 见 setIceServers。配置在下方 CreatePeerConnection 时生效——
+    // 此后修改 m_iceServers 不会影响这条连接。
     webrtc::PeerConnectionInterface::RTCConfiguration config;
     config.servers = buildIceServers();
 
-    // 诊断开关:SYNCINE_ICE_RELAY_ONLY=1 时只收集中继(relay)候选。
-    // 用来回答"到底走没走 TURN" —— 这时只有 TURN 真的可用才连得上,
-    // 能直连是说明不了问题的(局域网里本来就连得上)。默认关,别常开。
+    // 诊断开关：SYNCINE_ICE_RELAY_ONLY=1 时只收集 relay 候选。
+    // 用于确认是否真正走 TURN——此时只有 TURN 可用才能连上，
+    // 能直连说明不了问题（局域网内本就能连通）。默认关闭，不要长期开启。
     if (qEnvironmentVariableIsSet("SYNCINE_ICE_RELAY_ONLY"))
         config.type = webrtc::PeerConnectionInterface::kRelay;
 
     auto *link = new PeerLink(peerId, kind, factory, config, createDataChannel, this);
     if (!link->isValid()) {
-        LOG_ERROR("WebRTC") << (isVoice ? "voice" : "media") << "连接创建失败,已放弃";
+        LOG_ERROR("WebRTC") << (isVoice ? "voice" : "media") << " 连接创建失败，已放弃";
         delete link;
         return nullptr;
     }
 
-    // 在 createOffer 之前挂上本地轨,SDP 中才会包含相应的 m=audio/m=video 段。
-    // todo: 完善重新协商逻辑
+    // 在 createOffer 之前挂上本地轨，SDP 中才会包含相应的 m=audio/m=video 段
+    // TODO: 完善重新协商逻辑
     if (isVoice) {
         if (m_localAudioTrack != nullptr)
             link->addLocalAudioTrack(m_localAudioTrack);
@@ -451,22 +422,23 @@ PeerLink *WebrtcManager::createLink(const QString &peerId, LinkKind kind,
     } else {
         if (m_localVideoTrack != nullptr) {
             link->addLocalVideoTrack(m_localVideoTrack);
-            // 新连接套上当前画质档位(观众可能是在房主改过档位之后才进来的)
+            // 新连接套用当前画质档位（观众可能在房主修改档位之后才进入）
             const VideoQualityPreset preset = presetForQuality(m_videoQuality);
             link->applyVideoQuality(preset.maxBitrateBps, preset.maxFramerate);
         }
         if (m_localMovieAudioTrack != nullptr)
             link->addLocalMovieAudioTrack(m_localMovieAudioTrack);
 
-        // 接收侧:远端画面进共享渲染器
+        // 接收侧：远端画面送入共享渲染器
         if (m_remoteRenderer != nullptr)
             link->setRemoteVideoSink(m_remoteRenderer.get());
 
-        // 接收侧:远端电影声进我们自己的播放器
+        // 接收侧：远端电影声送入自行实现的播放器
         if (m_movieAudioPlayer != nullptr)
             link->setRemoteAudioSink(m_movieAudioPlayer.get());
 
-        // 显示关闭 media 连接的播放,让 NullAudioPoller 接管,每 10ms 自动拉取音频数据进入sink
+        // 关闭 media 连接的播放，交由 NullAudioPoller 接管，
+        // 每 10ms 自动拉取音频数据送入 sink
         link->setPlayoutEnabled(false);
     }
 
@@ -475,16 +447,16 @@ PeerLink *WebrtcManager::createLink(const QString &peerId, LinkKind kind,
 
 bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataChannel) {
     if (!m_initialized) {
-        LOG_ERROR("WebRTC") << "尚未初始化,无法建立对端连接";
+        LOG_ERROR("WebRTC") << "尚未初始化，无法建立对端连接";
         return false;
     }
 
     if (peerId.isEmpty()) {
-        LOG_WARN("WebRTC") << "对端 ID 为空,无法建立连接";
+        LOG_WARN("WebRTC") << "对端 ID 为空，无法建立连接";
         return false;
     }
 
-    // 幂等:已存在就直接返回 true,不再重复建两条连接
+    // 幂等：已存在则直接返回 true，不重复创建两条连接
     if (m_peers.contains(peerId))
         return true;
 
@@ -493,9 +465,9 @@ bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataC
     links.media = createLink(peerId, LinkKind::Media, /*createDataChannel=*/false);
 
     if (links.voice == nullptr || links.media == nullptr) {
-        LOG_ERROR("WebRTC") << "对端" << peerId << "的连接建立失败(voice:"
+        LOG_ERROR("WebRTC") << "对端 " << peerId << " 的连接建立失败（voice:"
                             << (links.voice ? "ok" : "fail")
-                            << "media:" << (links.media ? "ok" : "fail") << ")";
+                            << " media:" << (links.media ? "ok" : "fail") << "）";
         if (links.voice != nullptr) {
             links.voice->close();
             links.voice->deleteLater();
@@ -507,19 +479,19 @@ bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataC
         return false;
     }
 
-    // 插入之前先记:这是不是本次进房的第一条连接(引擎就是在这个时候初始化的)
+    // 插入前先判断：是否为本次进房的第一条连接（引擎即在此刻初始化）
     const bool firstPeer = m_peers.isEmpty();
     m_peers.insert(peerId, links);
-    LOG_INFO("WebRTC") << "已建立对端连接:" << peerId << "(两条:voice + media,当前共"
-                       << m_peers.size() << "个对端)";
+    LOG_INFO("WebRTC") << "已建立对端连接:" << peerId << "（两条：voice + media，当前共"
+                       << m_peers.size() << "个对端）";
 
     if (firstPeer) {
-        // 上一步 CreatePeerConnection 内部会先把引擎拉起来,而
-        // adm_helpers::Init() 会把声卡设备复位成"系统默认"。
-        // 把用户选的设备套回去 —— 不做这一步,每次进房都会悄悄回到默认设备。
-        // (顺序有保证:引擎初始化走的是 worker 线程上的 BlockingCall,
-        //  在 CreatePeerConnection 返回前就已经做完了。)
-        LOG_INFO("WebRTC") << "引擎初始化,使用用户选择的音频设备";
+        // 上一步 CreatePeerConnection 内部会先启动引擎，而
+        // adm_helpers::Init() 会将声卡设备复位为系统默认。
+        // 需把用户选择的设备套回——缺少此步骤，每次进房都会静默回到默认设备。
+        // （顺序有保证：引擎初始化走 worker 线程上的 BlockingCall，
+        //  在 CreatePeerConnection 返回前即已完成。）
+        LOG_INFO("WebRTC") << "引擎初始化，重新套用用户选择的音频设备";
         applyDevice(true, m_desiredRecordingName, /*force=*/true);
         applyDevice(false, m_desiredPlayoutName, /*force=*/true);
     }
@@ -575,13 +547,13 @@ webrtc::scoped_refptr<webrtc::AudioTrackInterface> WebrtcManager::getOrCreateAud
     // 创建音频源，所有track共享同一个源
     if (m_audioSource == nullptr) {
         webrtc::AudioOptions options;
-        // 扬声器外放 + 麦克风同时工作的场景下,不消回声就是啸叫
+        // 扬声器外放 + 麦克风同时工作的场景下，不消回声就是啸叫
         options.echo_cancellation = true;
-        // 不同人说话的远近、音量差很大,自动增益能把它们拉平
+        // 不同人说话的远近、音量差很大，自动增益能把它们拉平
         options.auto_gain_control = true;
         // 风扇、键盘、空调底噪
         options.noise_suppression = true;
-        // 过滤低频轰鸣(桌面震动、空调)
+        // 过滤低频轰鸣（桌面震动、空调）
         options.highpass_filter = true;
 
         m_audioSource = m_voiceFactory->CreateAudioSource(options);
@@ -615,45 +587,31 @@ void WebrtcManager::setAudioEnabled(bool enabled) {
 
     track->set_enabled(enabled);
 
-    LOG_INFO("WebRTC") << "麦克风已" << (enabled ? "开启" : "关闭") << "(当前"
-                       << m_peers.size() << "个对端)";
+    LOG_INFO("WebRTC") << (enabled ? "麦克风已开启" : "麦克风已关闭")
+                       << "(当前" << m_peers.size() << "个对端)";
     emit audioEnabledChanged(enabled);
 }
 
 // ============================
-// 音频设备(麦克风 / 听筒)
+// 音频设备（麦克风 / 听筒）
 // ============================
 //
-// 这一节直接和 WebRTC 的 ADM(AudioDeviceModule)打交道,有几处反直觉的地方,
-// 全都能在 libwebrtc 源码里对上(路径以 /home/donggu/webrtc-checkout/src 为根)。
-// 动这里之前先看一遍:
+// 本节直接与 WebRTC 的 ADM 交互，若干行为反直觉，均可在 libwebrtc 源码中核对
+// （路径以 /home/donggu/webrtc-checkout/src 为根）。改动前需先阅读：
 //
-// 1) 声卡是**惰性初始化**的。
-//    建第一条 PeerConnection 时 ConnectionContext::AddRefMediaEngine()
-//    (pc/connection_context.cc:233)才 media_engine_->Init() → adm_helpers::Init()
-//    → adm->Init()。在那之前枚举设备一律返回 -1(audio_device_impl.cc:48 的
-//    CHECKinitialized_ 直接 return -1)。而设置页要能在**没进房间**时看到设备
-//    列表,所以 ensureVoiceAdmOnWorker() 自己补一次 Init() —— 它是幂等的,
-//    已初始化时直接返回 0(audio_device_impl.cc:287)。
-//
-// 2) 引擎每次(重新)初始化都会**把设备复位成 0**。
-//    adm_helpers::Init() 里写死了 SetPlayoutDevice(0)/SetRecordingDevice(0)
-//    (media/engine/adm_helpers.cc:43、63)。所以用户选的设备必须在建起第一条
-//    连接之后重新套用一次,否则每次进房都悄悄回到系统默认 ——
-//    见 createPeerConnection() 里那次 applyDevice(force=true)。
-//
-// 3) 播放/录音已经开始时改设备会**直接失败**。
-//    PulseAudio 的 ADM 里,SetPlayoutDevice() 在 _playIsInitialized 时 return -1、
-//    SetRecordingDevice() 在 _recIsInitialized 时 return -1
-//    (modules/audio_device/linux/audio_device_pulse_linux.cc:677、798)。
-//    所以运行中切换必须走 Stop → Set → Init → Start。真正打开设备是在
-//    StartXxx()(连 pa stream 发生在音频线程,同文件 2013 起),
-//    SetXxxDevice 只是把索引记下。
-//
-// 4) 所有 ADM 调用都压到 voice 的 worker 线程上,理由见 runOnVoiceWorker。
-//
-// 5) Linux 上**没有 GUID 可用**:PlayoutDeviceName/RecordingDeviceName 只填
-//    name,guid 只被 memset 清零(同文件 716、754)。设备只能按名字认。
+// 1) 声卡惰性初始化：建第一条 PeerConnection 时由 connection_context.cc:233 触发
+//    media_engine_->Init() → adm->Init()；在此之前枚举设备一律返回 -1
+//    （audio_device_impl.cc:48）。设置页需在未进房时看到设备列表，故
+//    ensureVoiceAdmOnWorker() 自行补一次（该操作幂等，见同文件 :287）。
+// 2) 引擎每次（重新）初始化都将设备复位为 0（adm_helpers.cc:43、63 写死
+//    SetPlayoutDevice(0)/SetRecordingDevice(0)），故用户所选设备必须在建起第一条
+//    连接后重新套用，见 createPeerConnection() 中的 applyDevice(force=true)。
+// 3) 播放/录音已启动时改设备会直接失败：PulseAudio 的 ADM 在 _playIsInitialized /
+//    _recIsInitialized 时返回 -1（audio_device_pulse_linux.cc:677、798），运行中
+//    切换必须走 Stop → Set → Init → Start；SetXxxDevice 仅记录索引，真正打开
+//    设备发生在 StartXxx()。
+// 4) 所有 ADM 调用压到 voice 的 worker 线程，理由见 runOnVoiceWorker。
+// 5) Linux 上无 GUID 可用（guid 恒被清零，同文件 :716、754），设备只能按名字识别。
 
 void WebrtcManager::runOnVoiceWorker(const std::function<void()> &fn) {
     if (m_voiceWorkerThread == nullptr) {
@@ -667,13 +625,13 @@ void WebrtcManager::runOnVoiceWorker(const std::function<void()> &fn) {
         return;
     }
 
-    // 同步投递,等它跑完再返回。
+    // 同步投递，等它跑完再返回。
     //
-    // 为什么值得阻塞:这些操作本来就是阻塞的(Start/StopPlayout 内部最多等 10 秒),
-    // 换设备又是用户偶尔点一下的动作 —— 同步拿结果,比异步回调回来再对状态少一堆
+    // 为什么值得阻塞：这些操作本来就是阻塞的（Start/StopPlayout 内部最多等 10 秒）,
+    // 换设备又是用户偶尔点一下的动作 —— 同步拿结果，比异步回调回来再对状态少一堆
     // 竞态。更重要的是它把调用和 AudioState 排进**同一条队列**:AudioState 也在
-    // worker 线程上,会根据有没有收发流自己调 Start/StopPlayout,交错起来就会出现
-    // "我们刚 Stop,它转头就 Start"。
+    // worker 线程上，会根据有没有收发流自己调 Start/StopPlayout,交错起来就会出现
+    // 「本端刚 Stop，它随即 Start」的竞态。
     m_voiceWorkerThread->BlockingCall([&fn] { fn(); });
 }
 
@@ -741,7 +699,7 @@ bool WebrtcManager::applyRecordingDeviceOnWorker(uint16_t index) {
         return false;
 
     // 录音已经初始化时不能直接改 —— PulseAudio 的 ADM 会返回 -1。
-    // 先停掉,让它内部的状态落回"未初始化",Set 才吃得下。
+    // 先停掉，让它内部的状态落回"未初始化",Set 才吃得下。
     const bool wasInitialized = m_voiceAdm->RecordingIsInitialized();
     const bool wasRecording = m_voiceAdm->Recording();
 
@@ -805,8 +763,8 @@ void WebrtcManager::reloadDevices() {
     std::vector<DeviceInfo> recording;
     std::vector<DeviceInfo> playout;
 
-    // 枚举要在 worker 线程上做(ADM 的线程约定),结果拷回来在主线程存下来 ——
-    // 这样 m_recordingDevices / m_playoutDevices 只有主线程碰,不用加锁。
+    // 枚举要在 worker 线程上做（ADM 的线程约定）,结果拷回来在主线程存下来 ——
+    // 这样 m_recordingDevices / m_playoutDevices 只有主线程碰，不用加锁。
     runOnVoiceWorker([&] {
         recording = enumerateDevicesOnWorker(true);
         playout = enumerateDevicesOnWorker(false);
@@ -845,7 +803,7 @@ bool WebrtcManager::applyDevice(bool recording, const QString &name, bool force)
                            << "\"不在设备表里,退回系统默认";
     }
 
-    // 目标就是现状,不用动 —— 免得白停一次播放/录音
+    // 目标就是现状，不用动 —— 免得白停一次播放/录音
     if (!force && index == currentDeviceIndex(recording))
         return true;
 
@@ -871,13 +829,13 @@ bool WebrtcManager::setDesiredDevice(bool recording, const QString &name) {
     const bool changed = (desired != name);
     desired = name;
 
-    // 语音那一路:落到 ADM 上
+    // 语音那一路：落到 ADM 上
     const bool applied = applyDevice(recording, name, /*force=*/false);
 
     if (changed) {
-        // 听筒还有第二处出声的地方 —— 电影声(MovieAudioPlayer 的 QAudioSink)。
-        // 它不受 WebRTC 引擎初始化影响,所以和 ADM 那边分开处理;
-        // 只在真的变了的时候动它,否则每次启动都会白重启一次音频输出
+        // 听筒还有第二处出声的地方 —— 电影声（MovieAudioPlayer 的 QAudioSink）。
+        // 它不受 WebRTC 引擎初始化影响，所以和 ADM 那边分开处理；
+        // 只在真的变了的时候动它，否则每次启动都会白重启一次音频输出
         if (!recording && m_movieAudioPlayer != nullptr)
             m_movieAudioPlayer->setOutputDevice(findAudioOutputByName(name));
 
@@ -909,8 +867,8 @@ QString WebrtcManager::playoutDeviceName() const {
 void WebrtcManager::refreshAudioDevices() {
     reloadDevices();
 
-    // 上次选的设备要是不在了(拔了),明确回到"跟随系统默认" ——
-    // 否则界面上一个都不高亮,看起来像坏了。顺带把还在用它的 ADM 一起退回去。
+    // 上次选的设备要是不在了（拔了）,明确回到"跟随系统默认" ——
+    // 否则界面上一个都不高亮，看起来像坏了。顺带把还在用它的 ADM 一起退回去。
     for (const bool recording : {true, false}) {
         const QString desired = recording ? m_desiredRecordingName : m_desiredPlayoutName;
         if (desired.isEmpty())
@@ -942,8 +900,8 @@ bool WebrtcManager::movieAudioEnabled() const {
 
 void WebrtcManager::setLocalVideoEnabled(bool enabled) {
     if (!getOrCreateVideoTrack()) {
-        // 没有视频轨(初始化失败)时不用报错:调用方是"按模式门控"的逻辑,
-        // 拿不到轨就是没得发,静默即可
+        // 没有视频轨（初始化失败）时不用报错：调用方是"按模式门控"的逻辑，
+        // 拿不到轨就是没得发，静默即可
         return;
     }
 
@@ -952,9 +910,9 @@ void WebrtcManager::setLocalVideoEnabled(bool enabled) {
 
     m_localVideoTrack->set_enabled(enabled);
 
-    // 切模式时才会走这里,频率很低,放 Info
-    LOG_INFO("WebRTC") << "推送视频已" << (enabled ? "开启" : "关闭") << "(当前"
-                       << m_peers.size() << "个对端)";
+    // 切模式时才会走这里，频率很低，放 Info
+    LOG_INFO("WebRTC") << (enabled ? "推送视频已开启" : "推送视频已关闭")
+                       << "(当前" << m_peers.size() << "个对端)";
 }
 
 void WebrtcManager::setVideoQuality(VideoQuality quality) {
@@ -986,9 +944,9 @@ void WebrtcManager::setMovieAudioEnabled(bool enabled) {
 
     m_localMovieAudioTrack->set_enabled(enabled);
 
-    // 这条跟着播放/暂停走,频率不低,放 Debug
-    LOG_DEBUG("WebRTC") << "电影音轨已" << (enabled ? "开启" : "关闭") << "(当前"
-                        << m_peers.size() << "个对端)";
+    // 这条跟着播放/暂停走，频率不低，放 Debug
+    LOG_DEBUG("WebRTC") << (enabled ? "电影音轨已开启" : "电影音轨已关闭")
+                        << "(当前" << m_peers.size() << "个对端)";
     emit movieAudioEnabledChanged(enabled);
 }
 
@@ -1042,7 +1000,7 @@ void WebrtcManager::setRemoteMovieVolume(double volume) {
 
     m_remoteMovieVolume = volume;
 
-    // 电影声与 WebRTC 无关,由 MovieAudioPlayer 控制
+    // 电影声与 WebRTC 无关，由 MovieAudioPlayer 控制
     if (m_movieAudioPlayer != nullptr)
         m_movieAudioPlayer->setVolume(volume);
 
@@ -1057,7 +1015,7 @@ void WebrtcManager::setRemoteChatVolume(double volume) {
 
     m_remoteChatVolume = volume;
 
-    // 语音音量由 WebRTC 自己的播放控制,所以要遍历所有对端连接,把 volume 传给它们的 PeerLink
+    // 语音音量由 WebRTC 自己的播放控制，所以要遍历所有对端连接，把 volume 传给它们的 PeerLink
     for (auto it = m_peers.constBegin(); it != m_peers.constEnd(); ++it) {
         if (it->voice != nullptr)
             it->voice->setRemoteAudioVolume(volume);
@@ -1136,8 +1094,8 @@ bool WebrtcManager::initializeVoiceFactory() {
         return false;
     }
 
-    // 真声卡:default_adm 传 nullptr,让 WebRTC 用平台默认设备。
-    // 回声消除、自动增益、噪声抑制都靠它,语音质量全在这里。
+    // 真声卡：default_adm 传 nullptr,让 WebRTC 用平台默认设备。
+    // 回声消除、自动增益、噪声抑制都靠它，语音质量全在这里。
     m_voiceFactory = webrtc::CreatePeerConnectionFactory(
         m_voiceNetworkThread.get(),
         m_voiceWorkerThread.get(),
@@ -1157,31 +1115,17 @@ bool WebrtcManager::initializeVoiceFactory() {
         return false;
     }
 
-    // ---- 建那条"保活连接"(声卡不被关掉的唯一理由)----
-    //
-    // 背景:WebRTC 的 media engine(持有我们这块真声卡)按引用计数关闭,
-    // 引用它的只有 PeerConnection(pc/connection_context.cc 的
-    // MediaEngineReference)。离开房间时所有对端都被销毁 → 引用归零 →
-    // WebRtcVoiceEngine::Terminate() → adm()->Terminate()。
-    //
-    // 正常情况下这没什么 —— 下次进房引擎会重新 Init 声卡。但 PulseAudio
-    // 那一支上这一刀是**不可逆的**:
-    //   modules/audio_device/linux/audio_device_pulse_linux.cc
-    //   · Terminate() 把 quit_ 置为 true;
-    //   · 只有**构造函数**会把它复位成 false;
-    //   · Init() 重新拉起的播放/录音线程,一睁眼就是
-    //     "if (quit_) return false;"(同文件 PlayThreadProcess/RecThreadProcess),
-    //     于是线程立刻退出。
-    // 结果:StartPlayout()/StartRecording() 永远等不到启动事件,10 秒后
-    // 返回 -1 —— 第二次进房之后麦克风和听筒**全都哑掉**。
-    //
-    // 实测(一次性自检程序,同一进程内):建对端 → 声卡初始化 true;
-    // 销毁全部对端 → 声卡初始化 false;再建对端 → 初始化又 true,
-    // 但 StartPlayout 与 StartRecording 双双返回 -1。
-    //
-    // 所以这里留一条什么都不做的连接活着,引用计数就永远 ≥ 1,引擎不关声卡,
-    // 这个坑便绕过去了。它是给上游 bug 打的补丁,不该被"清理掉"。
-    // (media 工厂不需要:那边是假声卡,根本没有线程。)
+    // ---- 保活连接（声卡不被关闭的唯一理由）----
+    // WebRTC 的 media engine（持有本端真声卡）按引用计数关闭，引用者只有
+    // PeerConnection（pc/connection_context.cc 的 MediaEngineReference）。
+    // 离开房间销毁全部对端 → 引用归零 → WebRtcVoiceEngine::Terminate() →
+    // adm()->Terminate()。下次进房引擎会重新 Init，但 PulseAudio 分支上该操作
+    // 不可逆（audio_device_pulse_linux.cc）：Terminate() 置 quit_ = true，
+    // 仅构造函数会将其复位，Init() 重启的播放/录音线程读到 quit_ 后立即退出，
+    // 导致 StartPlayout()/StartRecording() 等待 10 秒后返回 -1——
+    // 第二次进房后麦克风与听筒全部失效（实测）。
+    // 故保留一条不参与任何操作的连接，使引用计数恒 ≥ 1。
+    // 这是上游缺陷的补丁，不应被清理；media 工厂不需要（假声卡无线程）。
     webrtc::PeerConnectionInterface::RTCConfiguration keepAliveConfig;
     webrtc::PeerConnectionDependencies keepAliveDeps(&m_voiceKeepAliveObserver);
     auto keepAliveResult =
@@ -1190,7 +1134,7 @@ bool WebrtcManager::initializeVoiceFactory() {
         m_voiceKeepAlive = keepAliveResult.value();
         LOG_INFO("WebRTC") << "已建立常驻保活连接(防止退房时声卡被永久关掉)";
     } else {
-        // 没建成也不算致命:只是"离开房间后再进房会没声音"那个老问题会回来
+        // 没建成也不算致命：只是"离开房间后再进房会没声音"那个老问题会回来
         LOG_WARN("WebRTC") << "保活连接创建失败:"
                            << QString::fromStdString(keepAliveResult.error().message())
                            << "(退房后再进房可能没声音)";
@@ -1227,26 +1171,26 @@ bool WebrtcManager::initializeMediaFactory() {
 }
 
 void WebrtcManager::destroy() {
-    // 释放顺序是有依赖的,不能随意调整: 对端 → 轨/源 → 工厂 → 线程
-    // 理由:
-    //   - 对端要在最前:关连接时 WebRTC 还可能在回调,线程必须还活着
-    //   - 轨/音频源要在工厂之前:它们内部持有工厂引用,
+    // 释放顺序有依赖，不可随意调整：对端 → 轨/源 → 工厂 → 线程
+    // 理由：
+    //   - 对端要在最前：关连接时 WebRTC 还可能在回调，线程必须还活着
+    //   - 轨/音频源要在工厂之前：它们内部持有工厂引用，
     //     工厂先没了它们就指向一块已释放的内存
-    //   - 轨要在源之前:轨引用源,反过来则会留下悬空引用
-    //   - 工厂要在线程之前:工厂内部引用这些线程,
+    //   - 轨要在源之前：轨引用源，反过来则会留下悬空引用
+    //   - 工厂要在线程之前：工厂内部引用这些线程，
     //     先停线程会让工厂里的引用失效
 
     // 1. 对端连接 —— 必须在停线程之前
     closeAllPeers();
 
-    // 保活连接也是连接,和解房间里的对端一样要放在工厂之前释放。
-    // 走到这一步说明整个 WebRTC 世界都在拆,不需要它再撑着声卡了。
+    // 保活连接也是连接，和解房间里的对端一样要放在工厂之前释放。
+    // 走到这一步说明整个 WebRTC 世界都在拆，不需要它再撑着声卡了。
     m_voiceKeepAlive = nullptr;
 
-    // 接收侧播放器要在工厂之前放掉:它内部持有 WebRTC 的 sink 注册关系
+    // 接收侧播放器要在工厂之前放掉：它内部持有 WebRTC 的 sink 注册关系
     m_movieAudioPlayer.reset();
 
-    // 2. 轨 → 源 → 工厂(顺序同上:引用方先释放)
+    // 2. 轨 → 源 → 工厂（顺序同上：引用方先释放）
     m_localVideoTrack = nullptr;
     m_localAudioTrack = nullptr;
     m_localMovieAudioTrack = nullptr;
@@ -1254,7 +1198,7 @@ void WebrtcManager::destroy() {
     m_audioSource = nullptr;
     m_movieAudioSource = nullptr;
 
-    // 接收侧渲染器也要在工厂之前放掉:它内部的转换会用到 WebRTC 的类型
+    // 接收侧渲染器也要在工厂之前放掉：它内部的转换会用到 WebRTC 的类型
     m_remoteRenderer.reset();
 
     m_voiceFactory = nullptr;
@@ -1264,9 +1208,9 @@ void WebrtcManager::destroy() {
     stopThreadSet(m_voiceNetworkThread, m_voiceWorkerThread, m_voiceSignalingThread);
     stopThreadSet(m_mediaNetworkThread, m_mediaWorkerThread, m_mediaSignalingThread);
 
-    // 4. 两块声卡和环境放最后:工厂已经不再持有它们了。
-    //    **ADM 比 Environment 先放** —— 它们内部持有对环境的引用
-    //    (Environment 是值类型、各自存了一份,但顺序颠倒仍然容易踩坑)。
+    // 4. 两块声卡和环境放最后：工厂已经不再持有它们了。
+    //    **ADM 须早于 Environment 释放** —— 它们内部持有对环境的引用
+    //    （Environment 为值类型、各自存有一份，但顺序颠倒仍会导致错误）。
     m_dummyAdm = nullptr;
     m_voiceAdm = nullptr;
     m_mediaEnvironment.reset();

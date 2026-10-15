@@ -36,7 +36,7 @@ uint32_t toLibyuvFourcc(QVideoFrameFormat::PixelFormat format) {
         // Y 平面 + UV 交错平面
         return libyuv::FOURCC_NV12;
     case QVideoFrameFormat::Format_NV21:
-        // Y 平面 + VU 交错平面(和 NV12 的 UV 顺序相反)
+        // Y 平面 + VU 交错平面（和 NV12 的 UV 顺序相反）
         return libyuv::FOURCC_NV21;
     case QVideoFrameFormat::Format_YUYV:
         return libyuv::FOURCC_YUY2;
@@ -45,12 +45,11 @@ uint32_t toLibyuvFourcc(QVideoFrameFormat::PixelFormat format) {
     }
 }
 
-// 10bit 的两种布局。它们的 FourCC 是 0(不是"不认识",而是"没有对应的 8bit 四字码"),
-// 所以单独判断,别和"不支持"混在一起。
-//
-// 为什么必须处理:**HDR10 就是 10bit**(hevc 10bit + PQ + BT.2020),而现在的
-// Qt FFmpeg 后端对 10bit 内容给的就是下面的格式。不处理的话,共享模式下房主
-// 一播 HDR,推流这一路每一帧都被丢掉 —— 观众看到的是黑屏。
+// 10bit 的两种布局。其 FourCC 为 0（并非「不认识」，而是没有对应的 8bit 四字码），
+// 故单独判断，不可与「不支持」混为一谈。
+// 必须处理的原因：HDR10 即 10bit（hevc 10bit + PQ + BT.2020），而 Qt FFmpeg 后端
+// 对 10bit 内容返回的正是这两种格式；若不处理，共享模式下房主播放 HDR 时，
+// 推流侧每一帧都会被丢弃，观众端看到黑屏。
 bool isTenBit(QVideoFrameFormat::PixelFormat format) {
     return format == QVideoFrameFormat::Format_P010          // 半平面(实测:Qt 给的就是它)
         || format == QVideoFrameFormat::Format_YUV420P10;    // 三平面
@@ -70,7 +69,7 @@ void VideoTrackSource::pushFrame(const webrtc::VideoFrame &frame) {
     m_height = frame.height();
     m_hasReceivedFrame = true;
 
-    // 广播给所有订阅者(编码器) —— 他们会各自去编码,然后发 RTP
+    // 广播给所有订阅者（编码器） —— 他们会各自去编码，然后发 RTP
     m_broadcaster.OnFrame(frame);
 }
 
@@ -78,8 +77,8 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
     if (!frame.isValid())
         return;
 
-    // map() 不是 const 方法,而且必须和 unmap() 配对。
-    // 拷一份出来(隐式共享,很廉价),并保证所有出口都会 unmap。
+    // map() 不是 const 方法，而且必须和 unmap() 配对。
+    // 拷一份出来（隐式共享，很廉价）,并保证所有出口都会 unmap。
     QVideoFrame mapped = frame;
 
     const QVideoFrameFormat::PixelFormat pixelFormat = mapped.surfaceFormat().pixelFormat();
@@ -108,12 +107,10 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
         return;
     }
 
-    // 诊断:把源帧的真实像素格式和行距打出来。
-    //
-    // 为什么值得单独打:画面"斜切/撕裂"是行距算错的典型症状,而颜色错位是
-    // 平面偏移算错的症状 —— 两者都不报错,只能靠这几个数字定位。
-    // Qt 6.5 起媒体后端由 GStreamer 换成 FFmpeg,同一个文件给出的像素格式
-    // 可能和以前不同(见 CMakePresets 里的迁移说明)。
+    // 诊断：记录源帧的真实像素格式与行距。
+    // 画面「斜切/撕裂」是行距算错的典型症状，颜色错位则是平面偏移算错的症状，
+    // 两者均不报错，只能依靠这几个数值定位。Qt 6.5 起媒体后端由 GStreamer
+    // 改为 FFmpeg，同一文件给出的像素格式可能与以往不同（见 CMakePresets）。
     static int diagCount = 0;
     if (diagCount < 3 || diagCount % 300 == 0) {
         LOG_TRACE("VideoSource") << "源帧: pixelFormat=" << mapped.surfaceFormat().pixelFormat()
@@ -125,8 +122,8 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
                  << " strideV=" << (mapped.planeCount() > 2 ? mapped.bytesPerLine(2) : 0)
                  << " fourcc=" << fourcc;
 
-        // 决定性的一组数字:UV 平面的实际偏移 vs libyuv 会去推算的偏移。
-        // 两者不等,就说明"按显示高度推算 UV 位置"必然读错 —— 这正是上面
+        // 决定性的一组数字：UV 平面的实际偏移 vs libyuv 会去推算的偏移。
+        // 两者不等，就说明"按显示高度推算 UV 位置"必然读错 —— 这正是上面
         // 改用 NV12ToI420(显式传指针)的原因。
         if (mapped.planeCount() > 1 && mapped.bits(0) != nullptr && mapped.bits(1) != nullptr) {
             const long long actualUvOffset = mapped.bits(1) - mapped.bits(0);
@@ -140,10 +137,10 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
     ++diagCount;
 
     // WebRTC 要的是**紧凑**的 I420:每个平面的行距等于宽度。
-    // 而 Qt 给的帧行距往往更大(内存对齐填充),所以不能直接把 Qt 的
-    // 缓冲区交给 WebRTC —— 必须按行搬一遍,把填充去掉。
+    // 而 Qt 给的帧行距往往更大（内存对齐填充）,所以不能直接把 Qt 的
+    // 缓冲区交给 WebRTC —— 必须按行搬一遍，把填充去掉。
     //
-    // 行距传错的症状是画面逐行错位(斜切),而且不会有任何报错。
+    // 行距传错的症状是画面逐行错位（斜切）,而且不会有任何报错。
     const int chromaWidth = (width + 1) / 2;
 
     webrtc::scoped_refptr<webrtc::I420Buffer> buffer =
@@ -159,18 +156,11 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
     int ret = 0;
 
     if (pixelFormat == QVideoFrameFormat::Format_P010) {
-        // 10bit 半平面(P010):HDR 内容走的就是这条。
-        //
-        // libyuv 没有 P010→I420 的一步转换,所以先降到 8bit 的 NV12,
-        // 再复用下面那条已经调好的 NV12 路径。
-        //
-        // **这一步只降位深、不做色调映射** —— 所以观众看到的是"HDR 当 SDR 用"
-        // 的效果(偏暗、发灰),而不是本机那种过曝。要真正修好 HDR,
-        // 得在整条链路上做 HDR→SDR 映射,那是另一件事。
-        //
-        // **步进单位是"元素"不是字节**:libyuv 的这些 16bit 函数内部直接把
-        // stride 用在 uint16_t* 的指针运算上,所以要除以 2。传字节数的话
-        // 画面会逐行错位(斜切)—— 而且不会有任何报错。
+        // 10bit 半平面（P010），HDR 内容走这条。libyuv 无 P010→I420 的一步转换，
+        // 故先降为 8bit 的 NV12 再复用下方路径。此步只降位深、不做色调映射，
+        // 观众看到的是「HDR 当 SDR 用」（偏暗发灰），非本机的过曝。
+        // **步进单位为元素而非字节**：libyuv 的 16bit 函数将 stride 直接用于
+        // uint16_t* 指针运算，故须除以 2；传字节数会导致画面逐行错位且无任何报错。
         auto nv12 = webrtc::NV12Buffer::Create(width, height);
         ret = libyuv::P010ToNV12(
             reinterpret_cast<const uint16_t *>(srcY), srcStrideY / 2,
@@ -189,9 +179,9 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
                 width, height);
         }
     } else if (pixelFormat == QVideoFrameFormat::Format_YUV420P10) {
-        // 10bit 三平面(I010):三块 16bit 平面,同样是元素步进。
-        // 注意这里**不能**沿用上面 NV12 的"显式传 UV 指针"那套讨论 ——
-        // 三平面各给各的指针,libyuv 不需要推算任何偏移。
+        // 10bit 三平面（I010）：三块 16bit 平面，同样为元素步进。
+        // 此处不涉及上方 NV12 的「显式传 UV 指针」问题——三平面各给各的指针，
+        // libyuv 无需推算偏移。
         ret = libyuv::I010ToI420(
             reinterpret_cast<const uint16_t *>(srcY), srcStrideY / 2,
             reinterpret_cast<const uint16_t *>(srcU), srcStrideU / 2,
@@ -201,13 +191,10 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
             buffer->MutableDataV(), buffer->StrideV(),
             width, height);
     } else if (fourcc == libyuv::FOURCC_I420) {
-        // 源已经是 I420(三平面分开),只是行距可能比宽度大(填充)。
-        //
-        // **必须用 I420Copy,不能用 ConvertToI420。**
-        // 后者在 FOURCC_I420 模式下会把三个平面当成"紧挨着连续存放",
-        // 自己去算平面偏移 —— 于是忽略你传的行距,把填充字节当成内容读。
-        // 症状很典型:第 0 行对、从第 1 行起全错。
-        // I420Copy 明确按行距逐行搬,不做四字码解析,才是这种情况的正确工具。
+        // 源已是 I420（三平面分离），行距可能大于宽度（存在填充）。
+        // **必须用 I420Copy，不可用 ConvertToI420**：后者在 FOURCC_I420 模式下
+        // 将三平面视为紧邻连续存放并自行计算平面偏移，从而忽略传入的行距、
+        // 把填充字节当作内容读取；症状为第 0 行正确、第 1 行起全错。
         ret = libyuv::I420Copy(
             srcY, srcStrideY,
             srcU, srcStrideU,
@@ -217,25 +204,14 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
             buffer->MutableDataV(), buffer->StrideV(),
             width, height);
     } else if (fourcc == libyuv::FOURCC_NV12) {
-        // NV12:一个 Y 平面 + 一个 UV 交错平面。
-        //
-        // **必须显式传 UV 指针,不能用 ConvertToI420。**
-        //
-        // ConvertToI420 会自己去算 UV 平面的位置,规则是
-        //     src_uv = src_y + src_stride_y * src_height
-        // 这个公式只在"解码缓冲的行数恰好等于显示高度"时成立。
-        //
-        // 而 H.264 的宏块是 16×16,解码器按编码尺寸(width/height 向上取整到
-        // 16 的倍数)分配缓冲。一旦显示尺寸不是 16 的倍数(例如 1916×1036),
-        // 缓冲的行数就比显示高度多几行,UV 的实际位置相应前移 ——
-        // 而 libyuv 还按显示高度去算,读到的位置就落在 Y 数据里,
-        // 表现为色块错位、甚至整幅斜切。
-        //
-        // 两个实测样本正好印证:
-        //   2560×1600(宽高都是 16 的倍数,缓冲行数 == 显示高度)→ 基本能看,但有色偏
-        //   1916×1036(不是 16 的倍数,缓冲 1920×1040)→ 完全花掉
-        //
-        // NV12ToI420 直接收 UV 指针,不做任何假设,所以两种情况都对。
+        // NV12：一个 Y 平面 + 一个 UV 交错平面。
+        // **必须显式传 UV 指针，不可用 ConvertToI420**：后者按
+        // src_uv = src_y + src_stride_y * src_height 自行推算 UV 位置，
+        // 该式仅在解码缓冲行数等于显示高度时成立。而 H.264 宏块为 16×16，
+        // 解码器按向上取整到 16 的倍数分配缓冲；显示尺寸非 16 倍数时
+        // （实测 1916×1036，缓冲为 1920×1040）UV 实际位置前移，
+        // 推算结果落在 Y 数据中，表现为色块错位甚至整幅斜切。
+        // NV12ToI420 直接接收 UV 指针、不做任何假设，两种情况均正确。
         ret = libyuv::NV12ToI420(
             srcY, srcStrideY,
             srcU, srcStrideU,           // ← 用 Qt 给的实际 UV 指针,而不是推算出来的
@@ -244,7 +220,7 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
             buffer->MutableDataV(), buffer->StrideV(),
             width, height);
     } else if (fourcc == libyuv::FOURCC_NV21) {
-        // NV21 与 NV12 只差 UV 两个分量的先后顺序,同样的道理。
+        // NV21 与 NV12 只差 UV 两个分量的先后顺序，同样的道理。
         ret = libyuv::NV21ToI420(
             srcY, srcStrideY,
             srcU, srcStrideU,
@@ -253,7 +229,7 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
             buffer->MutableDataV(), buffer->StrideV(),
             width, height);
     } else {
-        // YUY2 是单平面打包格式,没有第二个平面可传,不存在上面那个问题。
+        // YUY2 是单平面打包格式，没有第二个平面可传，不存在上面那个问题。
         ret = libyuv::YUY2ToI420(
             srcY, srcStrideY,
             buffer->MutableDataY(), buffer->StrideY(),
@@ -264,22 +240,13 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
 
     const int rotationAngle = mapped.rotationAngle();
 
-    // ★ 时间戳不能用媒体的 startTime,必须用单调时钟。
-    //
-    //   startTime 是"媒体内的时间":换源/重播时从 0 重新开始,
-    //   往回 seek 时直接跳回更早的值 —— 而 RTP 时间轴要求单调递增。
-    //   时间戳一旦回退:
-    //     · 播放中往回 seek → 观众解码器把新帧当"旧帧"丢弃,
-    //       直到时间轴追上(几十秒后才恢复)→ 表现为卡住
-    //     · 播完重播 / 换源 → 从 120s 跳回 0,永远追不上 → 永久卡死
-    //     · 暂停时 seek 没事,是因为断流期间解码器重置了时间基准
-    //
-    //   本应用的画面同步靠控制消息(play/pause/seek),不依赖 RTP 时间戳,
-    //   所以直接改用单调时钟:帧间隔照实,时间轴永远递增,
-    //   换源、重播、任意方向 seek 都不会打断观众端。
-    //
-    //   +1 兜底:极端情况下两帧落在同一微秒,保证严格递增
-    //   (编码器会丢弃时间戳相等的帧)。
+    // 时间戳必须使用单调时钟，不可用媒体的 startTime：
+    // startTime 是媒体内时间，换源/重播时从 0 重新开始、往回 seek 时跳回更早的值，
+    // 而 RTP 时间轴要求单调递增。时间戳回退会导致观众端解码器将新帧当作旧帧丢弃，
+    // 直到时间轴追上（表现为卡住）；重播或换源时从 120s 跳回 0 则永远追不上，
+    // 表现为永久卡死。本应用的画面同步依赖控制消息（play/pause/seek），
+    // 不依赖 RTP 时间戳，故改用单调时钟：帧间隔照实、时间轴永远递增。
+    // +1 兜底：两帧落在同一微秒时保证严格递增（编码器会丢弃时间戳相等的帧）。
     int64_t timestampUs = webrtc::TimeMicros();
     if (timestampUs <= m_lastTimestampUs)
         timestampUs = m_lastTimestampUs + 1;
@@ -291,7 +258,8 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
         static bool warned = false;
         if (!warned) {
             warned = true;
-            LOG_ERROR("VideoSource") << "帧格式转换失败,返回" << ret;
+            LOG_ERROR("VideoSource") << "帧格式转换失败，libyuv 返回" << ret
+                                     << " pixelFormat=" << pixelFormat;
         }
         return;
     }
@@ -321,8 +289,8 @@ void VideoTrackSource::AddOrUpdateSink(webrtc::VideoSinkInterface<webrtc::VideoF
     if (sink == nullptr)
         return;
 
-    // 编码器在这里注册自己。同一根轨道重复注册时本函数会被再次调用,
-    // 所以按指针去重,否则计数会越加越多。
+    // 编码器在这里注册自己。同一根轨道重复注册时本函数会被再次调用，
+    // 所以按指针去重，否则计数会越加越多。
     if (m_registeredSinks.insert(sink).second) {
         ++m_sinkCount;
         LOG_INFO("VideoSource") << "编码器已接入,当前订阅者 =" << m_sinkCount;
@@ -339,7 +307,7 @@ void VideoTrackSource::RemoveSink(webrtc::VideoSinkInterface<webrtc::VideoFrame>
 }
 
 void VideoTrackSource::RequestRefreshFrame() {
-    // 上游是本地文件,新订阅者下一帧就会拿到,不需要主动要。
+    // 上游是本地文件，新订阅者下一帧就会拿到，不需要主动要。
     // (直播场景才需要让摄像头立刻编一个关键帧。)
 }
 
@@ -349,12 +317,12 @@ void VideoTrackSource::RequestRefreshFrame() {
 
 VideoTrackSource::SourceState VideoTrackSource::state() const {
     // kLive 表示"源是活的、可以随时出帧"。
-    // 用 kEnded 会让 WebRTC 认为流已结束,不再发送。
+    // 用 kEnded 会让 WebRTC 认为流已结束，不再发送。
     return m_hasReceivedFrame ? kLive : kInitializing;
 }
 
 bool VideoTrackSource::remote() const {
-    // 这是本地源,不是从远端收到的
+    // 这是本地源，不是从远端收到的
     return false;
 }
 
@@ -363,13 +331,13 @@ bool VideoTrackSource::remote() const {
 // ============================
 
 bool VideoTrackSource::is_screencast() const {
-    // 我们发的是解码后的视频帧,不是屏幕采集。
-    // 这个标志会影响编码器的码率策略,选错会让画质异常。
+    // 本端发送的是解码后的视频帧，并非屏幕采集。
+    // 该标志会影响编码器的码率策略，取值错误会导致画质异常。
     return false;
 }
 
 std::optional<bool> VideoTrackSource::needs_denoising() const {
-    // 源视频已经是重编码过的,没有传感器噪声,不需要降噪
+    // 源视频已经是重编码过的，没有传感器噪声，不需要降噪
     return false;
 }
 
@@ -383,18 +351,18 @@ bool VideoTrackSource::GetStats(Stats *stats) {
 }
 
 bool VideoTrackSource::SupportsEncodedOutput() const {
-    // 我们喂的是原始帧,不支持直接输出编码后的帧
+    // 本端喂入的是原始帧，不支持直接输出编码后的帧
     return false;
 }
 
 void VideoTrackSource::GenerateKeyFrame() {
-    // 关键帧由编码器决定何时生成。上游是原始帧,没有"强制下一个帧是关键帧"
-    // 的能力 —— 那是编码器的事。
+    // 关键帧的生成时机由编码器决定。上游为原始帧，不具备「强制下一帧为关键帧」
+    // 的能力，那属于编码器职责。
 }
 
 void VideoTrackSource::AddEncodedSink(
     webrtc::VideoSinkInterface<webrtc::RecordableEncodedFrame> *sink) {
-    // 仅当 SupportsEncodedOutput() 为 true 时才有意义,我们是 false
+    // 仅在 SupportsEncodedOutput() 为 true 时有意义，本类返回 false
 }
 
 void VideoTrackSource::RemoveEncodedSink(

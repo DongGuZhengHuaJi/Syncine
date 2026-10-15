@@ -1,17 +1,15 @@
 //
-// 远端视频渲染 —— 接收侧,VideoTrackSource 的镜像。
+// 远端视频渲染：接收侧，VideoTrackSource 的镜像。
 //
 //   发送侧:  QVideoFrame ──转换──→ webrtc::VideoFrame → 编码器
 //   接收侧:  解码器 → webrtc::VideoFrame ──转换──→ QVideoFrame → QVideoSink
 //
-// 为什么需要它:
+// 需要适配器的原因：WebRTC 的 VideoSinkInterface 与 Qt 的 QVideoSink 是两套不同的
+// 接口，且 WebRTC 提供的是 I420 平面数据（带行距填充），Qt 的 QVideoFrame 需要自身的
+// 格式描述，转换只能在此完成。
 //
-//   WebRTC 的 VideoSinkInterface 和 Qt 的 QVideoSink 是两套完全不同的接口,
-//   中间必须有个适配器。而且 WebRTC 给的是 I420 平面数据(还带行距填充),
-//   Qt 的 QVideoFrame 要的是它自己的格式描述 —— 转换也只能在这里做。
-//
-// 线程:帧从 WebRTC 信令线程到达,而 QVideoSink 归属 GUI 线程,
-//      所以 OnFrame 里只排队,真正的转换和投递在 GUI 线程做。
+// 线程：帧由 WebRTC 信令线程到达，而 QVideoSink 归属 GUI 线程，故 OnFrame 中只入队，
+// 转换与投递均在 GUI 线程执行。
 //
 
 #ifndef SYNCINE_REMOTEVIDEORENDERER_H
@@ -53,13 +51,13 @@ public:
     }
 
 private:
-    // 真正干活的地方,在 GUI 线程执行(取出暂存的最新帧并渲染)
+    // 真正干活的地方，在 GUI 线程执行（取出暂存的最新帧并渲染）
     void deliverPendingFrame();
 
     int m_frameCount = 0;
     int m_discardedCount = 0;
 
-    // ---- 帧暂存区:只保留"最新的一帧" ----
+    // ---- 帧暂存区：只保留"最新的一帧" ----
     std::mutex m_frameMutex;
     std::optional<webrtc::VideoFrame> m_pendingFrame;
 
@@ -69,7 +67,7 @@ private:
     // 是否往 sink 写帧)。由 setWritingEnabled 切换。
     bool m_writingEnabled = true;
 
-    // QVideoSink 的生命周期由 PlaybackController 掌管,这里只借用
+    // QVideoSink 的生命周期由 PlaybackController 掌管，这里只借用
     QVideoSink *m_targetSink = nullptr;
 };
 

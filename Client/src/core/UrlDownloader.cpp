@@ -20,7 +20,7 @@ namespace {
 
 constexpr int kTailLines = 25; // 失败时留给用户看的输出行数
 
-// "NA" 是 yt-dlp 在字段拿不到时的占位,不是数字
+// "NA" 是 yt-dlp 在字段拿不到时的占位，不是数字
 bool numberOrNa(const QString &text, double *value)
 {
     if (text.isEmpty() || text == QLatin1String("NA"))
@@ -33,7 +33,7 @@ bool numberOrNa(const QString &text, double *value)
     return true;
 }
 
-// 目录名只留安全字符:房间号/条目 id 都来自服务端,不能拿来拼路径
+// 目录名只留安全字符：房间号/条目 id 都来自服务端，不能拿来拼路径
 QString sanitize(const QString &text)
 {
     QString result;
@@ -61,10 +61,10 @@ QString formatEta(int seconds)
         .arg(seconds % 60, 2, 10, QLatin1Char('0'));
 }
 
-// 从 yt-dlp 的输出里挑"原因"那一行。它出错时总是打一行 ERROR: 开头的话,
-// 而周围混着别的东西(合并通道把 stderr 也并进来了,`-J` 失败时还会单独
-// 输出一个 null)—— 整段原样显示会带一堆噪声,只挑 ERROR 那行最清楚。
-// 挑不到(比如根本不是 yt-dlp 的报错)就退回整段原文。
+// 从 yt-dlp 的输出里挑"原因"那一行。它出错时总是打一行 ERROR: 开头的话，
+// 而周围混着别的东西(合并通道把 stderr 也并进来了，`-J` 失败时还会单独
+// 输出一个 null)—— 整段原样显示会带一堆噪声，只挑 ERROR 那行最清楚。
+// 挑不到（比如根本不是 yt-dlp 的报错）就退回整段原文。
 QString errorFromOutput(const QStringList &output, const QString &fallback)
 {
     for (int i = output.size() - 1; i >= 0; --i) {
@@ -75,8 +75,8 @@ QString errorFromOutput(const QStringList &output, const QString &fallback)
     return output.isEmpty() ? fallback : output.join(QLatin1Char('\n'));
 }
 
-// 手动钉的 format_id 在本端 formats 里不存在时,yt-dlp 会报这个。
-// 这时退回"按档位重挑"再试一次(见 handleDownloadFinished)。
+// 手动钉的 format_id 在本端 formats 里不存在时，yt-dlp 会报这个。
+// 这时退回"按档位重挑"再试一次（见 handleDownloadFinished）。
 bool looksLikeFormatUnavailable(const QStringList &output)
 {
     for (const QString &line : output) {
@@ -160,7 +160,7 @@ void UrlDownloader::startResolve(const QString &url, const QString &spec)
 
 void UrlDownloader::handleResolveFinished(int exitCode)
 {
-    // 探测的 stdout 就是那一整份 JSON(合并通道后它可能和警告混在一起,
+    // 探测的 stdout 就是那一整份 JSON(合并通道后它可能和警告混在一起，
     // 所以从第一个 '{' 开始截)
     const QByteArray output = m_outputBuffer;
     const int start = output.indexOf('{');
@@ -176,8 +176,8 @@ void UrlDownloader::handleResolveFinished(int exitCode)
     m_selection = MediaFormats::resolve(m_spec, m_media);
 
     if (!m_selection.valid) {
-        // 直播走到这里 = 没有能直接拉的流(通常是要登录/要特殊请求头);
-        // 普通视频走到这里 = 连一条画面都挑不出来(空 formats 之类)
+        // 直播走到这里 = 没有能直接拉的流（通常是要登录/要特殊请求头）;
+        // 普通视频走到这里 = 连一条画面都挑不出来（空 formats 之类）
         reportFailure(m_media.live
                           ? QStringLiteral("这个直播源没有可直接播放的流"
                                            "，请检查输入内容或Cookie状态")
@@ -192,7 +192,7 @@ void UrlDownloader::handleResolveFinished(int exitCode)
                               << (m_selection.direct ? "(直链)" : "(下载合并)");
 
     if (m_selection.direct) {
-        // 合一格式(或直播的 m3u8):试一下能不能直接拉 —— 能就交给播放器
+        // 合一格式（或直播的 m3u8）:试一下能不能直接拉 —— 能就交给播放器
         m_verifyCandidate = m_selection.url;
         verifyDirectUrl(m_verifyCandidate);
         return;
@@ -205,7 +205,7 @@ void UrlDownloader::verifyDirectUrl(const QString &url)
 {
     QNetworkRequest request{QUrl(url)};
     // 测试一个字节，验证能否响应
-    // 不携带消息头(Referer/Cookie) —— 后续播放器无法携带
+    // 不携带消息头（Referer/Cookie） —— 后续播放器无法携带
     request.setRawHeader("Range", "bytes=0-0");
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -258,7 +258,7 @@ void UrlDownloader::verifyDirectUrl(const QString &url)
 void UrlDownloader::beginDownload(int /*exitCode*/)
 {
     if (m_destDir.isEmpty()) {
-        // 没指定目录就放在系统临时目录里,每次新建一个 syncine/download 子目录
+        // 没指定目录就放在系统临时目录里，每次新建一个 syncine/download 子目录
         m_destDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation)
                     + QStringLiteral("/syncine/download");
     }
@@ -282,7 +282,7 @@ void UrlDownloader::beginDownload(int /*exitCode*/)
         QFile::remove(destDirInfo.absoluteFilePath(name));
     setStage(QStringLiteral("downloading"));
 
-    // 输出名固定成 media.<ext>:扩展名事先不知道(要看源格式,合并后是 mkv),
+    // 输出名固定成 media.<ext>:扩展名事先不知道（要看源格式，合并后是 mkv）,
     // 结束时在目录里 glob "media.*" 就能拿到。
     m_outputTemplate = m_destDir + QStringLiteral("/media.%(ext)s");
     const QString progressTemplate = QStringLiteral(
@@ -295,17 +295,17 @@ void UrlDownloader::beginDownload(int /*exitCode*/)
                         QStringLiteral("-o"), m_outputTemplate};
 
     if (m_selection.video.kind == MediaFormat::Combined && !m_selection.formatExpression.isEmpty()) {
-        // 用户手选的是一条合一格式:原样照下,不转换不合并
+        // 用户手选的是一条合一格式：原样照下，不转换不合并
         options << QStringLiteral("-f") << m_selection.formatExpression;
     } else if (!m_selection.formatExpression.isEmpty()) {
-        // 用户手选的一对具体流:精确指定。
-        // 合并格式按容器名定(mkv 能装几乎所有编码组合,也是最稳的):
+        // 用户手选的一对具体流：精确指定。
+        // 合并格式按容器名定（mkv 能装几乎所有编码组合，也是最稳的）:
         // 源本身就是单文件 mp4 时不重封装。
         options << QStringLiteral("-f") << m_selection.formatExpression
                 << QStringLiteral("--merge-output-format") << QStringLiteral("mkv");
     } else if (!m_selection.sortArgs.isEmpty()) {
-        // 档位:不写 -f,让 yt-dlp 按 -S 的优先级自己挑(见 FormatModel.h 顶部
-        // 为什么不写 `-f "bv*[height<=1080]"` —— 那是筛选,不是排序,实测会降档)
+        // 档位：不写 -f,让 yt-dlp 按 -S 的优先级自己挑(见 FormatModel.h 顶部
+        // 为什么不写 `-f "bv*[height<=1080]"` —— 那是筛选，不是排序，实测会降档)
         options << QStringLiteral("-f") << QStringLiteral("bv*+ba/b")
                 << QStringLiteral("-S") << m_selection.sortArgs.first()
                 << QStringLiteral("--merge-output-format") << QStringLiteral("mkv");
@@ -326,7 +326,7 @@ void UrlDownloader::beginDownload(int /*exitCode*/)
 void UrlDownloader::handleDownloadLine(const QString &line)
 {
     // yt-dlp 在合并时会打 "[Merger] Merging formats into ..." ——
-    // 这一段没有任何进度输出,不告诉用户的话界面会卡在 100% 不动
+    // 这一段没有任何进度输出，不告诉用户的话界面会卡在 100% 不动
     if (line.contains(QLatin1String("[Merger]"))) {
         setStage(QStringLiteral("merging"));
         emit stateChanged();
@@ -347,7 +347,7 @@ void UrlDownloader::handleDownloadLine(const QString &line)
     if (numberOrNa(fields.at(1), &value)) {
         m_totalBytes = static_cast<qint64>(value);
     } else if (numberOrNa(fields.at(2), &value)) {
-        // 总大小经常没有(DASH/HLS 事先不知道),回退到估算值,否则算不出百分比
+        // 总大小经常没有（DASH/HLS 事先不知道）,回退到估算值，否则算不出百分比
         m_totalBytes = static_cast<qint64>(value);
     }
 
@@ -378,9 +378,9 @@ void UrlDownloader::handleDownloadLine(const QString &line)
 void UrlDownloader::handleDownloadFinished(int exitCode)
 {
     if (exitCode != 0) {
-        // 手选的 format_id 在本端不存在(登录态/会员等级和添加者不同)时,
+        // 手选的 format_id 在本端不存在（登录态/会员等级和添加者不同）时，
         // 退回"按档位挑"再试一次 —— 别让"这条下不到"变成"这条播不了"。
-        // **注意:这里只对"手选的精确流"这么做**;档位下载本身不会遇到这个错。
+        // **注意：这里只对"手选的精确流"这么做**;档位下载本身不会遇到这个错。
         if (!m_selection.formatExpression.isEmpty()
             && looksLikeFormatUnavailable(m_outputTail)
             && !m_manualFallbackTried) {
@@ -401,17 +401,17 @@ void UrlDownloader::handleDownloadFinished(int exitCode)
         return;
     }
 
-    // 找产物:**只认最终的那个 media.<ext>**(合并完是 mkv,单文件格式保持原扩展名)。
+    // 找产物：**只认最终的那个 media.<ext>**(合并完是 mkv,单文件格式保持原扩展名)。
     //
-    // 中间流文件的形状是 media.<format_id>.<ext>,比如 media.f30280.m4a 是**纯音频** ——
-    // 上一轮失败留下的这种文件如果被当成产物加载,症状就是"只有声音"(实测踩过)。
+    // 中间流文件形如 media.<format_id>.<ext>，例如 media.f30280.m4a 为纯音频——
+    // 上一轮失败残留的此类文件若被当作产物加载，症状为「只有声音」（实测）。
     const QStringList finalExts{QStringLiteral("mkv"), QStringLiteral("mp4"),
                                 QStringLiteral("webm"), QStringLiteral("mov"),
                                 QStringLiteral("flv"), QStringLiteral("avi")};
     const QDir dir(m_destDir);
     const QStringList entries = dir.entryList({QStringLiteral("media.*")}, QDir::Files);
     for (const QString &name : entries) {
-        // "media." 之后还有一层点 = 中间流文件或未完成文件,都不是产物
+        // "media." 之后还有一层点 = 中间流文件或未完成文件，都不是产物
         if (name.mid(6).contains(QLatin1Char('.')))
             continue;
         if (!finalExts.contains(QFileInfo(name).suffix().toLower()))
@@ -456,11 +456,11 @@ void UrlDownloader::startProcess(const QStringList &options, const QString &url)
     m_outputBuffer.clear();
 
     m_process = new QProcess(this);
-    // 合并 stdout/stderr:进度和错误信息在一个流里,顺序也真实
+    // 合并 stdout/stderr:进度和错误信息在一个流里，顺序也真实
     m_process->setProcessChannelMode(QProcess::MergedChannels);
     m_process->setProgram(m_toolchain->ytDlpPath());
 
-    // 拼接参数:用户选项 + ffmpeg-location + cookies + url
+    // 拼接参数：用户选项 + ffmpeg-location + cookies + url
     // url 在末尾，其余无限制
     QStringList args = options;
     args << m_toolchain->ffmpegLocationArgs();
@@ -503,7 +503,7 @@ void UrlDownloader::startProcess(const QStringList &options, const QString &url)
                 if (finished != nullptr)
                     finished->deleteLater();
 
-                // cancel() 会把阶段设回 idle —— 这种"异常结束"是用户自己取消的,
+                // cancel() 会把阶段设回 idle —— 这种"异常结束"是用户自己取消的，
                 // 不能报成失败
 
                 if (stage == QLatin1String("idle")) {
@@ -545,13 +545,13 @@ void UrlDownloader::cancel()
     }
     abortVerify();
 
-    // 复位:界面(加条目弹窗)关掉/重开时要回到干净状态。
+    // 复位：界面（加条目弹窗）关掉/重开时要回到干净状态。
     // **没有进程在跑时也要清** —— 上一次解析成功留下的标题、档位列表
-    // 不清掉的话,下次打开弹窗会直接看到上一次的结果。
+    // 不清掉的话，下次打开弹窗会直接看到上一次的结果。
     //
-    // 这里**只发 stateChanged**:setStage 对相同取值去重,而 reset 之后
-    // 各属性都变了,得让绑定有机会重算。千万别在这里 emit resolved() ——
-    // PlaybackSync::retryCurrentItem 是先 cancel 再重新准备,
+    // 这里**只发 stateChanged**:setStage 对相同取值去重，而 reset 之后
+    // 各属性都变了，得让绑定有机会重算。千万别在这里 emit resolved() ——
+    // PlaybackSync::retryCurrentItem 是先 cancel 再重新准备，
     // 一个多余的 resolved 会让它拿着刚被清空的直链直接去下载。
     m_progress = -1;
     m_detail.clear();
@@ -565,8 +565,8 @@ void UrlDownloader::cancel()
     m_manualFallbackTried = false;
     const bool stageChanged = m_stage != QLatin1String("idle");
     setStage(QStringLiteral("idle"));
-    // 本来就是 idle 时 setStage 会去重(不发信号),可上面那一串清空同样
-    // 需要让绑定重算 —— 补一次,别让界面留着上次的数据
+    // 本来就是 idle 时 setStage 会去重（不发信号）,可上面那一串清空同样
+    // 需要让绑定重算 —— 补一次，别让界面留着上次的数据
     if (!stageChanged)
         emit stateChanged();
 }

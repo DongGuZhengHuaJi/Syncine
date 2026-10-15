@@ -17,12 +17,12 @@ Server::~Server() {
 }
 
 void Server::start() {
-    LOG_INFO("Server") << "Starting server on " << Config::SERVER_ADDRESS
+    LOG_INFO("Server") << "服务启动 " << Config::SERVER_ADDRESS
                        << ":" << Config::SERVER_PORT;
     m_webSocketServer->run();
 }
 
 void Server::stop() {
-    LOG_INFO("Server") << "Stopping server...";
+    LOG_INFO("Server") << "服务停止";
     m_webSocketServer->stop();
 }

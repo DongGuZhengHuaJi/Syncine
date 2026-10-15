@@ -1,5 +1,6 @@
 #include "PlaylistModel.h"
 
+#include "core/Log.h"
 #include "media/FormatModel.h"
 
 PlaylistModel::PlaylistModel(QObject *parent)
@@ -81,15 +82,17 @@ void PlaylistModel::reset(const QList<PlaylistEntry> &entries, int currentIndex)
     m_currentIndex = normalized;
     endResetModel();
 
+    LOG_DEBUG("Playlist") << "重置列表: 条目=" << m_entries.size()
+                          << " currentIndex=" << m_currentIndex;
     emit countChanged();
     if (currentDidChange)
         emit currentChanged();
 }
 
 void PlaylistModel::setEntries(const QList<PlaylistEntry> &entries, int currentIndex) {
-    // 服务端不知道时长(它不解析媒体文件),时长是本地加载出来后回报的。
-    // 整体替换前先把已知的时长接过来,否则别人加一条新条目,
-    // 正在显示的那几条时长会一起变回 "--:--"
+    // 服务端不解析媒体文件，故不知道时长；时长由本地加载后回报。
+    // 整体替换前先继承已知时长，否则他人新增一条条目时，
+    // 正在显示的其他条目时长会一并退回 "--:--"。
     QList<PlaylistEntry> merged = entries;
     for (PlaylistEntry &entry : merged) {
         if (entry.duration > 0)
@@ -99,7 +102,7 @@ void PlaylistModel::setEntries(const QList<PlaylistEntry> &entries, int currentI
             entry.duration = m_entries.at(row).duration;
     }
 
-    // 条目数很少(几十条),整体替换比增量 diff 简单得多,也不会算错
+    // 条目数很少（几十条），整体替换比增量 diff 简单得多，也不易算错
     beginResetModel();
     m_entries = merged;
 
@@ -110,6 +113,8 @@ void PlaylistModel::setEntries(const QList<PlaylistEntry> &entries, int currentI
     m_currentIndex = normalized;
     endResetModel();
 
+    LOG_DEBUG("Playlist") << "更新列表: 条目=" << m_entries.size()
+                          << " currentIndex=" << m_currentIndex;
     emit countChanged();
     if (currentDidChange)
         emit currentChanged();
@@ -125,7 +130,10 @@ void PlaylistModel::setCurrentIndex(int index) {
     const int previous = m_currentIndex;
     m_currentIndex = normalized;
 
-    // isCurrent 影响的是两行(旧的当前、新的当前)
+    LOG_DEBUG("Playlist") << "切换当前条目: index " << previous << " → " << m_currentIndex
+                          << " itemId=" << currentItemId();
+
+    // isCurrent 影响两行（原当前项与新当前项）
     if (previous >= 0)
         emit dataChanged(this->index(previous), this->index(previous), {IsCurrentRole});
     if (m_currentIndex >= 0)
@@ -141,6 +149,7 @@ bool PlaylistModel::setDuration(const QString &itemId, qint64 duration) {
         return false;
 
     m_entries[row].duration = duration;
+    LOG_DEBUG("Playlist") << "记录条目时长: itemId=" << itemId << " duration=" << duration;
     emit dataChanged(index(row), index(row), {DurationRole});
     return true;
 }
@@ -160,13 +169,16 @@ void PlaylistModel::setLocalFile(const QString &itemId, const QString &path) {
     if (itemId.isEmpty())
         return;
 
-    // 空路径 = 撤销这条的映射(重试时要的就是这个:让"缓存"失效、重新下一遍)。
-    // 注意**别 insert 空值** —— 那样 hasLocalFile 会报 true(界面显示"就绪"),
-    // 可实际没有文件可放
-    if (path.isEmpty())
+    // 空路径 = 撤销该条目的映射（重试时需要此行为：使缓存失效并重新下载）。
+    // 不可 insert 空值——否则 hasLocalFile 会报 true（界面显示「就绪」），
+    // 但实际没有可播放的文件。
+    if (path.isEmpty()) {
+        LOG_DEBUG("Playlist") << "清除本地文件映射: itemId=" << itemId;
         m_localFiles.remove(itemId);
-    else
+    } else {
+        LOG_DEBUG("Playlist") << "绑定本地文件: itemId=" << itemId << " 路径=" << path;
         m_localFiles.insert(itemId, path);
+    }
 
     const int row = indexOf(itemId);
     if (row >= 0)
@@ -176,9 +188,11 @@ void PlaylistModel::setLocalFile(const QString &itemId, const QString &path) {
 }
 
 void PlaylistModel::clear() {
+    LOG_DEBUG("Playlist") << "清空列表: 条目=" << m_entries.size()
+                          << " 本地映射=" << m_localFiles.size();
     beginResetModel();
     m_entries.clear();
-    m_localFiles.clear(); // 映射是跟着房间里的条目走的,离房就作废
+    m_localFiles.clear(); // 映射随房间条目存在，离开房间即作废
     m_currentIndex = -1;
     endResetModel();
 
@@ -228,8 +242,8 @@ QString PlaylistModel::specOf(const QString &itemId) const {
     return row >= 0 ? m_entries.at(row).spec : QString();
 }
 
-// spec → 人话标签("1080P" / "手选 720P" / "最高画质")。
-// 手选的 format_id 和竖屏档位都要对着 formats 才翻得准,而列表这边没有
+// spec → 人话标签（"1080P" / "手选 720P" / "最高画质"）。
+// 手选的 format_id 和竖屏档位都要对着 formats 才翻得准，而列表这边没有
 // formats —— 传空 MediaInfo,翻不出来的部分退化成"手选"/原样数字。
 // (播放页手上有一整份 formats,那边显示的 label 才是全的)
 QString PlaylistModel::specLabelOf(const PlaylistEntry &entry) const
@@ -237,7 +251,7 @@ QString PlaylistModel::specLabelOf(const PlaylistEntry &entry) const
     if (entry.spec.isEmpty())
         return entry.live ? QStringLiteral("直播") : QStringLiteral("最高画质");
 
-    // 现在每次进房都会重建模型,逐行解析没必要开缓存;真变热了再考虑
+    // 现在每次进房都会重建模型，逐行解析没必要开缓存；真变热了再考虑
     return StreamSpec::label(entry.spec, MediaInfo());
 }
 

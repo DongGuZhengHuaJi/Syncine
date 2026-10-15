@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import SyncineApp
 
-// 模式分段控件里的一格:选中是白底 + 主色文字(不是实心蓝块),
+// 模式分段控件里的一格：选中是白底 + 主色文字（不是实心蓝块）,
 // 灰底槽由外层容器给。
 Button {
     id: modeBtn

@@ -8,8 +8,7 @@
 #include <string>
 
 class Config {
-    // 服务器配置
-    // 后续完善从配置文件读取
+    // 服务器配置。后续改为从配置文件读取。
 public:
     inline static const std::string SERVER_ADDRESS = "0.0.0.0";
     inline static const unsigned short SERVER_PORT = 8765;

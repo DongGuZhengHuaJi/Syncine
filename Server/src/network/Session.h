@@ -26,12 +26,12 @@ public:
     void start();
     void stop();
 
-    // 线程安全:worker 线程也可以直接调用
+    // 线程安全：worker 线程也可以直接调用
     void send(const std::string &message);
 
     std::string id() const;
 
-    // 连接关闭时回调(由 WebSocketServer 设置,用于清理会话表和房间)
+    // 连接关闭时回调（由 WebSocketServer 设置，用于清理会话表与房间）
     void setOnClose(std::function<void(std::shared_ptr<Session>)> callback);
 
 private:
@@ -42,7 +42,7 @@ private:
     std::unique_ptr<websocket::stream<asio::ip::tcp::socket>> m_ws;
     beast::flat_buffer m_buffer;
 
-    // 发送队列只在 io_context 线程里操作(所有写入都 post 到它),无需加锁
+    // 发送队列仅在 io_context 线程中操作（所有写入都 post 到该线程），无需加锁
     std::deque<std::string> m_writeQueue;
     bool m_writing = false;
 

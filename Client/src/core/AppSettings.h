@@ -1,24 +1,16 @@
 //
-// 应用的全局设置 —— 唯一一处"用户偏好"的读写入口。
+// 应用的全局设置：用户偏好的唯一读写入口。
 //
-// 为什么单独成一层:
-//   之前这些东西是散的 —— 服务器地址写死在 NetworkManager 里、日志级别只能靠
-//   环境变量、画质每次都手选。散着放的后果是"想让用户改一项,得先找到它藏在
-//   哪一层"。现在全部收在这里:落盘一份 ini,界面只认这个对象。
+// 落盘位置 `~/.config/Syncine/syncine.ini`（AppConfigLocation），使用 QSettings 的
+// IniFormat 而非平台原生格式，便于直接打开查看。
 //
-// 落盘位置:`~/.config/Syncine/syncine.ini`(QStandardPaths::AppConfigLocation)。
-// 用 QSettings 的 IniFormat 而不是平台原生的注册表/plist —— 出问题时用户能
-// 直接打开这个文件看,我们排查也方便。
-//
-// 几条约定:
-//   · **默认值都在这里给**(空串/0),ini 里没有的键就用默认值,所以第一次
-//     运行不写任何东西也能跑。
-//   · **setter 都带 Q_INVOKABLE**。Q_PROPERTY 的 WRITE 访问器不是 QML 可调用
-//     的方法,QML 里写 `appSettings.setLogLevel(x)` 会抛 "is not a function"
-//     并且**中断它后面的语句**(踩过,见 syncine-qt-pitfalls)。
-//     QML 里 `appSettings.logLevel = x` 这种属性赋值也照样能用。
-//   · **兜底服务器地址不是设置项**,是编译期常量(kFallbackServerUrl)——
-//     用户只能"覆盖"它,改不了它。部署的时候改那一行。
+// 约定：
+//   · 默认值均在此给出，ini 中缺失的键使用默认值，故首次运行不写入内容亦可工作。
+//   · setter 都带 Q_INVOKABLE：Q_PROPERTY 的 WRITE 访问器不是 QML 可调用的方法，
+//     QML 中写 `appSettings.setLogLevel(x)` 会抛 "is not a function" 并中断其后语句
+//     （见 syncine-qt-pitfalls）；属性赋值 `appSettings.logLevel = x` 同样可用。
+//   · 兜底服务器地址是编译期常量（kFallbackServerUrl），用户只能覆盖、不能修改，
+//     部署时修改该常量。
 //
 
 #ifndef SYNCINE_APPSETTINGS_H
@@ -33,18 +25,18 @@
 class AppSettings : public QObject {
     Q_OBJECT
 
-    // 用户自己填的服务器地址。**空 = 用兜底地址**(见 fallbackServerUrl)。
+    // 用户自行填写的服务器地址。空 = 使用兜底地址（见 fallbackServerUrl）。
     Q_PROPERTY(QString serverUrl
                READ serverUrl
                WRITE setServerUrl
                NOTIFY serverUrlChanged)
 
     // ---- cookie 的元信息 ----
-    // cookie 文件本身由 CookieManager 管理(固定路径),这里只存"关于它的事":
-    //   上次从哪个浏览器导的、来源怎么显示、什么时候导的
+    // cookie 文件本身由 CookieManager 管理（固定路径），此处只存其相关元信息：
+    // 上次从哪个浏览器导入、来源如何显示、导入时间。
     //
-    // 为什么放这儿而不是让 CookieManager 自己开一个 QSettings:
-    // **同一个 ini 不能有两个 QSettings 实例** —— 各自有缓存,会互相覆盖。
+    // 放在此处而非由 CookieManager 自建 QSettings 的原因：
+    // 同一个 ini 不能有两个 QSettings 实例——各自持有缓存会互相覆盖。
     Q_PROPERTY(QString lastCookieBrowser
                READ lastCookieBrowser
                WRITE setLastCookieBrowser
@@ -55,37 +47,37 @@ class AppSettings : public QObject {
                WRITE setCookieSource
                NOTIFY cookieSourceChanged)
 
-    // ISO 8601 字符串(空 = 从没导过)
+    // ISO 8601 字符串（空 = 从未导入过）
     Q_PROPERTY(QString cookieImportedAt
                READ cookieImportedAt
                WRITE setCookieImportedAt
                NOTIFY cookieImportedAtChanged)
 
-    // 网链模式加条目时默认选中的画质档(spec 的"主体",见 FormatModel.h):
-    // "0" = 最高画质,"1080" = 不超过 1080P……
-    // 注意它**不带** HDR 后缀 —— 那是下面 hdrAllowed 的事,提交时由
-    // UrlInspector::buildSpec 缀上
+    // 网链模式添加条目时默认选中的画质档（spec 的「主体」，见 FormatModel.h）：
+    // "0" = 最高画质，"1080" = 不超过 1080P……
+    // 注意其不带 HDR 后缀——那由下面的 hdrAllowed 决定，提交时经
+    // UrlInspector::buildSpec 缀上。
     Q_PROPERTY(QString defaultQuality
                READ defaultQuality
                WRITE setDefaultQuality
                NOTIFY defaultQualityChanged)
 
-    // 简单模式选档时**允不允许下 HDR/杜比视界**。
-    // 默认关:HDR 在 Qt 播放器上要过一遍离线转 SDR(见 HdrConverter),
+    // 简单模式选档时是否允许下载 HDR/杜比视界。默认关闭：
+    // HDR 在 Qt 播放器上需经一次离线转 SDR（见 HdrConverter）。
     Q_PROPERTY(bool hdrAllowed
                READ hdrAllowed
                WRITE setHdrAllowed
                NOTIFY hdrAllowedChanged)
 
-    // 音频设备:麦克风(采集)和听筒(播放)。
+    // 音频设备：麦克风（采集）与听筒（播放）。
     //
-    // 存的是**设备名**(ADM 给的显示名),空串 = 跟随系统默认。
-    // 为什么不存索引:声卡设备的索引会随插拔漂移,今天选的是 3 号、
-    // 明天可能就变成 2 号了,存索引会静默选错设备。
-    // (Linux 上 WebRTC 的 ADM 不提供 GUID —— guid 恒为空,所以只能用名字。)
+    // 存的是设备名（ADM 给出的显示名），空串 = 跟随系统默认。
+    // 不存索引的原因：声卡设备索引会随插拔漂移，今日为 3 号、明日可能变为 2 号，
+    // 存索引会导致静默选错设备。（Linux 上 WebRTC 的 ADM 不提供 GUID——
+    // guid 恒为空，因此只能用名字。）
     //
-    // 真正把设备落到声卡上的是 WebrtcManager:它可能在启动时还做不到
-    // (WebRTC 的声卡是进房间才初始化的),这时只记下意图,进房后再套用。
+    // 真正将设备落到声卡的是 WebrtcManager：启动时可能尚不可行（WebRTC 的声卡
+    // 在进房间时才初始化），此时先记下意图，进房后再套用。
     Q_PROPERTY(QString micDevice
                READ micDevice
                WRITE setMicDevice
@@ -96,14 +88,14 @@ class AppSettings : public QObject {
                WRITE setSpeakerDevice
                NOTIFY speakerDeviceChanged)
 
-    // 日志级别:trace / debug / info / warn / error。
-    // 注意环境变量 SYNCINE_LOG_LEVEL 优先级更高(临时调试用,见 applyLogLevel)
+    // 日志级别：trace / debug / info / warn / error。
+    // 环境变量 SYNCINE_LOG_LEVEL 优先级更高（供临时调试，见 applyLogLevel）
     Q_PROPERTY(QString logLevel
                READ logLevel
                WRITE setLogLevel
                NOTIFY logLevelChanged)
 
-    // 内置的兜底服务器地址(只读,给界面显示"留空则用 xxx"用)
+    // 内置兜底服务器地址（只读，供界面显示「留空则使用该地址」）
     Q_PROPERTY(QString fallbackServerUrl
                READ fallbackServerUrl
                CONSTANT)
@@ -140,20 +132,20 @@ public:
 
     QString fallbackServerUrl() const;
 
-    // 把 ini 里的级别应用到日志系统。main() 里调一次;
-    // 界面改了级别之后也要调(改完立刻生效,不用重启)。
-    // **环境变量存在时不动** —— 那是临时调试用的,不该被 ini 挡住。
+    // 把 ini 中的级别应用到日志系统。main() 中调用一次；
+    // 界面修改级别后也需调用（立即生效，无需重启）。
+    // 环境变量存在时不操作——那用于临时调试，不应被 ini 覆盖。
     void applyLogLevel();
 
-    // ini 文件的完整路径(设置页显示用,也方便排查)。
-    // **必须带 Q_INVOKABLE**:QML 里 `appSettings.filePath()` 是"调方法",
-    // 不是读属性 —— 只当普通 getter 的话会抛
-    // "Property 'filePath' ... is not a function",而且**中断它所在的那条绑定**。
+    // ini 文件的完整路径（供设置页显示，也便于排查）。
+    // 必须带 Q_INVOKABLE：QML 中 `appSettings.filePath()` 是方法调用而非读取属性，
+    // 若仅为普通 getter 会抛 "Property 'filePath' ... is not a function"，
+    // 并中断其所在的整条绑定。
     Q_INVOKABLE QString filePath() const;
 
-    // ---- 下面两个严格说不是"用户偏好",是应用级的路径/动作 ----
-    // 放这儿是因为设置页本来就把它们和上面那些放一起显示,而为一个
-    // "打开文件夹" 新建一个类不值当。哪天真多到三四个再拆出去。
+    // ---- 以下两项严格来说不属于用户偏好，而是应用级的路径与动作 ----
+    // 放在此处是因为设置页将它们与上述项一并显示，为「打开文件夹」单独建类
+    // 并不划算。若日后增至三四个再拆分。
     Q_INVOKABLE QString logDirectory() const;
     Q_INVOKABLE void openLogDirectory();
 
@@ -175,10 +167,10 @@ private:
     QString m_lastCookieBrowser;
     QString m_cookieSource;
     QString m_cookieImportedAt;
-    // 空 = 最高画质;数字串 = 高度上限(见头部的说明)
+    // 空 = 最高画质；数字串 = 高度上限（见文件头说明）
     QString m_defaultQuality;
     bool m_hdrAllowed = false;
-    // 空串 = 跟随系统默认(见上面两个属性的说明)
+    // 空串 = 跟随系统默认（见上述两个属性的说明）
     QString m_micDevice;
     QString m_speakerDevice;
     QString m_logLevel = QStringLiteral("info");

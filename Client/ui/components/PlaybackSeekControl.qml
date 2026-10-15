@@ -2,10 +2,10 @@ import QtQuick
 import QtQuick.Controls
 import SyncineApp
 
-// 播放进度条:独占控制区的一整行、和播放器同宽。
+// 播放进度条：独占控制区的一整行、和播放器同宽。
 //
-// 时间显示不在这里 —— 在下面的按钮行里(Style.formatTime)。
-// 这样进度条能拿到整行宽度,拖动精度也更高。
+// 时间显示不在这里 —— 在下面的按钮行里（Style.formatTime）。
+// 这样进度条能拿到整行宽度，拖动精度也更高。
 Slider {
     id: root
 
@@ -18,7 +18,7 @@ Slider {
     to: 1
     value: 0
 
-    // 播放位置一直在变,但用户按着滑条的时候不能被它拽回去 ——
+    // 播放位置一直在变，但用户按着滑条的时候不能被它拽回去 ——
     // 这就是 when: !pressed 的作用。
     Binding {
         target: root
@@ -30,7 +30,7 @@ Slider {
     }
 
     onPressedChanged: {
-        // 松手才真正跳转,拖动过程中不反复 seek
+        // 松手才真正跳转，拖动过程中不反复 seek
         if (!root.pressed)
             playbackSync.seek(root.value * playbackSync.duration)
         root.interacted()

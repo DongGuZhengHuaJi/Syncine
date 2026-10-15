@@ -28,20 +28,12 @@ PlaybackController::PlaybackController(QObject *parent)
     m_player->setAudioOutput(m_audioOutput);
 
     // ---- 电影音频的旁路输出 ----
-    //
-    // QAudioBufferOutput 是 Qt 6.8 引入的官方接口:播放器解码的同时
-    // 旁路出一份 PCM 给我们。**构造函数里传的格式就是产出的格式** ——
-    // Qt 内部会用它建一个重采样器,所以我们直接把格式定成 WebRTC 想要的,
-    // 重采样这一步就白送了(见 qffmpegaudiorenderer.cpp 里的 createResampler)。
-    //
-    // 48000Hz 是 WebRTC Opus 的原生采样率,给它别的采样率反而要它自己去转。
-    //
-    // 双声道:电影源本来就带立体声,观众端也期望立体声。但 SDP 里 Opus 的
-    // 立体声不是"这里给 2 声道"就自动有的 —— 必须在 media 工厂的编解码器
-    // 工厂里给 Opus 格式加 stereo=1 参数(见 WebrtcManager.cpp 的
-    // StereoOpusAudioEncoderFactory / StereoOpusAudioDecoderFactory,
-    // 两个都要包:sendrecv 列表合并时参数取解码器那份),否则编码器按
-    // 单声道工作,这里给 2 声道也会被下混成单声道。
+    // QAudioBufferOutput（Qt 6.8 引入）：播放器解码的同时旁路输出一份 PCM。
+    // **构造函数中传入的格式即产出格式**——Qt 据此建立重采样器，故直接把格式定为
+    // WebRTC 所需的，重采样由 Qt 顺带完成（见 qffmpegaudiorenderer.cpp）。
+    // 48000Hz 为 WebRTC Opus 的原生采样率，其他采样率反而需它自行转换。
+    // 双声道需配合 media 工厂中 Opus 格式的 stereo=1 参数（见 WebrtcManager.cpp 的
+    // StereoOpusAudioEncoder/DecoderFactory，两者都要包装，否则会被下混为单声道）。
     QAudioFormat movieAudioFormat;
     movieAudioFormat.setSampleRate(48000);
     movieAudioFormat.setChannelCount(2);
@@ -106,9 +98,9 @@ PlaybackController::PlaybackController(QObject *parent)
         }
     );
 
-    // 播放状态变化。**网络流(尤其是直播)卡顿只有从这里看得出来**:
-    // StalledMedia = 等数据等停了(网络的锅),BufferingMedia = 在重新缓冲。
-    // 没有这条日志的话,"卡了"只能靠猜。放 Debug:正常播放时它很安静,
+    // 播放状态变化。**网络流（尤其是直播）卡顿只有从这里看得出来**:
+    // StalledMedia = 等数据等停了（网络的锅）,BufferingMedia = 在重新缓冲。
+    // 没有这条日志的话，"卡了"只能靠猜。放 Debug:正常播放时它很安静，
     // 只在状态真的变时才打一行。
     connect(m_player, &QMediaPlayer::mediaStatusChanged, this,
             [](QMediaPlayer::MediaStatus status) {
@@ -186,10 +178,10 @@ void PlaybackController::setOutputDevice(const QAudioDevice &device)
     if (device.id() == m_audioOutput->device().id())
         return;
 
-    // QAudioOutput 自带 setDevice()(QAudioSink 没有,那边只能重建),
-    // 播放中切换由 Qt 自己把底层输出重新接一遍,音量和静音状态不受影响。
+    // QAudioOutput 自带 setDevice()(QAudioSink 没有，那边只能重建),
+    // 播放中切换由 Qt 自己把底层输出重新接一遍，音量和静音状态不受影响。
     // 切记**不要**为了换设备去 setAudioOutput(nullptr) —— 那会把播放器的
-    // 音频渲染器一起拆掉(见头文件里 m_audioBufferOutput 那段说明)。
+    // 音频渲染器一起拆掉（见头文件里 m_audioBufferOutput 那段说明）。
     m_audioOutput->setDevice(device);
 
     LOG_INFO("Playback") << "本机播放输出设备已切换:"
@@ -223,8 +215,8 @@ QString PlaybackController::hash() const {
         return QString();
 
     const QUrl source = m_player->source();
-    // 算法在 MediaHash 里,和播放列表上报 playlist_status 用的是同一份 ——
-    // 两处不一致的话,"同不同步"的判断就会互相打架
+    // 算法在 MediaHash 里，和播放列表上报 playlist_status 用的是同一份 ——
+    // 两处不一致的话，"同不同步"的判断就会互相打架
     if (source.isLocalFile())
         return MediaHash::forFile(source.toLocalFile());
 
@@ -246,12 +238,12 @@ void PlaybackController::onVideoFrame(const QVideoFrame &frame) {
         return;
 
 
-    // 本回调接在 m_outputSink 上,共享模式下远端渲染器也会往这里送帧
-    // 只有显示本地时才往外转发,否则会产生回声
+    // 本回调接在 m_outputSink 上，共享模式下远端渲染器也会往这里送帧
+    // 只有显示本地时才往外转发，否则会产生回声
     if (m_showingRemote)
         return;
 
-    // 诊断:前 3 帧 + 每 300 帧打印一次
+    // 诊断：前 3 帧 + 每 300 帧打印一次
     static int count = 0;
     if (count < 3 || count % 300 == 0) {
         LOG_TRACE("Playback") << "onVideoFrame 第" << (count + 1) << "帧"
@@ -267,16 +259,16 @@ void PlaybackController::onMovieAudioBuffer(const QAudioBuffer &buffer) {
     if (!buffer.isValid())
         return;
 
-    // 诊断:音频帧比视频密得多(一帧几十毫秒),全打会淹掉日志,
+    // 诊断：音频帧比视频密得多（一帧几十毫秒）,全打会淹掉日志，
     // 所以只打开头几次 + 每隔一段。排障时先看这一行有没有出现 ——
-    // 没有就说明"取 PCM"这一环没通,和 WebRTC 那边无关。
+    // 没有就说明"取 PCM"这一环没通，和 WebRTC 那边无关。
     static int count = 0;
     if (count < 3 || count % 500 == 0) {
         const QAudioFormat format = buffer.format();
 
-        // 峰值:分辨"播放器给出来的就是静音"还是"我们没把它送出去"。
-        // 若这里恒为 0,问题在播放器/取 PCM 这一环(比如被静音了);
-        // 若这里非 0 而对端收到 0,问题在 MovieAudioSource/WebRTC 那一段。
+        // 峰值：用于区分「播放器输出的本就是静音」与「PCM 未被送出」。
+        // 此处恒为 0 时，问题在播放器/取 PCM 环节（例如被静音）；
+        // 此处非 0 而对端收到 0 时，问题在 MovieAudioSource/WebRTC 一段。
         int peak = 0;
         if (format.sampleFormat() == QAudioFormat::Int16) {
             const auto *samples = buffer.constData<int16_t>();
@@ -296,7 +288,7 @@ void PlaybackController::onMovieAudioBuffer(const QAudioBuffer &buffer) {
     }
     ++count;
 
-    // Qt根据m_audioBufferOutput的构造参数重采样,这里的格式为 48k/双声道/Int16。
+    // Qt根据m_audioBufferOutput的构造参数重采样，这里的格式为 48k/双声道/Int16。
     emit movieAudioFrameAvailable(buffer);
 }
 
@@ -325,7 +317,7 @@ void PlaybackController::bindVideoOutput(QVideoSink *sink) {
     connect(m_outputSink, &QVideoSink::videoFrameChanged,
             this, &PlaybackController::onVideoFrame);
 
-    // 向sink送帧的对象可能是播放器也可能是远端渲染器,取决于显示本地还是远端。
+    // 向sink送帧的对象可能是播放器也可能是远端渲染器，取决于显示本地还是远端。
     applyVideoSink();
 
     // 将sink交给 WebrtcManager,让远端渲染器往这里送帧。
@@ -339,7 +331,7 @@ void PlaybackController::bindVideoOutput(QVideoSink *sink) {
 void PlaybackController::setRemoteRenderer(WebrtcManager *manager) {
     m_webrtcManager = manager;
 
-    // 如果 sink 已经交过来了(顺序反过来),立刻接上
+    // 如果 sink 已经交过来了（顺序反过来）,立刻接上
     if (m_webrtcManager != nullptr && m_outputSink != nullptr)
         m_webrtcManager->setRemoteVideoSink(m_outputSink);
 }
@@ -351,8 +343,8 @@ void PlaybackController::setShowingRemote(bool showing) {
     m_showingRemote = showing;
 
 
-    // 显示本地 → 播放器往 sink 送(远端渲染器停手)
-    // 显示远端 → 远端渲染器往 sink 送(播放器停手)
+    // 显示本地 → 播放器往 sink 送（远端渲染器停手）
+    // 显示远端 → 远端渲染器往 sink 送（播放器停手）
     applyVideoSink();
 
     emit showingRemoteChanged();
@@ -373,7 +365,7 @@ void PlaybackController::applyVideoSink() {
 
         LOG_DEBUG("Playback") << "applyVideoSink: 显示远端,播放器已脱钩";
     } else {
-        // 显示本地画面,播放器往 sink 送帧
+        // 显示本地画面，播放器往 sink 送帧
         m_player->setVideoSink(m_outputSink);
 
         // 停止远端渲染器

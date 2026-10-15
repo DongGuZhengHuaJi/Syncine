@@ -13,7 +13,7 @@ Dialog {
     width: 400
     padding: 0
 
-    // 默认 Popup 不保证居中,显式放在父项中央
+    // 默认 Popup 不保证居中，显式放在父项中央
     x: Math.round((parent.width - width) / 2)
     y: Math.round((parent.height - height) / 2)
 

@@ -9,6 +9,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 
+#include "core/Log.h"
+
 namespace {
 
 using Protocol::Message;
@@ -39,7 +41,7 @@ MessageType typeFromString(const QString &type) {
     return table.value(type, MessageType::Unknown);
 }
 
-// JSON 里的数字都是 double,qint64 字段统一走这里,避免各处手写 static_cast
+// JSON 里的数字都是 double,qint64 字段统一走这里，避免各处手写 static_cast
 qint64 int64Of(const QJsonObject &object, const QString &key) {
     return static_cast<qint64>(object.value(key).toDouble());
 }
@@ -77,7 +79,7 @@ QList<PlaylistEntry> playlistFromJson(const QJsonValue &value) {
 }
 
 // urls 按 WebRTC 的定义允许写成字符串或字符串数组。
-// Cloudflare 现在返回的是数组,但两种都收着点 —— 形状一变不至于整批废掉。
+// Cloudflare 现在返回的是数组，但两种都收着点 —— 形状一变不至于整批废掉。
 QStringList stringListFromJson(const QJsonValue &value) {
     QStringList list;
     if (value.isString()) {
@@ -95,7 +97,7 @@ QStringList stringListFromJson(const QJsonValue &value) {
 IceServerConfig iceServerFromJson(const QJsonObject &object) {
     IceServerConfig server;
     server.urls = stringListFromJson(object.value("urls"));
-    // STUN 那一项没有这两个字段,取到空串是正常的(它不需要鉴权)
+    // STUN 那一项没有这两个字段，取到空串是正常的（它不需要鉴权）
     server.username = object.value("username").toString();
     server.credential = object.value("credential").toString();
     return server;
@@ -113,17 +115,23 @@ namespace Protocol {
 std::optional<Message> decode(const QString &text) {
     QJsonParseError parseError;
     const QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8(), &parseError);
-    if (parseError.error != QJsonParseError::NoError || !doc.isObject())
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+        LOG_WARN("Protocol") << "消息解析失败:" << parseError.errorString()
+                             << " 原文(前 200 字符):" << text.left(200);
         return std::nullopt;
+    }
 
     const QJsonObject object = doc.object();
 
-    // 没有 type 字段说明这根本不是一条协议消息,和"JSON 坏掉"一样算解析失败;
-    // 而 type 存在但服务端加了新类型,则归为 Unknown —— 调用方静默跳过即可,
-    // 不该因为多了个不认识的类型就弹错误给用户
+    // 缺少 type 字段说明这不是一条协议消息，与 JSON 损坏同样按解析失败处理；
+    // 而 type 存在但服务端新增了类型，则归为 Unknown——调用方静默跳过即可，
+    // 不应因为出现未知类型就向用户报错
     const QString type = object.value("type").toString();
-    if (type.isEmpty())
+    if (type.isEmpty()) {
+        LOG_WARN("Protocol") << "消息缺少 type 字段，丢弃。原文(前 200 字符):"
+                             << text.left(200);
         return std::nullopt;
+    }
 
     Message message;
     message.type = typeFromString(type);
@@ -155,7 +163,7 @@ std::optional<Message> decode(const QString &text) {
                                    ? state.value("currentIndex").toInt(-1)
                                    : -1;
 
-        // ICE 配置在**顶层**(不在 state 里):它不是房间播放状态,是网络配置
+        // ICE 配置在**顶层**(不在 state 里):它不是房间播放状态，是网络配置
         const QJsonArray iceServers = object.value("iceServers").toArray();
         message.iceServers.reserve(iceServers.size());
         for (const QJsonValue &value : iceServers)
@@ -213,8 +221,8 @@ std::optional<Message> decode(const QString &text) {
         break;
 
     case MessageType::PlaylistStatus:
-        // 服务端聚合后下发的形式:items[] 里每条只有 itemId + status。
-        // 复用 PlaylistEntry 承载(其余字段为空),客户端只取这两个
+        // 服务端聚合后下发的形式：items[] 里每条只有 itemId + status。
+        // 复用 PlaylistEntry 承载（其余字段为空）,客户端只取这两个
         message.playlist = playlistFromJson(object.value("items"));
         break;
 
@@ -322,7 +330,7 @@ QString encodePlaylistAdd(const QString &itemId,
     message["type"] = "playlist_add";
     message["itemId"] = itemId;
     message["title"] = title;
-    // url / duration / spec 是可选信息,空着就不发,省得服务端存一堆空字段
+    // url / duration / spec 是可选信息，空着就不发，省得服务端存一堆空字段
     if (!url.isEmpty())
         message["url"] = url;
     if (duration > 0)

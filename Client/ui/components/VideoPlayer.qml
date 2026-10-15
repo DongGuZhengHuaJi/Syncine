@@ -3,17 +3,17 @@ import QtQuick.Controls
 import QtMultimedia
 import SyncineApp
 
-// 播放区(不含下方的弹幕输入条,那块由 RoomPage 拼)。
+// 播放区（不含下方的弹幕输入条，那块由 RoomPage 拼）。
 //
-// 画面、弹幕层、控制条三层叠在一起,顺带处理"点画面=播放/暂停"和
+// 画面、弹幕层、控制条三层叠在一起，顺带处理"点画面=播放/暂停"和
 // 控制条自动隐藏。形态、音量、麦克风这些状态都不在这里 —— 它们由
-// 外部持有,这里只把用户操作转成信号发出去。
+// 外部持有，这里只把用户操作转成信号发出去。
 Item {
     id: root
 
     property bool controlsVisible: true
 
-    // 窗口全屏/屏幕全屏时,弹幕输入框并进控制条
+    // 窗口全屏/屏幕全屏时，弹幕输入框并进控制条
     property bool fullscreenStyle: false
     property string viewMode: "normal"
     property bool danmakuVisible: true
@@ -25,40 +25,40 @@ Item {
         function onFinished(outputUrl) {
             playbackController.load(outputUrl)
 
-            // 房间里的话,把当前条目的"本机文件"也指过去 —— 否则切到别的集
-            // 再切回来,加载的还是 HDR 原片(等于白转)
+            // 房间里的话，把当前条目的"本机文件"也指过去 —— 否则切到别的集
+            // 再切回来，加载的还是 HDR 原片（等于白转）
             const itemId = roomSession.playlist.currentItemId
             if (itemId !== "")
                 roomSession.assignLocalFile(itemId, outputUrl)
         }
     }
 
-    // 当前模式下还没有可播的片子(本地模式 / 共享模式的房主,且没加载成功)——
-    // 这时候点画面不是播放/暂停,而是"去选个文件"
+    // 当前模式下还没有可播的片子（本地模式 / 共享模式的房主，且没加载成功）——
+    // 这时候点画面不是播放/暂停，而是"去选个文件"
     property bool awaitingFile: false
 
     signal danmakuSubmitted(string text)
     signal danmakuToggleRequested()
     signal viewModeRequested(string mode)
     signal loadRequested()
-    // 控制条上的齿轮:声音设置。弹窗声明在 RoomPage 根上,这里只往上传意图
+    // 控制条上的齿轮：声音设置。弹窗声明在 RoomPage 根上，这里只往上传意图
     signal audioSettingsRequested()
 
     function pushDanmaku(text) {
         danmakuLayer.push(text)
     }
 
-    // 播放源不再由 QML 决定:房间的"当前条目"解析成本地文件 / URL 之后,
+    // 播放源不再由 QML 决定：房间的"当前条目"解析成本地文件 / URL 之后，
     // 由 PlaybackSync 调用 playbackController.load()。这里只管画。
 
     // 只有一个 VideoOutput —— 它渲染的永远是"界面该显示的那一路"。
     //
     // **不能**写成 videoSink: playbackController.xxx。Qt 里
-    // VideoOutput.videoSink 是只读属性,连绑定赋值都报
+    // VideoOutput.videoSink 是只读属性，连绑定赋值都报
     // "Invalid property assignment: videoSink is a read-only property"。
     //
-    // 所以方向反过来:把我们的 sink 交给 C++,由 C++ 决定谁往里面送帧
-    // (本地播放器 或 远端渲染器)。
+    // 因此方向相反：将本组件的 sink 交由 C++，由 C++ 决定谁向其送帧
+    // （本地播放器或远端渲染器）。
     VideoOutput {
         id: videoOutput
         anchors.fill: parent
@@ -79,15 +79,15 @@ Item {
         onPositionChanged: showControls()
     }
 
-    // 弹幕层:画面之上、控制条之下
+    // 弹幕层：画面之上、控制条之下
     DanmakuLayer {
         id: danmakuLayer
         anchors.fill: parent
         running: root.danmakuVisible
     }
 
-    // 中心提示(请先加载视频 / 等待其他人加载…),由 RoomPage 决定文案。
-    // 往上偏 56px —— 正中间是那个大播放键,两个都居中会叠在一起。
+    // 中心提示（请先加载视频 / 等待其他人加载…）,由 RoomPage 决定文案。
+    // 往上偏 56px —— 正中间是那个大播放键，两个都居中会叠在一起。
     Rectangle {
         anchors.centerIn: parent
         anchors.verticalCenterOffset: -56
@@ -106,10 +106,10 @@ Item {
         }
     }
 
-    // HDR 提示:Qt 的渲染不做 HDR→SDR 色调映射,直接播会"暗处正常、亮处过曝"。
+    // HDR 提示：Qt 的渲染不做 HDR→SDR 色调映射，直接播会"暗处正常、亮处过曝"。
     // 这里给一条出路 —— 用自带的 ffmpeg 转一份 SDR(转完自动切过去)。
     //
-    // 只在视频画面这一层提示,不影响音频/共享等其它逻辑。
+    // 只在视频画面这一层提示，不影响音频/共享等其它逻辑。
     Rectangle {
         id: hdrPrompt
         anchors.centerIn: parent
@@ -144,11 +144,11 @@ Item {
                 }
             }
 
-            // 转码前:说清要占多少地方 + 两个选择
+            // 转码前：说清要占多少地方 + 两个选择
             //
-            // 两个按钮的尺寸要显式对齐:PrimaryButton / GhostButton 的默认
-            // 高度和字号都不一样(GhostButton 高 40、字号 14,宽度还随文字走),
-            // 只给其中一个设尺寸的话,并排就是一大一小
+            // 两个按钮的尺寸要显式对齐：PrimaryButton / GhostButton 的默认
+            // 高度和字号都不一样（GhostButton 高 40、字号 14,宽度还随文字走）,
+            // 只给其中一个设尺寸的话，并排就是一大一小
             Row {
                 id: hdrChoices
                 anchors.horizontalCenter: parent.horizontalCenter
@@ -171,7 +171,7 @@ Item {
                     height: hdrChoices.buttonHeight
                     font.pixelSize: 12
                     text: "继续播放原片"
-                    // 深色卡上用播放器皮肤那套颜色,不然深灰字几乎看不见
+                    // 深色卡上用播放器皮肤那套颜色，不然深灰字几乎看不见
                     textColor: Style.playerIcon
                     borderColor: Style.playerLine
                     onClicked: hdrConverter.dismiss()
@@ -183,11 +183,11 @@ Item {
                 visible: !hdrConverter.running && hdrConverter.errorText === ""
                 color: "#B3FFFFFF"
                 font.pixelSize: 11
-                text: "转换文件在原视频目录下(_SDR.mkv),大约 "
+                text: "转换文件位于原视频目录（_SDR.mkv），约 "
                       + Math.round(hdrConverter.estimatedBytes / 1024 / 1024) + " MB"
             }
 
-            // 转码中:进度条 + 取消
+            // 转码中：进度条 + 取消
             Row {
                 anchors.horizontalCenter: parent.horizontalCenter
                 spacing: 10
@@ -236,7 +236,7 @@ Item {
 
     // 暂停时中央的大播放键。
     //
-    // 条件分两半:**暂停**时显示(playing 为真 => 藏起来),
+    // 条件分两半：**暂停**时显示（playing 为真 => 藏起来）,
     // 且 HDR 提示卡正占着画面中央时不显示 —— 两个都居中会叠在一起。
     // 注意别写成 `playing && !prompt`:那是"播放时显示",正好反过来。
     Rectangle {

@@ -3,12 +3,12 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import SyncineApp
 
-// 播放器控制区,两行:
-//   第一行:通栏进度条(和播放器等宽)
-//   第二行:按钮 —— 播放 / ±10s / 时间 / [弹幕输入框] / 画质 / 弹幕开关 /
+// 播放器控制区，两行：
+//   第一行：通栏进度条（和播放器等宽）
+//   第二行：按钮 —— 播放 / ±10s / 时间 / [弹幕输入框] / 画质 / 弹幕开关 /
 //                    电影音量 / 语音音量 / 麦克风 / 宽屏 / 窗口全屏 / 屏幕全屏
 //
-// 本组件不存任何状态:形态、弹幕开关、音量、画质真身都在外部
+// 本组件不存任何状态：形态、弹幕开关、音量、画质真身都在外部
 // (RoomPage / SignalingChannel),这里只用信号把用户意图转达出去。
 Rectangle {
     id: root
@@ -20,11 +20,11 @@ Rectangle {
     signal danmakuSubmitted(string text)
     signal danmakuToggleRequested()
     signal viewModeRequested(string mode)
-    // 齿轮(= 声音设置)。弹窗本身声明在 RoomPage 根上,这里只发意图 ——
+    // 齿轮（= 声音设置）。弹窗本身声明在 RoomPage 根上，这里只发意图 ——
     // 理由见 AudioSettingsDialog 顶部
     signal audioSettingsRequested()
 
-    // 窗口全屏/屏幕全屏时,弹幕输入框并进这一行(非全屏时它在播放器下方)
+    // 窗口全屏/屏幕全屏时，弹幕输入框并进这一行（非全屏时它在播放器下方）
     property bool inlineDanmaku: false
     property string viewMode: "normal"
     property bool danmakuVisible: true
@@ -32,21 +32,21 @@ Rectangle {
     implicitHeight: 74
     color: Style.playerBar
 
-    // 画质选择浮层:贴在画质按钮正上方
+    // 画质选择浮层：贴在画质按钮正上方
     Popup {
         id: qualityPopup
 
-        // **坐标基准必须是按钮本身**。Popup 不设 parent 时以"窗口内容项"为基准,
-        // 和按钮的实际位置对不上 —— 浮层会跑到别处,连点击落点也跟着错。
-        // 挂在按钮上之后,x/y 就是最朴素的属性读,不依赖 mapToItem 那种函数式绑定。
+        // **坐标基准必须是按钮本身**。Popup 不设 parent 时以"窗口内容项"为基准，
+        // 和按钮的实际位置对不上 —— 浮层会跑到别处，连点击落点也跟着错。
+        // 挂在按钮上之后，x/y 就是最朴素的属性读，不依赖 mapToItem 那种函数式绑定。
         parent: qualityBtn
 
         width: 96
         padding: 0
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
-        // 右边缘和按钮对齐、底边贴在按钮上方 8px(负的 y 没问题:
-        // Popup 画在窗口浮层上,不会被父项裁剪)
+        // 右边缘和按钮对齐、底边贴在按钮上方 8px(负的 y 没问题：
+        // Popup 画在窗口浮层上，不会被父项裁剪)
         x: qualityBtn.width - width
         y: -height - 8
 
@@ -163,7 +163,7 @@ Rectangle {
                 Layout.rightMargin: 4
                 spacing: 2
 
-                // 直播:没有总时长,也没有可拖的时间轴 —— 直接标出来
+                // 直播：没有总时长，也没有可拖的时间轴 —— 直接标出来
                 Text {
                     visible: playbackSync.live
                     anchors.verticalCenter: parent.verticalCenter
@@ -254,14 +254,14 @@ Rectangle {
             Item { Layout.fillWidth: true }
 
             // ── 推送画质 ────────────────────────────
-            // 只有共享模式下的房主在推流,所以只有他能设。
+            // 只有共享模式下的房主在推流，所以只有他能设。
             // 观众看不到这个按钮 —— 他们看到的画质由房主决定。
             ControlButton {
                 id: qualityBtn
                 visible: roomSession.roomMode === RoomSession.Share && roomSession.isHost
-                // 切出共享模式时按钮会藏起来,浮层要跟着收掉,否则会留在屏幕上
+                // 切出共享模式时按钮会藏起来，浮层要跟着收掉，否则会留在屏幕上
                 onVisibleChanged: if (!visible) qualityPopup.close()
-                // 纯属性读(不要写成函数调用):绑定要跟着 videoQualityChanged 走
+                // 纯属性读（不要写成函数调用）:绑定要跟着 videoQualityChanged 走
                 text: root.videoQualities[signalingChannel.videoQuality]
                 tip: "推送画质"
                 onClicked: qualityPopup.opened ? qualityPopup.close() : qualityPopup.open()
@@ -303,7 +303,7 @@ Rectangle {
 
             Item { Layout.preferredWidth: 6 }
 
-            // ── 两路音量,各自一个按钮 ───────────────
+            // ── 两路音量，各自一个按钮 ───────────────
             VolumeButton {
                 icon: "speaker"
                 tip: "电影音量"
@@ -322,7 +322,7 @@ Rectangle {
 
             Item { Layout.preferredWidth: 6 }
 
-            // ── 麦克风(只控制你自己发不发语音) ───────
+            // ── 麦克风（仅控制本端是否发送语音） ───────
             ControlButton {
                 iconName: signalingChannel.audioEnabled ? "mic" : "mic-off"
                 active: signalingChannel.audioEnabled
@@ -333,8 +333,8 @@ Rectangle {
                 }
             }
 
-            // ── 声音设置(麦克风 / 听筒设备) ─────────
-            // 放在控制条上而不是顶栏:顶栏在两种全屏模式下都会收起,
+            // ── 声音设置（麦克风 / 听筒设备） ─────────
+            // 放在控制条上而不是顶栏：顶栏在两种全屏模式下都会收起，
             // 而"耳机插上了声音还在外放"往往是全屏看片时才发现的
             ControlButton {
                 iconName: "gear"
@@ -347,7 +347,7 @@ Rectangle {
 
             Item { Layout.preferredWidth: 6 }
 
-            // ── 三个形态按钮,各管各的 ─────────────────
+            // ── 三个形态按钮，各管各的 ─────────────────
             ControlButton {
                 iconName: "theater"
                 active: root.viewMode === "theater"

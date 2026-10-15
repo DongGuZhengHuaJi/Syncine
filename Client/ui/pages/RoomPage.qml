@@ -5,11 +5,11 @@ import QtQuick.Layouts
 import QtQuick.Window
 import SyncineApp
 
-// 房间页:顶栏 / 播放器 / 右侧功能框。
+// 房间页：顶栏 / 播放器 / 右侧功能框。
 //
-// 本页只做展示和转达用户意图,并且持有"房间内所有消息"这一份数据 ——
-// 弹幕和评论区共用它(见 sendMessage)。播放广播、加载门禁、回声抑制
-// 都在 PlaybackSync 里,这一层不再判断。
+// 本页只做展示和转达用户意图，并且持有"房间内所有消息"这一份数据 ——
+// 弹幕和评论区共用它（见 sendMessage）。播放广播、加载门禁、回声抑制
+// 都在 PlaybackSync 里，这一层不再判断。
 Item {
     id: root
 
@@ -19,46 +19,46 @@ Item {
     property string viewMode: "normal"
     property bool danmakuVisible: true
 
-    // 进屏幕全屏前的窗口状态,退出时还原(否则会把最大化也一起弄丢)
+    // 进入屏幕全屏前的窗口状态，退出时还原（否则最大化状态也会一并丢失）
     property int visibilityBeforeFullscreen: Window.Windowed
 
     readonly property bool fullscreenStyle: viewMode === "winfull" || viewMode === "screenfull"
-    // 顶栏:窗口全屏和屏幕全屏都收起
+    // 顶栏：窗口全屏和屏幕全屏都收起
     readonly property bool chromeVisible: viewMode === "normal" || viewMode === "theater"
 
-    // 这一端"需要自己加载片子"吗:本地模式是人人都要,共享模式只有房主要
-    //(观众的画面是房主推过来的,他们本机没有文件)
+    // 这一端"需要自己加载片子"吗：本地模式是人人都要，共享模式只有房主要
+    //(观众的画面是房主推过来的，他们本机没有文件)
     readonly property bool needsLocalFile:
         roomSession.roomMode === RoomSession.Sync
         || (roomSession.roomMode === RoomSession.Share && roomSession.isHost)
 
-    // 自己这边还没有可播的片子 —— 这时候点画面 = 去选文件,而不是播放/暂停。
-    // 用 hasLoaded 而不是"条目有没有映射":文件被删/拷走后映射还在,
+    // 自己这边还没有可播的片子 —— 这时候点画面 = 去选文件，而不是播放/暂停。
+    // 用 hasLoaded 而不是"条目有没有映射":文件被删/拷走后映射还在，
     // 那种情况下点画面也该能重新选一个
     readonly property bool awaitingFile:
         needsLocalFile && !playbackController.hasLoaded
 
     // ── 消息 ────────────────────────────────────────────
-    // 弹幕和评论是同一份数据,只有这一个 model
+    // 弹幕和评论是同一份数据，只有这一个 model
     ListModel {
         id: messageModel
-        ListElement { who: "系统"; text: "欢迎来到房间,把房间号发给好友一起观影" }
+        ListElement { who: "系统"; text: "已进入房间。将房间号发送给好友即可共同观看。" }
     }
 
-    // 只有真正"进评论列表"的消息才需要出现在列表里;
-    // 弹幕层是从同一条消息派生的,所以这里顺手也推一条弹幕。
+    // 仅「进入评论列表」的消息需要出现在列表中；
+    // 弹幕层由同一条消息派生，故此处一并推送一条弹幕。
     function sendMessage(text) {
         const t = text.trim()
         if (t === "")
             return
         messageModel.append({ "who": sessionController.nickname, "text": t })
-        // 自己的弹幕要自己补:服务端广播时把发送者排除了(LogicSystem.cpp),
+        // 自己的弹幕要自己补：服务端广播时把发送者排除了（LogicSystem.cpp）,
         // 不会回发给我
         videoPlayer.pushDanmaku(t)
         roomSession.sendChat(t)
     }
 
-    // 别人发来的:进列表 + 飘弹幕
+    // 别人发来的：进列表 + 飘弹幕
     function receiveMessage(who, text) {
         messageModel.append({ "who": who, "text": text })
         videoPlayer.pushDanmaku(text)
@@ -75,7 +75,7 @@ Item {
 
         const win = root.Window.window
 
-        // 离开屏幕全屏:先把窗口还原再切
+        // 离开屏幕全屏：先把窗口还原再切
         if (root.viewMode === "screenfull" && win)
             win.visibility = root.visibilityBeforeFullscreen
 
@@ -92,23 +92,23 @@ Item {
             return
         leaving = true
 
-        // 全屏状态下离开:先把窗口还原,不然回到首页还是全屏的
+        // 全屏状态下离开：先把窗口还原，不然回到首页还是全屏的
         const win = root.Window.window
         if (win && win.visibility === Window.FullScreen)
             win.visibility = root.visibilityBeforeFullscreen
 
-        // 先把麦克风关掉再走。否则人已经离开房间了,麦克风还在采集 ——
-        // 系统托盘上的录音指示灯会一直亮着,是用户最先注意到的异常。
+        // 先把麦克风关掉再走。否则人已经离开房间了，麦克风还在采集 ——
+        // 系统托盘上的录音指示灯会一直亮着，是用户最先注意到的异常。
         signalingChannel.setAudioEnabled(false)
         playbackController.pause()
-        // 把已经挂上的片子卸掉:房间都退了,本地播放器还占着文件没有意义,
+        // 把已经挂上的片子卸掉：房间都退了，本地播放器还占着文件没有意义，
         // 回到首页再进别的房间时也不该看到上一场的画面
         playbackController.unload()
         sessionController.leaveRoom()
         stackView.pop()
     }
 
-    // 选文件:targetItemId 为空 = 新加一条;非空 = 给这一条指定本机文件
+    // 选文件：targetItemId 为空 = 新加一条；非空 = 给这一条指定本机文件
     function requestLocalFile(targetItemId) {
         fileDialog.targetItemId = targetItemId
         fileDialog.open()
@@ -118,7 +118,7 @@ Item {
     function requestNewItem() {
         const current = roomSession.playlist.currentItemId
         const currentReady = roomSession.playlist.currentReady
-        // 当前条目缺本机文件时,选文件是"补给它"而不是"加一条新的"
+        // 当前条目缺本机文件时，选文件是"补给它"而不是"加一条新的"
         if (needsLocalFile && current !== "" && !currentReady) {
             requestLocalFile(current)
             return
@@ -126,7 +126,7 @@ Item {
         requestLocalFile("")
     }
 
-    // 窗口自己脱离了全屏(比如被窗口管理器改了),界面状态要跟上
+    // 窗口自己脱离了全屏（比如被窗口管理器改了）,界面状态要跟上
     Connections {
         target: root.Window.window
         function onVisibilityChanged() {
@@ -146,14 +146,14 @@ Item {
         id: messageDialog
     }
 
-    // 网链模式加条目:选来源 → 粘链接 + 挑画质。
-    // 声明在这里而不是 FunctionPanel 里:Popup 的坐标以"声明它的那个 Item"为基准,
-    // 挂在 336 宽的面板里会偏到侧栏上(见 AddVideoDialog 里的说明)
+    // 网链模式加条目：选来源 → 粘链接 + 挑画质。
+    // 声明在这里而不是 FunctionPanel 里：Popup 的坐标以"声明它的那个 Item"为基准，
+    // 挂在 336 宽的面板里会偏到侧栏上（见 AddVideoDialog 里的说明）
     AddVideoDialog {
         id: addVideoDialog
     }
 
-    // 声音设置(控制条上的齿轮)。同样声明在根上:Popup 以声明它的 Item 为原点,
+    // 声音设置（控制条上的齿轮）。同样声明在根上：Popup 以声明它的 Item 为原点，
     // 挂在控制条里会跟着画面偏移
     AudioSettingsDialog {
         id: audioSettingsDialog
@@ -176,7 +176,7 @@ Item {
         }
     }
 
-    // 房间级的错误(比如非房主想切集、共享模式下想添加)统一在这里弹
+    // 房间级的错误（比如非房主想切集、共享模式下想添加）统一在这里弹
     Connections {
         target: sessionController
         function onErrorOccurred(message) {
@@ -207,7 +207,7 @@ Item {
             }
         }
 
-        // 服务端断开(或被动离开)时,弹回上一页
+        // 服务端断开（或被动离开）时，弹回上一页
         function onLeft() {
             addVideoDialog.close()      // 房间都没了,开着的加条目窗口不该留着
             audioSettingsDialog.close() // 同理
@@ -218,7 +218,7 @@ Item {
                 win.visibility = root.visibilityBeforeFullscreen
             signalingChannel.setAudioEnabled(false)
             playbackController.pause()
-            // 被动离开(被服务端断开 / 房间解散)也要把挂着的片子卸掉
+            // 被动离开（被服务端断开 / 房间解散）也要把挂着的片子卸掉
             playbackController.unload()
             stackView.pop()
         }
@@ -339,7 +339,7 @@ Item {
             }
         }
 
-        // 模式选择(本地 / 共享 / 网链)
+        // 模式选择（本地 / 共享 / 网链）
         Rectangle {
             id: modeSelector
             anchors.horizontalCenter: parent.horizontalCenter
@@ -436,7 +436,7 @@ Item {
                         onAudioSettingsRequested: audioSettingsDialog.open()
                     }
 
-                    // 非全屏时,弹幕输入框在播放器下方
+                    // 非全屏时，弹幕输入框在播放器下方
                     DanmakuBar {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 50
@@ -460,14 +460,14 @@ Item {
         }
     }
 
-    // 画面中央的提示语(门禁状态由 PlaybackSync 判定,这里只负责翻译成文案)
+    // 画面中央的提示语（门禁状态由 PlaybackSync 判定，这里只负责翻译成文案）
     function hintMessage() {
         const mode = roomSession.roomMode
 
         if (mode === RoomSession.Sync) {
             if (playbackSync.blockReason === PlaybackSync.LocalNotLoaded) {
-                // 已经有一条在等着了,那缺的是"这一条对应的本机文件";
-                // 列表还是空的,才是"还没选过片子"
+                // 已经有一条在等着了，那缺的是"这一条对应的本机文件";
+                // 列表还是空的，才是"还没选过片子"
                 return roomSession.playlist.currentItemId !== ""
                        ? "点击画面,选择这一条对应的本机文件"
                        : "点击画面,选择视频文件"
@@ -478,7 +478,7 @@ Item {
         }
 
         if (mode === RoomSession.Share) {
-            // 观众的画面来自房主,他们本地没什么可做的,不给提示;
+            // 观众的画面来自房主，他们本地没什么可做的，不给提示；
             // 房主还没选片子才提示
             if (roomSession.isHost && !playbackController.hasLoaded)
                 return "点击画面,选择要共享的视频"
@@ -486,15 +486,15 @@ Item {
         }
 
         if (mode === RoomSession.Url) {
-            // 工具都没就位的话,后面全是白搭 —— 先说清缺什么
+            // 工具都没就位的话，后面全是白搭 —— 先说清缺什么
             if (!toolchain.ready)
                 return "网链模式工具未就绪:" + toolchain.statusText
 
-            // 这一条正在准备(解析链接 / 下载 / 合并)
+            // 这一条正在准备（解析链接 / 下载 / 合并）
             if (playbackSync.downloadStageText !== "")
                 return playbackSync.downloadStageText
 
-            // 门禁:网链模式也要全员就绪才能开播
+            // 门禁：网链模式也要全员就绪才能开播
             if (playbackSync.blockReason === PlaybackSync.LocalNotLoaded)
                 return "正在准备这一条…"
             if (playbackSync.blockReason === PlaybackSync.OthersNotLoaded)

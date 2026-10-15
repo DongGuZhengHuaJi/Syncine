@@ -1,7 +1,7 @@
 //
 // Created by donggu on 2026/10/14.
 //
-// 见 TurnCredentials.h 顶部的说明(为什么要有这个类、线程模型是怎样的)。
+// 见 TurnCredentials.h 顶部说明（类的用途与线程模型）。
 //
 
 #include "TurnCredentials.h"
@@ -18,8 +18,8 @@
 
 #include "Log.h"
 
-// Secrets.h 不进仓库(见 .gitignore)。没有它的机器走环境变量 ——
-// 两条路都走不通也能跑,只是没有 TURN 中继(下面的 run() 会说清楚)。
+// Secrets.h 不进仓库（见 .gitignore）。没有它的机器改走环境变量；
+// 两者皆不可用时仍可运行，只是没有 TURN 中继（详见 run()）。
 #if __has_include("Secrets.h")
 #  include "Secrets.h"
 #endif
@@ -33,11 +33,11 @@ using json = nlohmann::json;
 
 namespace {
 
-// Cloudflare 允许的最长 ttl 就是 24 小时,再长申请不到。
+// Cloudflare 允许的最长 ttl 即 24 小时，更长申请不到。
 constexpr long kCredentialTtlSeconds = 86400;
 
-// 用到 ttl 的多少就提前换。留出 1/4(6 小时)当重试窗口:
-// 退避最长 15 分钟,这段时间够试二十几次。
+// 使用 ttl 的这一比例后提前刷新。留出 1/4（6 小时）作为重试窗口：
+// 最长退避 15 分钟，该窗口内可重试二十余次。
 constexpr double kRefreshAtRatio = 0.75;
 
 constexpr int kRetryBaseSeconds = 30;
@@ -46,61 +46,60 @@ constexpr int kRequestTimeoutSeconds = 15;
 constexpr const char *kApiHost = "rtc.live.cloudflare.com";
 constexpr const char *kApiPort = "443";
 
-// 没有可用凭据时的兜底:一个公共 STUN,局域网和普通 NAT 照样直连。
+// 无可用凭据时的兜底：一个公共 STUN，局域网与普通 NAT 仍可直连。
 //
-// **不能**写成 "stun:stun.cloudflare.com:443?transport=tcp":libwebrtc 的
-// ICE URL 解析明确拒绝带 query 的 stun URL,而且那是个硬错误 ——
-// 任何一个 URL 不合法,**整条 PeerConnection 都建不起来**(不是跳过这一项),
-// 症状是客户端只报一句"连接创建失败,已放弃",极难排查。
+// 不可写成带 query 的 stun URL（如 ?transport=tcp）：libwebrtc 的 ICE URL 解析
+// 拒绝带 query 的 stun URL，且属硬错误——任一 URL 非法即整条 PeerConnection
+// 无法建立（不会跳过该项），客户端仅报一句连接创建失败，极难排查。
 json fallbackIceServers() {
     json stun;
     stun["urls"] = json::array({"stun:stun.cloudflare.com:3478"});
     return json::array({stun});
 }
 
-// 下发前先校验形状。理由同上:坏配置会让客户端**整条连接**失败,
-// 不如在这里拦住、退回 STUN 兜底 —— 少一个中继,但连接还能建起来。
+// 下发前校验形状。理由同上：坏配置会使客户端整条连接失败，在此拦截并退回
+// STUN 兜底更好——少一个中继，但连接仍能建立。
 bool validateIceServers(const json &list) {
     if (!list.is_array() || list.empty()) {
-        LOG_ERROR("Turn") << "拒绝下发的 ICE 配置:不是非空数组";
+        LOG_ERROR("Turn") << "ICE 配置校验失败，拒绝下发：不是非空数组";
         return false;
     }
 
     for (const json &entry : list) {
         if (!entry.is_object() || !entry.contains("urls") || !entry["urls"].is_array()
             || entry["urls"].empty()) {
-            LOG_ERROR("Turn") << "拒绝下发的 ICE 配置:有一项没有 urls";
+            LOG_ERROR("Turn") << "ICE 配置校验失败，拒绝下发：某一项缺少 urls";
             return false;
         }
 
         bool hasTurn = false;
         for (const json &url : entry["urls"]) {
             if (!url.is_string() || url.get<std::string>().empty()) {
-                LOG_ERROR("Turn") << "拒绝下发的 ICE 配置:url 不是非空字符串";
+                LOG_ERROR("Turn") << "ICE 配置校验失败，拒绝下发：url 不是非空字符串";
                 return false;
             }
 
             const std::string text = url.get<std::string>();
             const bool isStun = text.rfind("stun", 0) == 0;
 
-            // stun URL 带 query 会被 libwebrtc 判为非法(见上面 fallbackIceServers 的说明)
+            // stun URL 带 query 会被 libwebrtc 判为非法（见 fallbackIceServers 说明）
             if (isStun && text.find('?') != std::string::npos) {
-                LOG_ERROR("Turn") << "拒绝下发的 ICE 配置:STUN url 带了 query(会让整条"
-                                     "连接建不起来):" << text;
+                LOG_ERROR("Turn") << "ICE 配置校验失败，拒绝下发：STUN url 带 query"
+                                     "（会导致整条连接无法建立）：" << text;
                 return false;
             }
             if (!isStun && text.rfind("turn", 0) == 0)
                 hasTurn = true;
         }
 
-        // TURN 项必须有凭据:username/credential 为空同样是硬错误
+        // TURN 项必须有凭据：username/credential 为空同样是硬错误
         const bool hasUsername = entry.contains("username") && entry["username"].is_string()
                                  && !entry["username"].get<std::string>().empty();
         const bool hasCredential = entry.contains("credential")
                                    && entry["credential"].is_string()
                                    && !entry["credential"].get<std::string>().empty();
         if (hasTurn && (!hasUsername || !hasCredential)) {
-            LOG_ERROR("Turn") << "拒绝下发的 ICE 配置:TURN 项没有 username/credential";
+            LOG_ERROR("Turn") << "ICE 配置校验失败，拒绝下发：TURN 项缺少 username/credential";
             return false;
         }
     }
@@ -115,21 +114,21 @@ bool validateIceServers(const json &list) {
 // ============================
 
 TurnCredentials &TurnCredentials::getInstance() {
-    // C++11 起函数内 static 的初始化是线程安全的。注意别在静态初始化阶段碰它。
+    // 函数内 static 初始化自 C++11 起线程安全。注意不要在静态初始化阶段访问。
     static TurnCredentials instance;
     return instance;
 }
 
 TurnCredentials::~TurnCredentials() {
-    stop(); // 兜底。正常路径是 main 里显式 stop —— 那时 Log 还开着
+    stop(); // 兜底；正常路径是 main 中显式 stop，那时 Log 仍在运行
 }
 
 // ============================
 // 账户密钥
 // ============================
 
-// 环境变量优先,其次 Secrets.h。环境变量优先是有意的 ——
-// 想拿另一套 key 试一下时,不用改文件、不用重编。
+// 环境变量优先，其次 Secrets.h。此优先级是有意为之：
+// 换用另一套 key 试用时无需改文件、无需重新编译。
 TurnCredentials::ApiConfig TurnCredentials::loadApiConfig() {
     ApiConfig cfg;
     bool fromEnv = false;
@@ -149,7 +148,7 @@ TurnCredentials::ApiConfig TurnCredentials::loadApiConfig() {
     }
 
     if (cfg.complete())
-        LOG_INFO("Turn") << "TURN 账户密钥来自 " << (fromEnv ? "环境变量" : "Secrets.h");
+        LOG_INFO("Turn") << "TURN 账户密钥来源：" << (fromEnv ? "环境变量" : "Secrets.h");
 
     return cfg;
 }
@@ -173,14 +172,14 @@ void TurnCredentials::stop() {
     {
         std::lock_guard<std::mutex> lock(m_waitMutex);
         if (!m_started)
-            return; // 幂等:再调一次直接走人(析构里还会再调一次)
+            return; // 幂等：重复调用直接返回（析构函数中还会再调一次）
         m_started = false;
         m_stop = true;
     }
 
     m_cv.notify_all();
     if (m_thread.joinable())
-        m_thread.join(); // 最坏等一次请求跑完(kRequestTimeoutSeconds 封顶)
+        m_thread.join(); // 最坏情况等待一次请求完成（以 kRequestTimeoutSeconds 封顶）
 
     LOG_INFO("Turn") << "TURN 凭据服务已停止";
 }
@@ -194,12 +193,12 @@ void TurnCredentials::run() {
 
     const ApiConfig cfg = loadApiConfig();
     if (!cfg.complete()) {
-        // 不是致命错误:STUN 不需要鉴权,没有 TURN 也只是对称 NAT 后的对端
-        // 连不上。所以打一行 WARN 说清楚,不要每次进房都刷一遍 ERROR。
-        LOG_WARN("Turn") << "没有配置 TURN 密钥(Secrets.h 或 SYNCINE_TURN_KEY_ID / "
-                            "SYNCINE_TURN_API_TOKEN),只会下发 STUN;"
-                            "对称 NAT 后面的对端将连不上";
-        return; // 线程到此为止,iceServers() 永远返回兜底
+        // 不是致命错误：STUN 无需鉴权，缺少 TURN 只是对称 NAT 后的对端连不上。
+        // 打一行 WARN 说明即可，不应每次进房都刷 ERROR。
+        LOG_WARN("Turn") << "未配置 TURN 密钥（Secrets.h 或 SYNCINE_TURN_KEY_ID / "
+                            "SYNCINE_TURN_API_TOKEN），仅下发 STUN；"
+                            "对称 NAT 后的对端将无法连接";
+        return; // 线程到此结束，iceServers() 永远返回兜底值
     }
 
     while (true) {
@@ -211,13 +210,13 @@ void TurnCredentials::run() {
             const int backoff = std::min(kRetryBaseSeconds << std::min(m_failures - 1, 5),
                                          kRetryMaxSeconds);
             m_nextAttempt = std::chrono::steady_clock::now() + std::chrono::seconds(backoff);
-            LOG_WARN("Turn") << "第" << m_failures << "次获取 TURN 凭据失败,"
+            LOG_WARN("Turn") << "获取 TURN 凭据失败第 " << m_failures << " 次，"
                              << backoff << "s 后重试";
         }
 
         std::unique_lock<std::mutex> lock(m_waitMutex);
         if (m_cv.wait_until(lock, m_nextAttempt, [this] { return m_stop; }))
-            return; // 被 stop() 叫醒
+            return; // 被 stop() 唤醒
     }
 }
 
@@ -231,55 +230,54 @@ bool TurnCredentials::fetch(const ApiConfig &cfg) {
 
     beast::error_code ec;
 
-    // 这条线程私有的 io_context:只服务这一次请求,用完即弃。
-    // 不用服务端那个 io_context —— 这个类是同步阻塞的,不能被网络线程的
-    // 事件循环搅在一起。
+    // 线程私有的 io_context：只服务本次请求，用完即弃。不使用服务端的那个——
+    // 本类是同步阻塞的，不能与网络线程的事件循环混在一起。
     asio::io_context ioc;
 
     ssl::context ctx(ssl::context::tls_client);
 
-    // 系统 CA 目录(Debian 上是 /etc/ssl/certs)。直接调 OpenSSL 而不是
-    // asio 的 set_default_verify_paths():后者那个重载的返回值就是传进去的 ec,
-    // 白白多一个要接住的东西。这里返回的 1 是真的要看的结果。
+    // 加载系统 CA 目录（Debian 上为 /etc/ssl/certs）。直接调 OpenSSL 而非 asio 的
+    // set_default_verify_paths()：后者该重载的返回值即传入的 ec，多一个无用的
+    // 接收点；此处返回的 1 才是真正需要判断的结果。
     if (SSL_CTX_set_default_verify_paths(ctx.native_handle()) != 1) {
-        LOG_ERROR("Turn") << "加载系统 CA 失败,无法校验证书";
+        LOG_ERROR("Turn") << "加载系统 CA 失败，无法校验证书";
         return false;
     }
 
-    // 下一层用 beast::tcp_stream —— 只有它带 expires_after()。
+    // 下一层用 beast::tcp_stream —— 只有它带 expires_after()
     beast::ssl_stream<beast::tcp_stream> stream(ioc, ctx);
 
-    // SNI:少了它,按域名分流的负载均衡不知道该发哪张证书。
+    // SNI：缺少它时，按域名分流的负载均衡无法确定返回哪张证书
     if (SSL_set_tlsext_host_name(stream.native_handle(), kApiHost) != 1) {
         LOG_ERROR("Turn") << "设置 SNI 失败";
         return false;
     }
 
-    // 证书链和主机名都要校。host_name_verification 是现在该用的那个
-    // (老的 rfc2818_verification 已废弃)。
+    // 证书链与主机名均需校验。host_name_verification 为当前推荐用法
+    // （rfc2818_verification 已废弃）。
     stream.set_verify_mode(ssl::verify_peer);
     stream.set_verify_callback(ssl::host_name_verification(kApiHost));
 
     asio::ip::tcp::resolver resolver(ioc);
     const auto endpoints = resolver.resolve(kApiHost, kApiPort, ec);
     if (ec) {
-        LOG_ERROR("Turn") << "解析 " << kApiHost << " 失败:" << ec.message();
+        LOG_ERROR("Turn") << "解析 " << kApiHost << " 失败：" << ec.message();
         return false;
     }
 
-    // 注意:expires_after 只对**下一次**操作生效,所以每个网络操作之前都要重新武装,
-    // 否则只有第一个有超时,后面全变成"永远等下去"。
+    // 注意：expires_after 只对下一次操作生效，因此每个网络操作之前都需重新设置，
+    // 否则只有第一个操作带超时，后续操作会无限等待
     beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(kRequestTimeoutSeconds));
     beast::get_lowest_layer(stream).connect(endpoints, ec);
     if (ec) {
-        LOG_ERROR("Turn") << "连接 " << kApiHost << " 失败:" << ec.message();
+        LOG_ERROR("Turn") << "连接 " << kApiHost << " 失败：" << ec.message();
         return false;
     }
 
     beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(kRequestTimeoutSeconds));
     stream.handshake(ssl::stream_base::client, ec);
     if (ec) {
-        LOG_ERROR("Turn") << "TLS 握手失败:" << ec.message();
+        LOG_ERROR("Turn") << "TLS 握手失败：" << ec.message();
         return false;
     }
 
@@ -294,7 +292,7 @@ bool TurnCredentials::fetch(const ApiConfig &cfg) {
     beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(kRequestTimeoutSeconds));
     http::write(stream, request, ec);
     if (ec) {
-        LOG_ERROR("Turn") << "发送请求失败:" << ec.message();
+        LOG_ERROR("Turn") << "发送请求失败：" << ec.message();
         return false;
     }
 
@@ -303,28 +301,28 @@ bool TurnCredentials::fetch(const ApiConfig &cfg) {
     beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(kRequestTimeoutSeconds));
     http::read(stream, buffer, response, ec);
     if (ec) {
-        LOG_ERROR("Turn") << "读取响应失败:" << ec.message();
+        LOG_ERROR("Turn") << "读取响应失败：" << ec.message();
         return false;
     }
 
-    // 有序关闭 TLS。对端先关(asio::error::eof)或者没发 close_notify
-    // (ssl::error::stream_truncated)都算正常 —— Beast 的 ssl_stream.hpp 顶部的
-    // 说明里明确要求把这两个错误码当成功,别把它当多余代码删掉。
-    // 响应这时候已经完整读到了,其余错误只记 debug。
+    // 有序关闭 TLS。对端先关闭（asio::error::eof）或未发送 close_notify
+    // （ssl::error::stream_truncated）均属正常——Beast 的 ssl_stream.hpp 顶部说明
+    // 明确要求将这两个错误码视为成功，不可当作冗余代码删除。此时响应已完整读取，
+    // 其余错误仅记 debug。
     stream.shutdown(ec);
     if (ec && ec != asio::error::eof && ec != ssl::error::stream_truncated)
-        LOG_DEBUG("Turn") << "TLS 关闭告警(已忽略):" << ec.message();
+        LOG_DEBUG("Turn") << "TLS 关闭告警（已忽略）：" << ec.message();
 
     if (response.result() != http::status::created && response.result() != http::status::ok) {
-        // 401/403 = token 不对;404 = key id 不对。原文一并记下来,省得去猜。
-        LOG_ERROR("Turn") << "凭据接口返回 " << response.result_int() << ":" << response.body();
+        // 401/403 为 token 错误，404 为 key id 错误。一并记录原文，避免事后猜测。
+        LOG_ERROR("Turn") << "凭据接口返回 " << response.result_int() << "：" << response.body();
         return false;
     }
 
     const json parsed = json::parse(response.body(), nullptr, /*allow_exceptions=*/false);
     if (parsed.is_discarded() || !parsed.is_object() || !parsed.contains("iceServers")
         || !validateIceServers(parsed["iceServers"])) {
-        LOG_ERROR("Turn") << "凭据接口返回了意料之外的 JSON:" << response.body();
+        LOG_ERROR("Turn") << "凭据接口返回了预期之外的 JSON：" << response.body();
         return false;
     }
 
@@ -344,9 +342,9 @@ bool TurnCredentials::fetch(const ApiConfig &cfg) {
     const auto refreshIn = static_cast<long long>(kCredentialTtlSeconds * kRefreshAtRatio);
     m_nextAttempt = std::chrono::steady_clock::now() + std::chrono::seconds(refreshIn);
 
-    // 只记条数 —— username/credential 是临时密钥,任何级别都不写进日志。
-    LOG_INFO("Turn") << "已获取 TURN 凭据:" << serverCount << " 组服务器 / " << urlCount
-                     << " 个 URL," << refreshIn / 3600 << "h 后刷新";
+    // 只记录条数：username/credential 是临时密钥，任何级别都不写入日志
+    LOG_INFO("Turn") << "已获取 TURN 凭据：" << serverCount << " 组服务器 / " << urlCount
+                     << " 个 URL，" << refreshIn / 3600 << "h 后刷新";
     return true;
 }
 
@@ -360,7 +358,6 @@ json TurnCredentials::iceServers() const {
     if (!m_iceServers.is_null() && std::chrono::steady_clock::now() < m_validUntil)
         return m_iceServers;
 
-    // 从来没成功过,或者已经硬过期。过期凭据发下去只会让客户端白试一轮 TURN,
-    // 不如直接给 STUN。
+    // 从未成功过，或已硬过期。下发过期凭据只会让客户端白试一轮 TURN，不如直接给 STUN。
     return fallbackIceServers();
 }

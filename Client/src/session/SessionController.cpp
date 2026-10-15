@@ -6,6 +6,7 @@
 
 #include <QRandomGenerator>
 
+#include "core/Log.h"
 #include "core/NetworkManager.h"
 #include "session/RoomSession.h"
 
@@ -37,19 +38,18 @@ SessionController::SessionController(NetworkManager *networkManager,
     connect(m_networkManager, &NetworkManager::disconnected,
             this, &SessionController::onDisconnected);
 
-    // 一整轮(用户地址 + 兜底)都没连上时,把挂着的请求判失败。
+    // 一整轮（用户地址 + 兜底）都未能连上时，将挂起的请求判为失败。
     //
-    // 没有这一条会出一个很硬的死结:点了"创建房间"之后请求挂起、按钮变成
-    // 禁用的"连接中…",而失败路径**只**在 onDisconnected 里复位 ——
-    // Qt 在"连接被拒"时不一定发那个信号(各版本行为不一致),于是按钮
-    // 永远禁用,用户只能重启客户端。
+    // 缺少此项会导致死锁：点击「创建房间」后请求挂起、按钮变为禁用的
+    // 「连接中…」，而失败路径仅在 onDisconnected 中复位——Qt 在连接被拒时
+    // 不一定发出该信号（各版本行为不一致），于是按钮永久禁用，只能重启客户端。
     connect(m_networkManager, &NetworkManager::connectionFailed, this,
             [this](const QString &reason) {
-                Q_UNUSED(reason);
-                // 只有"正等着连接去发请求"时才报错;平时后台重试的失败
-                // 不该弹给用户看
-                if (m_pending != PendingRequest::None)
+                // 仅在「正等待连接以发送请求」时报错；后台重试的失败不应提示用户
+                if (m_pending != PendingRequest::None) {
+                    LOG_WARN("Session") << "连接失败，挂起的请求判失败:" << reason;
                     failPending(QStringLiteral("无法连接到服务器"));
+                }
             });
 }
 
@@ -69,12 +69,14 @@ void SessionController::createRoom(const QString &roomName,
                                    const QString &nickname,
                                    const QString &password) {
     if (m_roomSession != nullptr && m_roomSession->inRoom()) {
-        emit errorOccurred("你已经在房间里了");
+        LOG_WARN("Session") << "创建房间被拒：已在房间中";
+        emit errorOccurred("已在房间中");
         return;
     }
 
     if (busy()) {
-        emit errorOccurred("正在连接服务器,请稍候");
+        LOG_WARN("Session") << "创建房间被拒：已有请求正在处理";
+        emit errorOccurred("正在连接服务器，请稍候");
         return;
     }
 
@@ -87,6 +89,8 @@ void SessionController::createRoom(const QString &roomName,
     m_pendingNickname = nickname;
     m_pendingPassword = password;
 
+    LOG_INFO("Session") << "请求创建房间: roomId=" << m_pendingRoomId
+                        << " nickname=" << nickname;
     emit busyChanged();
     sendPendingRequest();
 }
@@ -95,12 +99,14 @@ void SessionController::joinRoom(const QString &roomId,
                                  const QString &nickname,
                                  const QString &password) {
     if (m_roomSession != nullptr && m_roomSession->inRoom()) {
-        emit errorOccurred("你已经在房间里了");
+        LOG_WARN("Session") << "加入房间被拒：已在房间中";
+        emit errorOccurred("已在房间中");
         return;
     }
 
     if (busy()) {
-        emit errorOccurred("正在连接服务器,请稍候");
+        LOG_WARN("Session") << "加入房间被拒：已有请求正在处理";
+        emit errorOccurred("正在连接服务器，请稍候");
         return;
     }
 
@@ -112,6 +118,7 @@ void SessionController::joinRoom(const QString &roomId,
     m_pendingNickname = nickname;
     m_pendingPassword = password;
 
+    LOG_INFO("Session") << "请求加入房间: roomId=" << roomId << " nickname=" << nickname;
     emit busyChanged();
     sendPendingRequest();
 }
@@ -119,6 +126,8 @@ void SessionController::joinRoom(const QString &roomId,
 void SessionController::leaveRoom() {
     if (m_roomSession == nullptr || !m_roomSession->inRoom())
         return;
+
+    LOG_INFO("Session") << "主动离开房间: roomId=" << m_roomSession->roomId();
 
     if (m_networkManager != nullptr && m_networkManager->isConnected())
         m_networkManager->sendMessage(Protocol::encodeLeaveRoom());
@@ -135,8 +144,9 @@ void SessionController::sendPendingRequest() {
         return;
     }
 
-    // 还没连上服务器:先建立连接,连上之后 onConnected 会再调一次这里
+    // 尚未连接服务器：先建立连接，连上后 onConnected 会再次调用此处
     if (!m_networkManager->isConnected()) {
+        LOG_DEBUG("Session") << "尚未连接服务器，先发起连接";
         m_networkManager->connectToServer();
         return;
     }
@@ -148,15 +158,20 @@ void SessionController::sendPendingRequest() {
                                    m_pendingPassword);
 
     if (!m_networkManager->sendMessage(text)) {
+        LOG_ERROR("Session") << "发送入场请求失败: roomId=" << m_pendingRoomId;
         failPending("无法向服务器发送请求");
         return;
     }
 
+    LOG_DEBUG("Session") << "入场请求已发出: roomId=" << m_pendingRoomId
+                         << " 类型=" << (m_pending == PendingRequest::CreateRoom
+                                             ? "create_room" : "join_room");
     m_pending = PendingRequest::None;
     setAwaitingReply(true);
 }
 
 void SessionController::failPending(const QString &errorString) {
+    LOG_WARN("Session") << "入场请求失败:" << errorString;
     m_pending = PendingRequest::None;
     m_awaitingReply = false;
     emit busyChanged();
@@ -176,16 +191,21 @@ void SessionController::setAwaitingReply(bool awaiting) {
 // ============================
 
 void SessionController::onConnected() {
+    LOG_DEBUG("Session") << "已连接服务器";
     sendPendingRequest();
 }
 
 void SessionController::onDisconnected() {
+    LOG_INFO("Session") << "与服务器的连接断开";
+
     if (m_pending != PendingRequest::None)
         failPending("无法连接到服务器");
     else if (m_awaitingReply)
         setAwaitingReply(false);
 
     if (m_roomSession != nullptr && m_roomSession->inRoom()) {
+        LOG_WARN("Session") << "连接断开时仍在房间内，强制退房: roomId="
+                            << m_roomSession->roomId();
         m_roomSession->leaveRoom();
         emit errorOccurred("与服务器的连接已断开");
     }
@@ -198,6 +218,7 @@ void SessionController::onDisconnected() {
 void SessionController::onMessage(const QString &text) {
     const std::optional<Protocol::Message> decoded = Protocol::decode(text);
     if (!decoded) {
+        LOG_WARN("Session") << "收到无法解析的消息";
         emit errorOccurred("收到无法解析的消息");
         return;
     }
@@ -205,6 +226,7 @@ void SessionController::onMessage(const QString &text) {
     switch (decoded->type) {
     case Protocol::MessageType::Welcome:
         m_clientId = decoded->clientId;
+        LOG_INFO("Session") << "收到 welcome: clientId=" << m_clientId;
         break;
 
     case Protocol::MessageType::RoomCreated:
@@ -213,11 +235,14 @@ void SessionController::onMessage(const QString &text) {
         break;
 
     case Protocol::MessageType::RoomLeft:
+        LOG_INFO("Session") << "服务端通知房间已关闭";
         if (m_roomSession != nullptr)
             m_roomSession->leaveRoom();
         break;
 
     case Protocol::MessageType::Error:
+        LOG_WARN("Session") << "服务端返回错误: code=" << decoded->code
+                            << " message=" << decoded->errorMessage;
         if (m_awaitingReply)
             setAwaitingReply(false);
 
@@ -226,8 +251,8 @@ void SessionController::onMessage(const QString &text) {
         break;
 
     default:
-        // 房间内消息和 WebRTC 信令由 RoomSession / SignalingChannel 各自订阅,
-        // 这里不做转发
+        // 房间内消息与 WebRTC 信令由 RoomSession / SignalingChannel 各自订阅，
+        // 此处不转发
         break;
     }
 }
@@ -238,13 +263,19 @@ void SessionController::handleRoomEntered(const Protocol::Message &message) {
     m_pending = PendingRequest::None;
     setAwaitingReply(false);
 
-    // 顺序很重要:先把房间页推起来(QML 在 Connections 里接房间信号),
-    // 再把房间状态灌进去。反过来的话,首次的 videoMismatch 之类的信号
-    // 会在页面还不存在时发出去,被静默丢掉。
+    // 顺序有要求：先推起房间页（QML 在 Connections 中接收房间信号），
+    // 再灌入房间状态。顺序颠倒会导致首次的 videoMismatch 等信号在页面
+    // 尚不存在时发出而被静默丢弃。
     if (message.type == Protocol::MessageType::RoomCreated)
         emit roomCreated();
     else
         emit roomJoined();
+
+    LOG_INFO("Session") << "已进入房间: roomId=" << snapshot.roomId
+                        << " name=" << snapshot.roomName
+                        << " mode=" << snapshot.mode
+                        << " 成员数=" << snapshot.members.size()
+                        << " 播放列表=" << snapshot.playlist.size();
 
     if (m_roomSession != nullptr)
         m_roomSession->enterRoom(snapshot);
@@ -262,11 +293,11 @@ RoomSnapshot SessionController::snapshotFrom(const Protocol::Message &message) c
     snapshot.position = message.position;
     snapshot.videoMismatched = message.videoMismatched;
     snapshot.shortestDuration = message.shortestDuration;
-    // 播放列表随 state 一起下发 —— 漏了这两行,入房的人会看到一个空列表
+    // 播放列表随 state 一并下发，漏掉这两行会导致入房者看到空列表
     snapshot.playlist = message.playlist;
     snapshot.currentIndex = message.currentIndex;
-    // ICE 配置(STUN/TURN)也随入房消息一起来。SignalingChannel 建连前会取它,
-    // 所以必须走进 snapshot —— 见 RoomSession::enterRoom 里的时序说明。
+    // ICE 配置（STUN/TURN）同样随入房消息到达。SignalingChannel 建连前会取用它，
+    // 因此必须进入 snapshot，时序说明见 RoomSession::enterRoom。
     snapshot.iceServers = message.iceServers;
     return snapshot;
 }
