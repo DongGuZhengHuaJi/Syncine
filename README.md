@@ -1,6 +1,6 @@
 # Syncine
 
-基于 WebRTC 的**同步观影**软件。开一个房间，和朋友一起看同一部片子——进度、暂停、快进都是同步的；想看同一个画面又不想上传片源时，房主的画面和电影音轨会经 WebRTC 直接推给其他人。
+基于 WebRTC 的**同步观影**软件。开一个房间，和朋友一起看同一部影片——进度、暂停、快进都是同步的；想看同一个画面又不想上传片源时，房主的画面和电影音轨会经 WebRTC 直接推给其他人。
 
 - **客户端**：Qt 6.10（QML）+ 原生 libwebrtc
 - **服务端**：C++ / Boost.Asio + Beast，一个 WebSocket 房间服务器
@@ -18,7 +18,7 @@
 | **共享模式** `share` | 只有房主有 | 房主的画面与电影音轨经 WebRTC 推给观众（观众不加载任何媒体）；观众不参与排片 |
 | **网链模式** `url` | 各自从同一个链接下载 | 房间共享条目（链接 + 画质档位），各端各自解析、下载、合并再播放，房主广播位置供其他人纠偏 |
 
-此外还有语音（麦克风）和聊天、弹幕。
+此外还有语音（麦克风）和聊天、本地弹幕。
 
 ---
 
@@ -74,7 +74,7 @@ sudo apt install libgl1 libegl1 libglx0 libopengl0 libxkbcommon0 libxkbcommon-x1
 ./scripts/fetch-tools.sh
 
 # 2. WebRTC —— 二选一
-#    a) 自己编（几小时）：见 third_party/webrtc/README.md
+#    a) 自己编译：见 third_party/webrtc/README.md
 #    b) 下载预编译产物（Release 附件），解压到任意目录
 export WEBRTC_ROOT=/path/to/webrtc-checkout/src
 
@@ -137,7 +137,7 @@ sudo systemctl enable --now syncine
 ```
 
 - 日志在 `WorkingDirectory/logs/`，级别用 `SYNCINE_LOG_LEVEL`（trace/debug/info/warn/error）调。
-- 需要放行 **8765/tcp**（云服务商的安全组也要放行，不只是系统防火墙）。
+- 需要放行 **8765/tcp**（云服务商的安全组和系统防火墙）。
 - 服务端**不自带 TLS**。公网部署建议前面挂一层反向代理（nginx / caddy）做 `wss://` —— 否则房间口令、聊天内容和下发的 TURN 临时凭据都是明文。
 
 ---
@@ -156,7 +156,7 @@ sudo systemctl enable --now syncine
 
 - **信令未加密**：服务端是明文 `ws://`。房间口令、聊天、TURN 临时凭据可被同路径的中间人读到。媒体面走 WebRTC 自带加密（DTLS-SRTP），不受影响。有域名后在客户端改 `wss://` 并前置反代即可。
 - **房间号只有 6 位**且入房失败没有节流，公网服务端存在枚举与口令爆破的可能。房间设个口令能挡掉一部分。
-- **房间成员都能控制播放**（play / pause / seek 全员可发），这是「和朋友一起看」的设计，但在任何人都能猜号入房的公网服务器上也是打扰手段。
+- **房间成员都能控制播放**（play / pause / seek 全员可发），这是「和朋友一起看」的设计，公网可能会受影响。
 - 音画同步（lip sync）未实现；WebRTC 重协商逻辑不完整。
 - 未做时钟漂移校准：位置同步是「动作广播 + 房主定期广播位置」，长时间播放后各端可能有秒级偏差。
 
