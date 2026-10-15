@@ -7,7 +7,12 @@
 #include "TurnCredentials.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <thread>
+
+#include <sys/socket.h> // shutdown()
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -45,6 +50,55 @@ constexpr int kRetryMaxSeconds = 900; // 15 分钟
 constexpr int kRequestTimeoutSeconds = 15;
 constexpr const char *kApiHost = "rtc.live.cloudflare.com";
 constexpr const char *kApiPort = "443";
+
+// 同步网络操作的兜底超时。
+//
+// beast::tcp_stream 的 expires_after() **只对异步操作生效**（Beast 文档：
+// "Timeouts may be specified for each logical asynchronous operation"），而
+// fetch() 全程是同步调用 —— 那些 expires_after 其实一点作用都没有。
+//
+// 实测（只接受连接、永不回数据的服务端）：
+//   · expires_after(2s) + 同步 http::read  → 无限阻塞
+//   · 再加 SO_RCVTIMEO=2s                  → 仍然无限阻塞（asio 把套接字设成
+//     非阻塞、用 poll 模拟阻塞读，内核的超时选项管不到）
+//   · 另开线程在 2 秒后 ::shutdown(fd)     → 2.0 秒准时以 EOF 返回 ✓
+//
+// 这不是理论问题：部署到 VPS 后遇到过一次 TLS 层停顿，TURN 线程就此永久挂在
+// tcp_recvmsg 上。后果不止是「这次拿不到凭据」—— m_nextAttempt 只在 fetch()
+// 返回后才更新，所以**重试循环根本进不去**，服务端会一直静默退化成纯 STUN。
+//
+// 用 shutdown 而不是 close：shutdown 不释放描述符，不存在 fd 被回收后误伤
+// 其它连接的风险。
+class SocketWatchdog {
+public:
+    SocketWatchdog(int fd, int seconds)
+        : m_thread([this, fd, seconds] {
+              for (int i = 0; i < seconds * 10; ++i) {
+                  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                  if (m_done.load(std::memory_order_relaxed))
+                      return;
+              }
+              m_fired.store(true, std::memory_order_relaxed);
+              ::shutdown(fd, SHUT_RDWR);
+          }) {
+    }
+
+    ~SocketWatchdog() {
+        m_done.store(true, std::memory_order_relaxed);
+        m_thread.join();
+    }
+
+    SocketWatchdog(const SocketWatchdog &) = delete;
+    SocketWatchdog &operator=(const SocketWatchdog &) = delete;
+
+    // 是否是被本看门狗掐断的（用于把错误信息说清楚）
+    bool fired() const { return m_fired.load(std::memory_order_relaxed); }
+
+private:
+    std::atomic<bool> m_done{false};
+    std::atomic<bool> m_fired{false};
+    std::thread m_thread;
+};
 
 // 无可用凭据时的兜底：一个公共 STUN，局域网与普通 NAT 仍可直连。
 //
@@ -265,8 +319,8 @@ bool TurnCredentials::fetch(const ApiConfig &cfg) {
         return false;
     }
 
-    // 注意：expires_after 只对下一次操作生效，因此每个网络操作之前都需重新设置，
-    // 否则只有第一个操作带超时，后续操作会无限等待
+    // 连接本身没有超时（asio 用非阻塞 connect + poll 模拟同步连接），但最坏
+    // 情况受内核 SYN 重试上限约束（约两分钟）而非无限，故不单独处理。
     beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(kRequestTimeoutSeconds));
     beast::get_lowest_layer(stream).connect(endpoints, ec);
     if (ec) {
@@ -274,10 +328,22 @@ bool TurnCredentials::fetch(const ApiConfig &cfg) {
         return false;
     }
 
+    // 从这里开始，每一步都可能无限阻塞，交给看门狗兜底（见 SocketWatchdog 说明）。
+    // 注意那些 expires_after 对同步调用没有作用，保留只是为了将来改成异步时
+    // 语义仍然正确。
+    SocketWatchdog watchdog(stream.next_layer().socket().native_handle(),
+                            kRequestTimeoutSeconds);
+
+    const auto describe = [&watchdog](const beast::error_code &error) {
+        return watchdog.fired()
+                   ? std::string("超时（") + std::to_string(kRequestTimeoutSeconds) + "s）"
+                   : error.message();
+    };
+
     beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(kRequestTimeoutSeconds));
     stream.handshake(ssl::stream_base::client, ec);
     if (ec) {
-        LOG_ERROR("Turn") << "TLS 握手失败：" << ec.message();
+        LOG_ERROR("Turn") << "TLS 握手失败：" << describe(ec);
         return false;
     }
 
@@ -292,7 +358,7 @@ bool TurnCredentials::fetch(const ApiConfig &cfg) {
     beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(kRequestTimeoutSeconds));
     http::write(stream, request, ec);
     if (ec) {
-        LOG_ERROR("Turn") << "发送请求失败：" << ec.message();
+        LOG_ERROR("Turn") << "发送请求失败：" << describe(ec);
         return false;
     }
 
@@ -301,7 +367,7 @@ bool TurnCredentials::fetch(const ApiConfig &cfg) {
     beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(kRequestTimeoutSeconds));
     http::read(stream, buffer, response, ec);
     if (ec) {
-        LOG_ERROR("Turn") << "读取响应失败：" << ec.message();
+        LOG_ERROR("Turn") << "读取响应失败：" << describe(ec);
         return false;
     }
 
