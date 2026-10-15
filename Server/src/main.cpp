@@ -13,15 +13,26 @@ int main() {
     // 启动越早，第一个建房/进房的客户端越可能拿到真实凭据，否则只能先给 STUN 兜底。
     TurnCredentials::getInstance().start();
 
-    asio::io_context ioc;
-    Server server(ioc, Config::SERVER_ADDRESS, Config::SERVER_PORT);
-    server.start();
-    ioc.run();
+    int exitCode = 0;
+    {
+        asio::io_context ioc;
+        Server server(ioc, Config::SERVER_ADDRESS, Config::SERVER_PORT);
+        if (!server.start()) {
+            // 监听没建立起来（多半是端口被占）。**必须退出**：旧代码在这里
+            // 继续跑 accept 循环，结果是在没绑上的套接字上自旋，单核 100%。
+            exitCode = 1;
+        } else {
+            ioc.run();
+        }
+        // Server 与 io_context 在内层作用域结束时就析构，它们的收尾日志
+        // （"服务停止"）才写得到日志文件 —— 放到 Log::shutdown() 之后
+        // 析构的话，那几行只会在控制台出现。
+    }
 
-    // ioc.run() 返回即进入收尾。先停凭据线程（内部 join），再关闭日志；
-    // 顺序颠倒会导致该线程的收尾日志写进已关闭的文件。
+    // 先停凭据线程（内部 join），再关闭日志；顺序颠倒会导致该线程的收尾
+    // 日志写进已关闭的文件。
     TurnCredentials::getInstance().stop();
 
     Log::shutdown();
-    return 0;
+    return exitCode;
 }

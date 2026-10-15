@@ -1,0 +1,17 @@
+# 统一换行符：仓库内存 LF，检出时按平台转换
+* text=auto
+
+# 补丁文件必须用 LF，否则 Windows 上 git apply 会失败
+*.patch text eol=lf
+
+# 构建脚本同理：CRLF 会让 bash 报 "$'\r': command not found"
+*.sh text eol=lf
+
+# 二进制资源标记，避免 git 做无意义的文本 diff
+*.png binary
+*.jpg binary
+*.ico binary
+*.icns binary
+
+# 随包工具是平台相关的大二进制，永不入库（.gitignore 已排除）
+*.exe binary

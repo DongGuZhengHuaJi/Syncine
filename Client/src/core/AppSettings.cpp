@@ -10,9 +10,12 @@
 
 namespace {
 
-// 部署后需修改此项：用户未在设置中填写地址时连接该地址。
-// 改用 wss:// 同样在此处修改（客户端已允许 ws/wss 两种 scheme）。
-const char *kFallbackServerUrl = "ws://localhost:8765";
+// 兜底服务器：用户没在设置里填地址时连它。
+//
+// 改地址就改这一行（客户端允许 ws/wss 两种 scheme）。1.0 发的是明文 ws://，
+// 即信令（房间口令、聊天、服务端下发的 TURN 临时凭据）在网上可被中间人读到；
+// 媒体面走 WebRTC 自带加密，不受影响。将来有域名了在这里改成 wss:// 即可。
+const char *kFallbackServerUrl = "ws://8.148.12.233:8765";
 
 const char *kKeyServerUrl = "server/userUrl";
 const char *kKeyQuality = "playback/quality";

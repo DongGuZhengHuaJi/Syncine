@@ -119,11 +119,10 @@ QString UrlDownloader::itemTempDir(const QString &roomId, const QString &clientI
            + QLatin1Char('/') + sanitize(itemId);
 }
 
-void UrlDownloader::removeRoomTempDir(const QString &roomId, const QString &clientId)
+void UrlDownloader::removeClientTempDir(const QString &clientId)
 {
     QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation)
-         + QStringLiteral("/syncine/") + sanitize(clientId)
-         + QLatin1Char('/') + sanitize(roomId)).removeRecursively();
+         + QStringLiteral("/syncine/") + sanitize(clientId)).removeRecursively();
 }
 
 // ============================
@@ -138,6 +137,12 @@ void UrlDownloader::start(const QString &url, const QString &spec)
     }
     if (m_toolchain == nullptr || !m_toolchain->ytDlpReady()) {
         fail(QStringLiteral("找不到 yt-dlp,无法解析链接"));
+        return;
+    }
+    // URL 来自房间里的其他人（条目随房间下发），是不可信输入。启动进程前
+    // 先挡一道，报错比让 yt-dlp 去解析畸形地址清楚
+    if (!Toolchain::isSafeMediaUrl(url)) {
+        fail(QStringLiteral("这个条目的地址不是有效的 http/https 链接，已跳过"));
         return;
     }
 
@@ -466,7 +471,7 @@ void UrlDownloader::startProcess(const QStringList &options, const QString &url)
     args << m_toolchain->ffmpegLocationArgs();
     if (m_cookies != nullptr)
         args << m_cookies->cookieArgs();
-    args << url;
+    Toolchain::appendUrlArg(args, url); // 必须走它，理由见 Toolchain.h
     m_process->setArguments(args);
 
     LOG_DEBUG("UrlDownloader") << "yt-dlp" << args.join(QLatin1Char(' '));

@@ -390,9 +390,24 @@ MediaSelection tierSelection(const MediaInfo &info, int height, bool allowHdr)
 
     // 该档位整档为 HDR 时，Qt 播放需经 HdrConverter 转换，此处提前标记
     if (video.formatId.isEmpty()) {
-        // 该高度在源中不存在，退回不设限
-        LOG_INFO("Format") << "档位 " << height << "P 在源中无对应流，退回不设限（最高画质）";
-        return tierSelection(info, 0, allowHdr);
+        if (height > 0) {
+            // 该高度在源中不存在，退回不设限
+            LOG_INFO("Format") << "档位 " << height << "P 在源中无对应流，退回不设限（最高画质）";
+            return tierSelection(info, 0, allowHdr);
+        }
+        // 走到这里说明「不设限」也挑不出画面流 —— 源里没有任何 height > 0 的
+        // 视频流。纯音频源、部分 HLS、只有 storyboard 的源都会这样，而且
+        // 用户在首次添加时选「最高画质」就会提交 spec="0"，直接命中。
+        //
+        // 这里**绝不能再递归**：pickVideoTier 对 height <= 0 的流一律 continue
+        // （那个字段没意义），所以用同样的参数重入结果必然还是空 —— 就是无限
+        // 递归，几百层后栈溢出 SIGSEGV。而且 spec 是条目级、随房间下发的，
+        // 一个人加进这样一条，全房间切到它时一起崩。
+        //
+        // 返回 invalid（valid 默认 false），由上层报「没有可下载的流」。
+        LOG_WARN("Format") << "源中没有带 height 的画面流，无法选择下载档位:"
+                           << " 候选格式数=" << info.formats.size();
+        return selection;
     }
 
     QStringList sortKeys{

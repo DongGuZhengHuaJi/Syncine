@@ -38,6 +38,7 @@ WebSocketServer::WebSocketServer(asio::io_context &ioc, const std::string &addre
         return;
     }
 
+    m_listening = true;
     LOG_INFO("WebSocket") << "监听已就绪 " << address << ":" << port;
 }
 
@@ -46,6 +47,12 @@ WebSocketServer::~WebSocketServer() {
 }
 
 void WebSocketServer::run() {
+    // 没监听上就不要进 accept 循环：acceptor 可能仍是 is_open()，
+    // 在里面重试只会得到无穷无尽的「Invalid argument」
+    if (!m_listening) {
+        LOG_FATAL("WebSocket") << "监听未建立，放弃接受连接";
+        return;
+    }
     do_accept();
 }
 
@@ -99,7 +106,7 @@ void WebSocketServer::on_accept(beast::error_code ec, asio::ip::tcp::socket sock
         LOG_ERROR("WebSocket") << "接受连接失败：" << ec.message();
     }
 
-    // acceptor 仍打开则继续接受下一个连接
-    if (m_acceptor.is_open())
+    // 仍在监听才继续接受下一个连接
+    if (m_listening && m_acceptor.is_open())
         do_accept();
 }

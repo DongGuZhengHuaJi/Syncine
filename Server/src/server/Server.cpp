@@ -16,10 +16,20 @@ Server::~Server() {
     stop();
 }
 
-void Server::start() {
+bool Server::start() {
+    // 必须先确认监听真的建立了再报「服务启动」。
+    // 端口被占时旧代码照样打印这一行并进入 accept 循环，结果是在一个没绑上
+    // 的套接字上自旋 —— 实测进程状态 R、单核跑满，而 systemd 完全看不出问题。
+    if (!m_webSocketServer->isListening()) {
+        LOG_FATAL("Server") << "监听未建立，服务无法启动 "
+                            << Config::SERVER_ADDRESS << ":" << Config::SERVER_PORT;
+        return false;
+    }
+
     LOG_INFO("Server") << "服务启动 " << Config::SERVER_ADDRESS
                        << ":" << Config::SERVER_PORT;
     m_webSocketServer->run();
+    return true;
 }
 
 void Server::stop() {

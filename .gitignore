@@ -4,6 +4,10 @@
 
 */cmake-build-*
 
+# CMakePresets 里 release preset 的输出目录（不是 cmake-build-* 前缀，
+# 上面的规则盖不住），里面装着上 GB 的 Qt 部署产物和安装包。
+*/build-release
+
 docs
 
 design
@@ -11,6 +15,10 @@ design
 logs
 
 Client/tools/*
+
+# 工具目录的说明文档要跟着仓库走（讲清版本、来源、许可），
+# 它被上面的规则误伤了，这里放行。
+!Client/tools/README.md
 
 # 凭据文件，绝不入库。
 # tools/ 下是随包分发的二进制，但 cookie 文件属于用户自己的登录态，

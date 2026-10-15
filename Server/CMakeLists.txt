@@ -1,8 +1,8 @@
-cmake_minimum_required(VERSION 4.3)
-project(Server)
+cmake_minimum_required(VERSION 3.28)
+project(Server VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
-
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Boost REQUIRED)
 
@@ -32,7 +32,11 @@ add_executable(Server src/main.cpp
         src/tools/Config.h
 )
 
-include_directories(src
+# 用 target_include_directories 而不是 include_directories：后者是目录级属性，
+# 会污染同目录下所有目标。
+target_include_directories(Server
+        PRIVATE
+        src
         src/server
         src/network
         src/tools)
@@ -43,3 +47,7 @@ target_link_libraries(Server
         OpenSSL::SSL
         OpenSSL::Crypto
 )
+
+# 部署时 `cmake --install` 会把可执行文件放到 <prefix>/bin/Server。
+include(GNUInstallDirs)
+install(TARGETS Server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

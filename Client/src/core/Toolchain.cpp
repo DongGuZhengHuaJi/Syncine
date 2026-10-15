@@ -82,7 +82,7 @@ QString Toolchain::findTool(const QString &subdir, const QStringList &names)
 void Toolchain::detect()
 {
     m_ytDlpPath = findTool(QStringLiteral("yt-dlp"),
-                           {QStringLiteral("yt-dlp_linux"), QStringLiteral("yt-dlp")});
+                           {QStringLiteral("yt-dlp_linux"), QStringLiteral("yt-dlp"),QStringLiteral("yt-dlp_macos")});
     m_ffmpegPath = findTool(QStringLiteral("ffmpeg"), {QStringLiteral("ffmpeg")});
     m_ffmpegDir = m_ffmpegPath.isEmpty()
                       ? QString()
@@ -192,4 +192,29 @@ QStringList Toolchain::ffmpegLocationArgs() const
     if (m_ffmpegDir.isEmpty())
         return {};
     return {QStringLiteral("--ffmpeg-location"), m_ffmpegDir};
+}
+
+bool Toolchain::isSafeMediaUrl(const QString &url)
+{
+    // 前导空格要去掉再判：argv 里 " -x" 不会被视为选项，但也没必要放过去
+    const QString trimmed = url.trimmed();
+    if (trimmed.isEmpty())
+        return false;
+
+    // 以 '-' 开头的一律拒绝。这是注入的唯一入口，纵使 appendUrlArg 已经插了
+    // `--`，这里再挡一道：报错比让 yt-dlp 去解析一个畸形地址清楚得多
+    if (trimmed.startsWith(QLatin1Char('-')))
+        return false;
+
+    // scheme 白名单。不限定的话，房间成员可以让大家去打开任意本地文件
+    // （file://）或触发其他 scheme 的处理程序。
+    return trimmed.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive)
+        || trimmed.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive);
+}
+
+void Toolchain::appendUrlArg(QStringList &args, const QString &url)
+{
+    // `--` 让 yt-dlp（optparse）停止解析选项，其后的元素一律当位置参数，
+    // 正常 URL 不受影响。**不要**改成 args << url。
+    args << QStringLiteral("--") << url.trimmed();
 }

@@ -2,12 +2,33 @@ cmake_minimum_required(VERSION 3.28)
 
 # ----------------------------------------------------------------------
 # 1. 编译器
+#
+# 必须在 project() 之前设定 —— project() 一旦执行，工具链就锁定了，
+# 之后再改 CMAKE_C_COMPILER 不会生效。
+#
+# 必须 clang：libwebrtc.a 是 Chromium 的 clang 编的，且对象文件使用 CREL
+# 重定位（见 cmake/FindWebRTC.cmake 第 7 节）。传 -DCMAKE_CXX_COMPILER=...
+# 可以覆盖。
 # ----------------------------------------------------------------------
 
-set(CMAKE_C_COMPILER clang)
-set(CMAKE_CXX_COMPILER clang++)
+if(NOT CMAKE_C_COMPILER OR NOT CMAKE_CXX_COMPILER)
+    find_program(SYNCINE_CLANG NAMES clang)
+    find_program(SYNCINE_CLANGXX NAMES clang++)
+    if(NOT SYNCINE_CLANG OR NOT SYNCINE_CLANGXX)
+        message(FATAL_ERROR "未找到 clang/clang++，本项目依赖 clang 工具链（见本文件注释）。")
+    endif()
+    set(CMAKE_C_COMPILER "${SYNCINE_CLANG}")
+    set(CMAKE_CXX_COMPILER "${SYNCINE_CLANGXX}")
+endif()
 
-project(Syncine LANGUAGES CXX)
+# ----------------------------------------------------------------------
+# 2. 版本号
+#
+# 这里是全项目版本号的唯一来源：CPack 的包名、QML 模块版本、version.h 里的
+# SYNCINE_VERSION 都由它派生。改版本只改这一行。
+# ----------------------------------------------------------------------
+
+project(Syncine VERSION 1.0.0 LANGUAGES CXX)
 
 # WebRTC 使用 C++20
 set(CMAKE_CXX_STANDARD 20)
@@ -22,24 +43,24 @@ endif()
 # 使用 lld
 add_link_options(-fuse-ld=lld)
 
-# RTTI 必须关掉,和 libwebrtc.a 保持一致。
+# RTTI 必须关掉，和 libwebrtc.a 保持一致。
 #
-# libwebrtc.a 是 -fno-rtti 编的(Chromium 默认),归档里**没有任何 typeinfo 符号**。
-# 我们这边开着 RTTI 时,派生自 webrtc 接口的类会生成自己的 typeinfo,而它需要
-# 引用基类的 typeinfo —— 于是链接期报:
+# libwebrtc.a 是 -fno-rtti 编的（Chromium 默认），归档里**没有任何 typeinfo 符号**。
+# 我们这边开着 RTTI 时，派生自 webrtc 接口的类会生成自己的 typeinfo，而它需要
+# 引用基类的 typeinfo —— 于是链接期报：
 #     undefined symbol: typeinfo for webrtc::AudioSourceInterface
 #
-# 为什么只有部分接口会炸:Itanium ABI 规定,若一个类有"key function"
-# (第一个非内联的虚函数,定义在 .cc 里),它的 vtable/typeinfo 只在定义该函数的
-# 那个 TU 里生成一次。AudioSourceInterface::options() 正是这种情况,所以它的
+# 为什么只有部分接口会炸：Itanium ABI 规定，若一个类有「key function」
+# （第一个非内联的虚函数，定义在 .cc 里），它的 vtable/typeinfo 只在定义该函数的
+# 那个 TU 里生成一次。AudioSourceInterface::options() 正是这种情况，所以它的
 # typeinfo 只存在于 libwebrtc 的 .o 里 —— 而那里面因为 -fno-rtti 是空的。
-# VideoTrackSourceInterface 没有 key function,每个 TU 各自生成弱符号,所以不炸。
+# VideoTrackSourceInterface 没有 key function，每个 TU 各自生成弱符号，所以不炸。
 #
-# 关掉 RTTI 对本项目无副作用:src/ 下没有任何 dynamic_cast/typeid。
+# 关掉 RTTI 对本项目无副作用：src/ 下没有任何 dynamic_cast/typeid。
 add_compile_options(-fno-rtti)
 
 # ----------------------------------------------------------------------
-# 2. Qt 自动化工具
+# 3. Qt 自动化工具
 # ----------------------------------------------------------------------
 
 set(CMAKE_AUTOMOC ON)
@@ -47,7 +68,7 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
 # ----------------------------------------------------------------------
-# 3. 查找依赖
+# 4. 查找依赖
 # ----------------------------------------------------------------------
 
 find_package(Threads REQUIRED)
@@ -64,189 +85,46 @@ find_package(Qt6 REQUIRED COMPONENTS
 )
 
 # ----------------------------------------------------------------------
-# 4. WebRTC 路径
+# 5. WebRTC
 #
-# WebRTC 源码：
-# /home/donggu/webrtc-checkout/src/
+# 路径解析、宏对齐、系统库、CREL 链接器都在 cmake/FindWebRTC.cmake 里，
+# 那份注释同样重要，改动前先读它。
 #
-# WebRTC 构建目录：
-# /home/donggu/webrtc-checkout/src/out/Default/
-#
-# WebRTC 静态库：
-# /home/donggu/webrtc-checkout/src/out/Default/obj/libwebrtc.a
+# 指定目录的方式（按优先级）：
+#   -DWEBRTC_ROOT=/path/to/webrtc-checkout/src
+#   $ENV{WEBRTC_ROOT}
 # ----------------------------------------------------------------------
 
-set(WEBRTC_ROOT
-        "/home/donggu/webrtc-checkout/src"
-)
-
-set(WEBRTC_OUT
-        "${WEBRTC_ROOT}/out/Default"
-)
-
-set(WEBRTC_LIBRARY
-        "${WEBRTC_OUT}/obj/libwebrtc.a"
-)
-
-message(STATUS "WebRTC source : ${WEBRTC_ROOT}")
-message(STATUS "WebRTC output : ${WEBRTC_OUT}")
-message(STATUS "WebRTC library: ${WEBRTC_LIBRARY}")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../cmake")
+find_package(WebRTC REQUIRED)
 
 # ----------------------------------------------------------------------
-# 5. 检查 WebRTC 静态库是否存在
-# ----------------------------------------------------------------------
-
-if(NOT EXISTS "${WEBRTC_LIBRARY}")
-    message(FATAL_ERROR
-            "WebRTC library not found:\n"
-            "  ${WEBRTC_LIBRARY}\n"
-    )
-endif()
-
-# ----------------------------------------------------------------------
-# 6. 创建 WebRTC IMPORTED Target
+# 6. 版本头文件
 #
-# 这里不是重新编译 WebRTC。
-# CMake 只是告诉它：
-#
-#   头文件在哪里
-#   已经编译好的 libwebrtc.a 在哪里
+# 把 CMake 里的版本号导出给 C++ 代码（「关于」对话框等）。
 # ----------------------------------------------------------------------
 
-add_library(WebRTC::WebRTC STATIC IMPORTED GLOBAL)
-
-set_target_properties(WebRTC::WebRTC PROPERTIES
-
-        # WebRTC 静态库
-        IMPORTED_LOCATION
-        "${WEBRTC_LIBRARY}"
-
-        # WebRTC 头文件根目录
-        #
-        # 这样：
-        #
-        # #include "api/peer_connection_interface.h"
-        #
-        # 就会从：
-        #
-        # /home/donggu/webrtc-checkout/src/api/...
-        #
-        # 查找
-        INTERFACE_INCLUDE_DIRECTORIES
-        "${WEBRTC_ROOT};${WEBRTC_OUT}/gen;${WEBRTC_ROOT}/third_party/abseil-cpp;${WEBRTC_ROOT}/third_party/perfetto/include;${WEBRTC_OUT}/gen/third_party/perfetto;${WEBRTC_OUT}/gen/third_party/perfetto/build_config;${WEBRTC_ROOT}/third_party/libyuv/include"
+configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/version.h.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/version.h"
+        @ONLY
 )
 
 # ----------------------------------------------------------------------
-# 7. WebRTC 编译宏
-#
-# 这一节不是"随便加的开关"。下面每个宏都必须和编译 libwebrtc.a 时
-# 用的那一套完全一致 —— WebRTC 头文件里有大量 `#if <宏>` 包裹的条件成员,
-# 一旦不一致,同一个类在库里和客户端里 sizeof 就不同,内存布局错位。
-#
-# NDEBUG 就是这么踩出来的(症状:启动即 SIGSEGV):
-#   rtc_base/thread.h 里 webrtc::Thread 有 4 个成员被 `#if RTC_DCHECK_IS_ON`
-#   包着,而 RTC_DCHECK_IS_ON = !defined(NDEBUG) || defined(DCHECK_ALWAYS_ON)。
-#   libwebrtc.a 是 is_debug = false 编的(带 -DNDEBUG,RTC_DCHECK_IS_ON = 0),
-#   客户端不带 NDEBUG 就是 1 —— 实测 sizeof(webrtc::Thread) 256 vs 312,
-#   own_ss_ 偏移差 56 字节。于是 CreateWithSocketServer() 里
-#   `own_ss_ = std::move(ss)` 读到的是垃圾指针,销毁旧值时崩在虚析构调用上。
-#
-# 所以这里 NDEBUG 的含义是"和库的 ABI 对齐",不是"我要出发布版"。
-# 它必须独立于 CMAKE_BUILD_TYPE:客户端哪怕切成 Debug 也照样得定义。
-# ----------------------------------------------------------------------
-
-target_compile_definitions(WebRTC::WebRTC INTERFACE
-        NDEBUG # ABI 对齐用,勿删 —— 理由见上;WebrtcManager.cpp 有编译期护栏
-        WEBRTC_POSIX
-        WEBRTC_LINUX
-        _FILE_OFFSET_BITS=64
-        __STDC_CONSTANT_MACROS
-        __STDC_FORMAT_MACROS
-        ABSL_ALLOCATOR_NOTHROW=1
-        RTC_ENABLE_VP9
-        WEBRTC_HAVE_SCTP
-        WEBRTC_ENABLE_PROTOBUF=1
-        WEBRTC_STRICT_FIELD_TRIALS=0
-        _GLIBCXX_ASSERTIONS=1
-)
-
-# ----------------------------------------------------------------------
-# 8. WebRTC 当前已知的系统依赖
-#
-# 注意：
-# WebRTC 是一个非常大的静态库。
-# 这里先放当前明确需要的系统库。
-#
-# 如果后面链接阶段出现：
-#
-#   undefined reference to ...
-#
-# 再根据具体报错补 WebRTC 的其他依赖。
-# ----------------------------------------------------------------------
-
-target_link_libraries(WebRTC::WebRTC INTERFACE
-        Threads::Threads
-        ${CMAKE_DL_LIBS}
-        atomic
-        X11
-        Xcomposite
-        Xdamage
-        Xext
-        Xfixes
-        Xrandr
-        Xrender
-        Xtst
-)
-
-# ----------------------------------------------------------------------
-# 9. 链接器:必须用认识 CREL 重定位的 lld(>= LLVM 19.1)
-#
-# libwebrtc.a 是用 Chromium 自带的 clang 24 编的,对象文件里用的是实验性的
-# CREL 重定位格式 —— 节名是 `.crel.text` 而不是标准的 `.rela.text`。
-#
-# 系统自带的 lld 18 不认识 CREL —— 它不报错,只是把 `.crel.*` 当未知节静默
-# 忽略。后果是库里所有重定位一个都没被施加:每个 call 的位移都是 0,调用会
-# "穿透"到紧随其后的下一条指令,把未初始化的寄存器当成函数返回值。
-# 症状是程序启动即在 webrtc::Thread::CreateWithSocketServer() 里段错误,
-# 而且 gdb 看到的是"往一个垃圾指针上做虚调用",从代码层面完全看不出问题。
-#
-# 随 WebRTC 一起构建出来的 lld 就认识 CREL,直接指过去即可(它比 -fuse-ld
-# 优先级高,所以系统里原有的 -fuse-ld=lld 会被覆盖)。
-# ----------------------------------------------------------------------
-
-set(WEBRTC_LLD
-        "${WEBRTC_ROOT}/third_party/llvm-build/Release+Asserts/bin/ld.lld"
-)
-
-if(NOT EXISTS "${WEBRTC_LLD}")
-    message(FATAL_ERROR
-            "找不到支持 CREL 重定位的链接器:\n"
-            "  ${WEBRTC_LLD}\n"
-            "libwebrtc.a 的对象文件使用 CREL 重定位,用系统 lld(< 19.1) 链接不会报错,\n"
-            "但会产出一个所有跨函数调用都失效的可执行文件(启动即段错误)。\n"
-    )
-endif()
-
-# 挂在 WebRTC 这个 IMPORTED target 上,链接它的目标自动继承
-set_target_properties(WebRTC::WebRTC PROPERTIES
-        INTERFACE_LINK_OPTIONS "--ld-path=${WEBRTC_LLD}"
-)
-
-# ----------------------------------------------------------------------
-# 10. Qt 项目初始化
+# 7. Qt 项目初始化
 # ----------------------------------------------------------------------
 
 qt_standard_project_setup()
 
 # ----------------------------------------------------------------------
-# 11. Syncine 可执行文件
+# 8. Syncine 可执行文件
 # ----------------------------------------------------------------------
 
 qt_add_executable(Syncine
 
         src/main.cpp
 
-        # core:传输 + 协议(不认识房间,也不认识播放器)
+        # core：传输 + 协议（不认识房间，也不认识播放器）
         src/core/AppSettings.cpp
         src/core/AppSettings.h
         src/core/AudioDevices.h
@@ -268,19 +146,19 @@ qt_add_executable(Syncine
         src/core/Protocol.h
         src/core/RoomTypes.h
 
-        # media:格式模型与探测(不认识房间,也不认识播放器)
+        # media：格式模型与探测（不认识房间，也不认识播放器）
         src/media/FormatModel.cpp
         src/media/FormatModel.h
         src/media/UrlInspector.cpp
         src/media/UrlInspector.h
 
-        # playback:本地播放器 + 播放同步策略
+        # playback：本地播放器 + 播放同步策略
         src/playback/PlaybackController.cpp
         src/playback/PlaybackController.h
         src/playback/PlaybackSync.cpp
         src/playback/PlaybackSync.h
 
-        # session:房间与会话
+        # session：房间与会话
         src/session/MemberModel.cpp
         src/session/MemberModel.h
         src/session/PlaylistModel.cpp
@@ -308,10 +186,10 @@ qt_add_executable(Syncine
 )
 
 # ----------------------------------------------------------------------
-# 12. Syncine 自己的头文件目录
+# 9. Syncine 自己的头文件目录
 #
-# src/ 是为了让源码里能写 "session/RoomSession.h" 这种带分层的路径;
-# 各子目录本身也要加进来,是因为 qmltyperegistrar 生成的
+# src/ 是为了让源码里能写 "session/RoomSession.h" 这种带分层的路径；
+# 各子目录本身也要加进来，是因为 qmltyperegistrar 生成的
 # syncine_qmltyperegistrations.cpp 只会用基名 include(<RoomSession.h>)。
 # ----------------------------------------------------------------------
 
@@ -323,10 +201,11 @@ target_include_directories(Syncine
         "${CMAKE_CURRENT_SOURCE_DIR}/src/playback"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/session"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/webrtc"
+        "${CMAKE_CURRENT_BINARY_DIR}" # version.h
 )
 
 # ----------------------------------------------------------------------
-# 13. QML 单例
+# 10. QML 单例
 # ----------------------------------------------------------------------
 
 set_source_files_properties(
@@ -336,12 +215,12 @@ set_source_files_properties(
 )
 
 # ----------------------------------------------------------------------
-# 14. QML 模块
+# 11. QML 模块
 # ----------------------------------------------------------------------
 
 qt_add_qml_module(Syncine
         URI SyncineApp
-        VERSION 1.0
+        VERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
         RESOURCE_PREFIX /qt/qml
 
         QML_FILES
@@ -381,7 +260,7 @@ qt_add_qml_module(Syncine
 )
 
 # ----------------------------------------------------------------------
-# 15. 链接所有依赖
+# 12. 链接所有依赖
 # ----------------------------------------------------------------------
 
 target_link_libraries(Syncine
@@ -400,3 +279,82 @@ target_link_libraries(Syncine
         # WebRTC
         WebRTC::WebRTC
 )
+
+# ======================================================================
+# 13. 安装规则 —— 打包的基石
+#
+# CPack 只会打包 install() 出去的东西。这里的布局必须和运行时的查找路径
+# 对齐：装成 <prefix>/bin/Syncine + <prefix>/tools/<工具>/<可执行文件> 后，
+# Toolchain::candidateRoots() 里的 appDir/../tools 正好命中（appDir 是 bin/）。
+# 改这里的 DESTINATION，就要同步改 Toolchain.cpp。
+# ======================================================================
+
+include(GNUInstallDirs)
+
+install(TARGETS Syncine
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}   # Linux/Windows：<prefix>/bin/Syncine
+        BUNDLE DESTINATION .                          # macOS：Syncine.app
+)
+
+# 随包分发的命令行工具（ffmpeg/ffprobe、yt-dlp）。
+# 用 EXISTS 包住：开发机没跑过 scripts/fetch-tools.sh 时也要能配置成功。
+foreach(tool_dir ffmpeg yt-dlp)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/${tool_dir}")
+        install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tools/${tool_dir}"
+                DESTINATION tools
+                USE_SOURCE_PERMISSIONS   # 保住可执行位，否则解包后无法运行
+                PATTERN "cookies.txt" EXCLUDE)   # 用户登录态，绝不进包
+    endif()
+endforeach()
+
+# 工具目录的说明文档（讲清来源、版本与许可）
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/README.md")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/tools/README.md" DESTINATION tools)
+endif()
+
+# ----------------------------------------------------------------------
+# 14. Qt 运行库部署
+#
+# 用户机器上没装 Qt，必须把 Qt 动态库、平台插件、QML 运行时模块一起带走，
+# 否则一启动就白屏。这个脚本在 Linux 上拷 Qt 库，Windows 上调 windeployqt，
+# macOS 上调 macdeployqt —— 一份配置三平台生效。
+#
+# 拷贝的是动态库，正好满足 Qt LGPLv3「允许用户替换 Qt」的要求。
+# ----------------------------------------------------------------------
+
+qt_generate_deploy_qml_app_script(
+        TARGET Syncine
+        OUTPUT_SCRIPT deploy_script
+        NO_UNSUPPORTED_PLATFORM_ERROR
+)
+install(SCRIPT ${deploy_script})
+
+# ======================================================================
+# 15. CPack —— 生成可分发的压缩包
+#
+# include(CPack) 必须放在所有 install() 之后：它在被 include 的那一刻
+# 对当前已有的安装规则拍快照，放前面会漏装东西。
+# ======================================================================
+
+set(CPACK_PACKAGE_NAME "Syncine")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_VENDOR "DongGu")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "基于 WebRTC 的同步观影软件")
+set(CPACK_PACKAGE_CONTACT "DongGuZhengHuaJi")
+set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/DongGuZhengHuaJi/Syncine")
+
+# 解包后就是一棵可以直接运行的目录树，不需要装到系统里
+set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
+set(CPACK_PACKAGE_FILE_NAME
+        "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${CMAKE_SYSTEM_NAME}")
+
+if(WIN32)
+    set(CPACK_GENERATOR "ZIP")
+elseif(APPLE)
+    set(CPACK_GENERATOR "DragNDrop")
+else()
+    # TGZ 是 Linux 的惯例（保留权限与符号链接）；ZIP 是给 Windows 用户顺手解压用的
+    set(CPACK_GENERATOR "TGZ;ZIP")
+endif()
+
+include(CPack)

@@ -158,7 +158,7 @@ private:
     // 网链模式：准备某一条（解析 → 直链播放 或 下载合并）
     void prepareUrlItem(const QString &itemId);
     // 停掉可能在跑的下载。**不删文件** —— 下载好的那份留着，切回这一条直接复用
-    // (缓存只在退出软件时清，见 removeRoomTempDir 的说明)
+    // (缓存只在退出软件时清，见 removeClientTempDir 的说明)
     void cancelOngoingDownload();
     void updateSyncedState(qint64 position, bool playing);
     // 从成员表里取房主的视频时长（观众端的 duration 来源）

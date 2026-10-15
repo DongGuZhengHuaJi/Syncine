@@ -69,6 +69,10 @@ void UrlInspector::inspect(const QString &url)
         fail(QStringLiteral("找不到 yt-dlp,无法解析链接"));
         return;
     }
+    if (!Toolchain::isSafeMediaUrl(url)) {
+        fail(QStringLiteral("请填写以 http:// 或 https:// 开头的链接"));
+        return;
+    }
 
     if (m_process != nullptr) {
         disconnect(m_process, nullptr, this, nullptr);
@@ -92,7 +96,7 @@ void UrlInspector::inspect(const QString &url)
     args << m_toolchain->ffmpegLocationArgs();
     if (m_cookies != nullptr)
         args << m_cookies->cookieArgs();
-    args << url;
+    Toolchain::appendUrlArg(args, url); // 必须走它，理由见 Toolchain.h
     m_process->setArguments(args);
     LOG_DEBUG("UrlInspector") << "yt-dlp" << args.join(QLatin1Char(' '));
 

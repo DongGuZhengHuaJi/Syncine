@@ -1,4 +1,6 @@
 
+#include <memory>
+
 #include <QDebug>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
@@ -202,31 +204,37 @@ int main(int argc, char *argv[]) {
                      });
 
 
-    // engine 需先于日志系统析构，避免输出 null 错误日志
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty("appSettings", &appSettings);
-    engine.rootContext()->setContextProperty("networkManager", &networkManager);
-    engine.rootContext()->setContextProperty("playbackController", &playbackController);
-    engine.rootContext()->setContextProperty("roomSession", &roomSession);
-    engine.rootContext()->setContextProperty("sessionController", &sessionController);
-    engine.rootContext()->setContextProperty("playbackSync", &playbackSync);
-    engine.rootContext()->setContextProperty("signalingChannel", &signalingChannel);
+    // engine 必须**先于日志系统**析构：QML 引擎拆除过程中还会产生告警，
+    // 那些行应该还能落进日志文件。
+    //
+    // 用 unique_ptr 而不是栈对象，是为了能在 return 之前显式 reset ——
+    // 写成 `QQmlApplicationEngine engine;` 的话它要等函数返回才析构，
+    // 那时 Log::shutdown() 早就执行过了，退出阶段的告警既进不了文件、
+    // 也看不到（GUI 程序没有可看 stderr 的终端）。
+    auto engine = std::make_unique<QQmlApplicationEngine>();
+    engine->rootContext()->setContextProperty("appSettings", &appSettings);
+    engine->rootContext()->setContextProperty("networkManager", &networkManager);
+    engine->rootContext()->setContextProperty("playbackController", &playbackController);
+    engine->rootContext()->setContextProperty("roomSession", &roomSession);
+    engine->rootContext()->setContextProperty("sessionController", &sessionController);
+    engine->rootContext()->setContextProperty("playbackSync", &playbackSync);
+    engine->rootContext()->setContextProperty("signalingChannel", &signalingChannel);
     // 界面用的探测器：添加条目时解析链接（标题/时长/画质档位/流列表），只解析不下载；
     // 实际下载走 playbackSync 那条线
-    engine.rootContext()->setContextProperty("urlInspector", &urlInspector);
-    engine.rootContext()->setContextProperty("cookieManager", &cookieManager);
-    engine.rootContext()->setContextProperty("hdrConverter", &hdrConverter);
+    engine->rootContext()->setContextProperty("urlInspector", &urlInspector);
+    engine->rootContext()->setContextProperty("cookieManager", &cookieManager);
+    engine->rootContext()->setContextProperty("hdrConverter", &hdrConverter);
 
     // 外部工具链（yt-dlp / ffmpeg）自检。版本探测是异步的（yt-dlp 为 PyInstaller
     // 打包，启动需数百毫秒），不会阻塞界面。
     QTimer::singleShot(1200, &toolchain, &Toolchain::detect);
-    engine.rootContext()->setContextProperty("toolchain", &toolchain);
+    engine->rootContext()->setContextProperty("toolchain", &toolchain);
 
     // 装配完成、设置已读取，此时才发起连接（NetworkManager 不在构造中连接，
     // 否则会早于设置）。连接是异步的，无需等待。
     networkManager.connectToServer();
 
-    engine.load(QUrl(QStringLiteral(
+    engine->load(QUrl(QStringLiteral(
         "qrc:/qt/qml/SyncineApp/ui/Main.qml"
     )));
 
@@ -237,6 +245,9 @@ int main(int argc, char *argv[]) {
     // 关闭窗口时 RoomPage 只是被销毁，不会发出 leave_room，故必须在此显式调用；
     // 同时让服务端立即感知本端离开，无需等待心跳超时。
     sessionController.leaveRoom();
+
+    // 顺序要紧：先拆 QML 引擎（此间的告警仍会进日志），再关日志
+    engine.reset();
 
     Log::shutdown();
     return exitCode;

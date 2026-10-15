@@ -70,6 +70,24 @@ public:
     // 旧版本转封装兼容性较差，且报错信息难以理解。
     QStringList ffmpegLocationArgs() const;
 
+    // ---- 把外部来源的 URL 交给 yt-dlp 时的安全处理 ----
+    //
+    // 网链条目的 URL 来自房间里的**其他成员**（条目随房间下发，各端都会去解析），
+    // 所以它是不可信输入。QProcess 不走 shell，不存在 shell 注入；但 URL 是作为
+    // 一个裸 argv 元素传给 yt-dlp 的，而 yt-dlp 用 optparse 解析参数 ——
+    // 任何以 '-' 开头的元素都会被当成**选项**执行。实测：
+    //     yt-dlp --no-playlist "--version"   →  打印版本号并 exit 0
+    // 即房间成员可以决定本机运行哪一条 yt-dlp 选项。
+    //
+    // 两道防线：
+    //   1. appendUrlArg() 在 URL 前插 `--`，终止 yt-dlp 的选项解析
+    //      （实测 `-- "--version"` 会被判为「not a valid URL」）；
+    //   2. isSafeMediaUrl() 白名单 scheme 并挡掉前导 '-'，给出明确报错。
+    static bool isSafeMediaUrl(const QString &url);
+    // 把 URL 作为位置参数追加到参数表末尾。**所有**调用 yt-dlp 的地方都必须
+    // 用它，不要自己写 args << url
+    static void appendUrlArg(QStringList &args, const QString &url);
+
 signals:
     void statusChanged();
 

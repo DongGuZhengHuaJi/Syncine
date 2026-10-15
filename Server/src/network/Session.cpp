@@ -3,6 +3,7 @@
 //
 
 #include "Session.h"
+#include "Config.h"
 #include "Log.h"
 #include "RandomGen.h"
 #include "LogicSystem.h"
@@ -21,6 +22,11 @@ Session::~Session() {
 void Session::start() {
     // 每条连接都会记录，故用 Debug；房间级进出由 LogicSystem 以 Info 记录
     LOG_DEBUG("Session") << "会话开始: clientId=" << m_id;
+
+    // 限制单条消息大小。Beast 默认 16 MB，而本协议任何合法消息都远小于此
+    // （最大字段是 title / url）；超限的消息会被当成协议错误断连，不必先
+    // 把它整个读进内存再解析。
+    m_ws->read_message_max(Config::MAX_MESSAGE_BYTES);
 
     // 先完成 WebSocket 握手，再发 welcome 并开始收消息
     m_ws->async_accept([this, self = shared_from_this()](beast::error_code ec) {
@@ -77,12 +83,21 @@ void Session::do_next_write() {
         return;
     }
 
-    std::string message = std::move(m_writeQueue.front());
+    // async_write 不拷贝载荷：它把调用方的缓冲区直接交给底层 sendmsg，
+    // 所以缓冲区必须活到完成回调为止。对端读得慢（发送缓冲写满）时写操作会
+    // 挂起、函数早已返回 —— 若缓冲区是这里的局部变量，那一刻它已经析构，
+    // 内核恢复写入时读的就是已释放的堆内存（ASan 实测 heap-use-after-free；
+    // 不开 ASan 则表现为把堆上残留数据写给对端，即内存信息泄漏）。
+    //
+    // 所以先把数据移进 shared_ptr，再由该 shared_ptr 建 buffer、并捕获进
+    // lambda。注意不能写成把 message 移进 lambda 再 asio::buffer(message) ——
+    // 那样 buffer 指向的是已被移空的 string。
+    auto payload = std::make_shared<std::string>(std::move(m_writeQueue.front()));
     m_writeQueue.pop_front();
 
     auto self = shared_from_this();
-    m_ws->async_write(asio::buffer(message),
-                      [this, self](beast::error_code ec, std::size_t) {
+    m_ws->async_write(asio::buffer(*payload),
+                      [this, self, payload](beast::error_code ec, std::size_t) {
         if (ec) {
             LOG_WARN("Session") << "写入失败: clientId=" << m_id << " " << ec.message();
             onDisconnected();

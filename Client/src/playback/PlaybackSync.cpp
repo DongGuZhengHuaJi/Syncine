@@ -380,11 +380,18 @@ void PlaybackSync::onRoomChanged() {
     // 观众端的时长来自房主的 video_status(成员表里就有)
     m_syncedDuration = hostDuration();
 
-    // 离开房间：临时文件不该留下（这里不做持久缓存）
+    // 不在房间里了：把这一轮下载下来的东西清掉。
+    // 会话内是保留的（切条目只停下载、不删文件，切回来直接复用），清理发生
+    // 在「离开房间」——实际唯一会走到的一次是退出软件时 main 显式调
+    // SessionController::leaveRoom()。
+    //
+    // 注意这里拿不到 roomId：RoomSession::leaveRoom() 先 clearRoomState()
+    // 再发 left()，信号到达时房间号已被清空。所以删的是整个 clientId 目录，
+    // 见 UrlDownloader::removeClientTempDir。
     if (!m_session->inRoom()) {
         if (m_urlDownloader != nullptr) {
             m_urlDownloader->cancel();
-            UrlDownloader::removeRoomTempDir(m_session->roomId(), m_session->clientId());
+            UrlDownloader::removeClientTempDir(m_session->clientId());
         }
         m_preparingItemId.clear();
         m_preparedItemId.clear();

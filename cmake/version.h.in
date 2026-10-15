@@ -1,0 +1,8 @@
+// 由 CMake 从 cmake/version.h.in 生成，勿直接编辑。
+// 版本号的唯一来源是 Client/CMakeLists.txt 里的 project(... VERSION x.y.z)。
+#pragma once
+
+#define SYNCINE_VERSION "@PROJECT_VERSION@"
+#define SYNCINE_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define SYNCINE_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define SYNCINE_VERSION_PATCH @PROJECT_VERSION_PATCH@

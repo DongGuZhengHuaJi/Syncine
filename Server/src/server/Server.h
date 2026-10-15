@@ -15,7 +15,8 @@ class Server {
 public:
     Server(asio::io_context& ioContext, const std::string& address, unsigned short port);
     ~Server();
-    void start();
+    // 监听建立失败（端口被占等）时返回 false，调用方必须终止进程
+    bool start();
     void stop();
 
 private:

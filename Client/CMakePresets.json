@@ -7,14 +7,33 @@
   },
   "configurePresets": [
     {
-      "name": "qt-6.10",
-      "displayName": "Qt 6.10.2",
-      "description": "官方安装的 Qt 6.10.2。电影音频功能需要 QAudioBufferOutput,该类 Qt 6.8 才引入,所以只能用这个或更高版本。",
+      "name": "base",
+      "hidden": true,
       "generator": "Ninja",
+      "description": "两个 preset 的共同部分。Qt 与 WebRTC 的位置都从环境读取,因为它们是每台机器各不相同的绝对路径,不该写进仓库。构建前先:export WEBRTC_ROOT=/path/to/webrtc-checkout/src",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "$env{HOME}/Qt/6.10.2/gcc_64",
+        "WEBRTC_ROOT": "$env{WEBRTC_ROOT}"
+      }
+    },
+    {
+      "name": "qt-6.10",
+      "displayName": "Qt 6.10.2 (Debug)",
+      "description": "开发用。电影音频功能需要 QAudioBufferOutput,该类 Qt 6.8 才引入,所以只能用这个或更高版本。",
+      "inherits": "base",
       "binaryDir": "${sourceDir}/cmake-build-qt610",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_PREFIX_PATH": "$env{HOME}/Qt/6.10.2/gcc_64"
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Qt 6.10.2 (Release)",
+      "description": "发版用。产物在 build-release/,跑 cpack 出安装包。",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
       }
     }
   ],
@@ -22,6 +41,10 @@
     {
       "name": "qt-6.10",
       "configurePreset": "qt-6.10"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
     }
   ]
 }

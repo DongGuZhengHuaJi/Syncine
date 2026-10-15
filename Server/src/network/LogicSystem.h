@@ -39,7 +39,9 @@ private:
     LogicSystem();
     ~LogicSystem();
 
+    // 异常兜底包装：见 .cpp 里的说明
     void handleMessage(std::shared_ptr<Session> session, const std::string &message);
+    void dispatchMessage(const std::shared_ptr<Session> &session, const std::string &message);
 
     void replyError(const std::shared_ptr<Session> &session,
                     const std::string &code, const std::string &message);

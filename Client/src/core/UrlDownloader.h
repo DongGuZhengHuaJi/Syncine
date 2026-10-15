@@ -127,10 +127,15 @@ public:
     // 报出 "Unable to rename file ... ENOENT",还会留下半截的流文件。
     static QString itemTempDir(const QString &roomId, const QString &clientId,
                                const QString &itemId);
-    // 清掉整个房间的临时目录。**只在退出软件时调用**(由主函数在事件循环
-    // 退出后调 SessionController::leaveRoom → PlaybackSync 触发),外加启动时
-    // 的兜底清理（见 UrlInspector/Downloader 的下载目录准备）。
-    static void removeRoomTempDir(const QString &roomId, const QString &clientId);
+    // 清掉本客户端的整个临时目录：<临时目录>/syncine/<clientId>/。
+    // **只在退出软件时调用**（由主函数在事件循环退出后经
+    // SessionController::leaveRoom → PlaybackSync 触发）。
+    //
+    // 为什么不按房间删：走到这里时房间号已经拿不到了 ——
+    // RoomSession::leaveRoom() 是先 clearRoomState()（里面 m_roomId.clear()）
+    // 再 emit left()，所以信号到达时 roomId 是空串。删整个 clientId 目录
+    // 既覆盖当前房间，也顺手清掉上一次运行残留的目录。
+    static void removeClientTempDir(const QString &clientId);
 
 signals:
     void stateChanged();

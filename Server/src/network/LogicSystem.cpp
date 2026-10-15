@@ -3,6 +3,7 @@
 //
 
 #include "LogicSystem.h"
+#include "Config.h"
 #include "Log.h"
 #include "Room.h"
 #include "Session.h"
@@ -64,6 +65,16 @@ void LogicSystem::stop() {
     m_cv.notify_all();
     for (std::thread &thread : m_workerThreads)
         thread.join();
+
+    // 线程已 join，此时清空房间表是安全的。这一步必须在 io_context 还活着
+    // 的时候做：Session 的析构会去碰 socket/executor，而 LogicSystem 是
+    // 函数内静态对象，它的析构发生在 main 返回之后 —— 那时 io_context 早已
+    // 销毁了。stop() 由 WebSocketServer::stop() 调用，时机正好。
+    {
+        std::lock_guard<std::mutex> lock(m_roomsMutex);
+        m_sessionRooms.clear();
+        m_rooms.clear();
+    }
 }
 
 
@@ -71,8 +82,31 @@ void LogicSystem::stop() {
 // 消息处理（协议见 docs/protocol.md）
 // ============================
 
+// 异常兜底。
+//
+// 这个 try 不是可有可无的防御性代码：工作线程的入口是 std::thread 的
+// lambda，异常一旦穿透出去就是 std::terminate —— 整个服务端进程直接消失。
+// nlohmann 的 value() 在**类型不符**时抛 type_error（键存在但不是要的类型），
+// 而不只是 JSON 语法错误时抛。实测两条消息即可打死服务端：
+//     [1,2,3]                          根不是 object      → type_error.306
+//     {"type":"chat","text":42}        text 不是 string   → type_error.302
+// 后者连房间都不用进。协议里每个字段都取自外部输入，所以这里必须兜住。
 void LogicSystem::handleMessage(std::shared_ptr<Session> session,
                                 const std::string &text) {
+    try {
+        dispatchMessage(session, text);
+    } catch (const std::exception &error) {
+        LOG_WARN("Logic") << "处理消息时抛出异常 clientId=" << session->id()
+                          << ": " << error.what();
+        replyError(session, "bad_message", "消息格式错误");
+    } catch (...) {
+        LOG_WARN("Logic") << "处理消息时抛出未知异常 clientId=" << session->id();
+        replyError(session, "bad_message", "消息格式错误");
+    }
+}
+
+void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
+                                  const std::string &text) {
     json message;
     try {
         message = json::parse(text);
@@ -96,6 +130,11 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
         }
         if (m_rooms.count(newRoomId)) {
             replyError(session, "room_exists", "房间号冲突，请重试");
+            return;
+        }
+        // 房间表无上限时，一个客户端循环建房即可吃光内存
+        if (m_rooms.size() >= Config::MAX_ROOMS) {
+            replyError(session, "server_full", "服务器房间数已达上限，请稍后再试");
             return;
         }
 
@@ -167,6 +206,11 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
             return;
         }
         const auto targetRoom = it->second;
+        // 先判人数再入房：addMember 无上限时，一个客户端循环 join 即可塞满
+        if (targetRoom->sessions().size() >= Config::MAX_MEMBERS_PER_ROOM) {
+            replyError(session, "room_full", "房间已满");
+            return;
+        }
         targetRoom->addMember(session, nickname, false);
         m_sessionRooms[session] = targetRoomId;
 
@@ -296,8 +340,23 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
         // 匹配仅同步模式有意义。其他模式收到即忽略：可能是刚切完模式、
         // 客户端尚未停发，不值得报错打扰用户
         if (room->mode() == "local") {
-            room->setMemberFile(session->id(),
-                                message.value("itemId", ""),
+            const std::string itemId = message.value("itemId", "");
+
+            // itemId 必须命中列表里真实存在的条目。Room::files 的键完全来自
+            // 客户端，且没有任何清理路径（dropMemberFiles 只删内层 clientId，
+            // 外层空 map 留着），不校验就等于让对端随意往服务端内存里塞键：
+            // 实测 3000 条带 4KB 伪造 itemId 的消息可让常驻内存 +13 MB，
+            // 且永不释放。条目可能刚被删掉，所以静默忽略而不报错。
+            const auto &entries = room->playlist();
+            if (itemId.empty()
+                || std::none_of(entries.begin(), entries.end(),
+                                [&itemId](const PlaylistEntry &e) {
+                                    return e.itemId == itemId;
+                                })) {
+                return;
+            }
+
+            room->setMemberFile(session->id(), itemId,
                                 message.value("hasFile", false),
                                 message.value("hash", ""));
             broadcastPlaylistStatus(room);
@@ -417,6 +476,13 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
                 }
             }
 
+            // 列表长度必须有上限：每次添加都会全量序列化整个列表并群发，
+            // 成本随条目数平方增长，而整个过程持有全局房间锁
+            if (room->playlist().size() >= Config::MAX_PLAYLIST_ENTRIES) {
+                replyError(session, "playlist_full", "播放列表条目已达上限");
+                return;
+            }
+
             const bool becameCurrent = room->addEntry(entry);
 
             // 广播给所有人（含添加者）：各端以服务端的权威列表为准，不做本地乐观插入
@@ -430,7 +496,13 @@ void LogicSystem::handleMessage(std::shared_ptr<Session> session,
             if (becameCurrent)
                 broadcastPlaylistSwitched(room, room->currentItemId());
 
-            LOG_INFO("Logic") << "播放列表添加: " << roomIt->second << " ← " << entry.title;
+            // title 来自客户端，原样写日志会让对端能用换行符伪造日志行、
+            // 或用超长标题把 8 MB 的日志文件冲得轮转。截断并剥掉控制字符。
+            std::string logTitle = entry.title.substr(0, 120);
+            std::replace_if(logTitle.begin(), logTitle.end(),
+                            [](unsigned char c) { return c < 0x20 || c == 0x7F; },
+                            ' ');
+            LOG_INFO("Logic") << "播放列表添加: " << roomIt->second << " ← " << logTitle;
             return;
         }
 
