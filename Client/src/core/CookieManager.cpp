@@ -34,41 +34,172 @@ struct BrowserEntry {
     QStringList dirs;   // profile 目录候选(存在任意一个就算"装了")
 };
 
-// 浏览器探测表。
-//
-// ⚠️ 目录只是**启发式** —— 检测不到不等于不能用(用户可能装在别处),
-// 所以界面文案要说"没检测到"而不是"不支持"。
-// 路径按平台分组:现在只做 Linux(客户端目前只在 Linux 构建),
-// 以后加 macOS/Windows 就是往这里加几行(QDir::homePath() 已经能跨平台)。
+// 启发式搜索本地浏览器目录
 QList<BrowserEntry> browserTable()
 {
     const QString home = QDir::homePath();
+
+#if defined(Q_OS_LINUX)
+
+    // Linux：普通安装、Snap、Flatpak
     return {
-        { "firefox", "Firefox",
-          { home + QStringLiteral("/.mozilla/firefox"),
-            home + QStringLiteral("/snap/firefox/common/.mozilla/firefox"),
-            home + QStringLiteral("/.var/app/org.mozilla.firefox/.mozilla/firefox") } },
-
-        { "chrome", "Chrome",
-          { home + QStringLiteral("/.config/google-chrome") } },
-
-        { "chromium", "Chromium",
-          { home + QStringLiteral("/.config/chromium"),
-            home + QStringLiteral("/snap/chromium/common/chromium"),
-            home + QStringLiteral("/.var/app/org.chromium.Chromium/config/chromium") } },
-
-        { "edge", "Edge",
-          { home + QStringLiteral("/.config/microsoft-edge") } },
-
-        { "brave", "Brave",
-          { home + QStringLiteral("/.config/BraveSoftware/Brave-Browser") } },
-
-        { "vivaldi", "Vivaldi",
-          { home + QStringLiteral("/.config/vivaldi") } },
-
-        { "opera", "Opera",
-          { home + QStringLiteral("/.config/opera") } },
+        {
+            "firefox", "Firefox",
+            {
+                home + QStringLiteral("/.mozilla/firefox"),
+                home + QStringLiteral("/snap/firefox/common/.mozilla/firefox"),
+                home + QStringLiteral("/.var/app/org.mozilla.firefox/.mozilla/firefox")
+            }
+        },
+        {
+            "chrome", "Chrome",
+            {
+                home + QStringLiteral("/.config/google-chrome")
+            }
+        },
+        {
+            "chromium", "Chromium",
+            {
+                home + QStringLiteral("/.config/chromium"),
+                home + QStringLiteral("/snap/chromium/common/chromium"),
+                home + QStringLiteral("/.var/app/org.chromium.Chromium/config/chromium")
+            }
+        },
+        {
+            "edge", "Edge",
+            {
+                home + QStringLiteral("/.config/microsoft-edge")
+            }
+        },
+        {
+            "brave", "Brave",
+            {
+                home + QStringLiteral("/.config/BraveSoftware/Brave-Browser")
+            }
+        },
+        {
+            "vivaldi", "Vivaldi",
+            {
+                home + QStringLiteral("/.config/vivaldi")
+            }
+        },
+        {
+            "opera", "Opera",
+            {
+                home + QStringLiteral("/.config/opera")
+            }
+        }
     };
+
+#elif defined(Q_OS_WIN)
+
+    // Windows：浏览器通常将用户数据保存在 AppData/Local 下。
+    const QString localAppData =
+        qEnvironmentVariable("LOCALAPPDATA");
+
+    return {
+        {
+            "firefox", "Firefox",
+            {
+                home + QStringLiteral("/AppData/Roaming/Mozilla/Firefox")
+            }
+        },
+        {
+            "chrome", "Chrome",
+            {
+                localAppData + QStringLiteral("/Google/Chrome/User Data")
+            }
+        },
+        {
+            "chromium", "Chromium",
+            {
+                localAppData + QStringLiteral("/Chromium/User Data")
+            }
+        },
+        {
+            "edge", "Edge",
+            {
+                localAppData + QStringLiteral("/Microsoft/Edge/User Data")
+            }
+        },
+        {
+            "brave", "Brave",
+            {
+                localAppData + QStringLiteral("/BraveSoftware/Brave-Browser/User Data")
+            }
+        },
+        {
+            "vivaldi", "Vivaldi",
+            {
+                localAppData + QStringLiteral("/Vivaldi/User Data")
+            }
+        },
+        {
+            "opera", "Opera",
+            {
+                qEnvironmentVariable("APPDATA")
+                    + QStringLiteral("/Opera Software/Opera Stable")
+            }
+        }
+    };
+
+#elif defined(Q_OS_MACOS)
+
+    // macOS：浏览器通常将用户数据保存在 ~/Library/Application Support 下。
+    const QString appSupport =
+        home + QStringLiteral("/Library/Application Support");
+
+    return {
+        {
+            "firefox", "Firefox",
+            {
+                home + QStringLiteral("/Library/Application Support/Firefox")
+            }
+        },
+        {
+            "chrome", "Chrome",
+            {
+                appSupport + QStringLiteral("/Google/Chrome")
+            }
+        },
+        {
+            "chromium", "Chromium",
+            {
+                appSupport + QStringLiteral("/Chromium")
+            }
+        },
+        {
+            "edge", "Edge",
+            {
+                appSupport + QStringLiteral("/Microsoft Edge")
+            }
+        },
+        {
+            "brave", "Brave",
+            {
+                appSupport + QStringLiteral("/BraveSoftware/Brave-Browser")
+            }
+        },
+        {
+            "vivaldi", "Vivaldi",
+            {
+                appSupport + QStringLiteral("/Vivaldi")
+            }
+        },
+        {
+            "opera", "Opera",
+            {
+                appSupport + QStringLiteral("/com.operasoftware.Opera")
+            }
+        }
+    };
+
+#else
+
+    // 未支持的平台
+    return {};
+
+#endif
 }
 
 QString labelForKey(const QString &key)
