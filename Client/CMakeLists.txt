@@ -11,7 +11,13 @@ cmake_minimum_required(VERSION 3.28)
 # 可以覆盖。
 # ----------------------------------------------------------------------
 
-if(NOT CMAKE_C_COMPILER OR NOT CMAKE_CXX_COMPILER)
+if(WIN32)
+    # Windows 上不在这里挑编译器：能链 webrtc.lib 的只有 MSVC ABI 那一套
+    # （Qt 的 win64_msvc2022_64 与 Chromium 出的静态库都是 MSVC ABI）。
+    # 而且用 VS 生成器时 CMAKE_CXX_COMPILER 要到 project() 之后才有值，在这里
+    # 判断会把「还没确定」误当成「没装 clang」直接 FATAL_ERROR。
+    # 想用 clang-cl 就显式传 -DCMAKE_CXX_COMPILER=clang-cl（它同样认下面的 /GR-）。
+elseif(NOT CMAKE_C_COMPILER OR NOT CMAKE_CXX_COMPILER)
     find_program(SYNCINE_CLANG NAMES clang)
     find_program(SYNCINE_CLANGXX NAMES clang++)
     if(NOT SYNCINE_CLANG OR NOT SYNCINE_CLANGXX)
@@ -40,8 +46,10 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_options(-Wno-changes-meaning)
 endif()
 
-# 使用 lld
-add_link_options(-fuse-ld=lld)
+# 使用 lld（MSVC 的 link.exe 不认 -fuse-ld；clang-cl 走 lld-link，不需要这个选项）
+if(NOT MSVC)
+    add_link_options(-fuse-ld=lld)
+endif()
 
 # RTTI 必须关掉，和 libwebrtc.a 保持一致。
 #
@@ -57,7 +65,12 @@ add_link_options(-fuse-ld=lld)
 # VideoTrackSourceInterface 没有 key function，每个 TU 各自生成弱符号，所以不炸。
 #
 # 关掉 RTTI 对本项目无副作用：src/ 下没有任何 dynamic_cast/typeid。
-add_compile_options(-fno-rtti)
+# MSVC（含 clang-cl 的 MSVC 驱动模式）要写 /GR-，否则它会按默认 /GR 开 RTTI。
+if(MSVC)
+    add_compile_options(/GR-)
+else()
+    add_compile_options(-fno-rtti)
+endif()
 
 # ----------------------------------------------------------------------
 # 3. Qt 自动化工具
@@ -310,6 +323,50 @@ endforeach()
 # 工具目录的说明文档（讲清来源、版本与许可）
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/README.md")
     install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/tools/README.md" DESTINATION tools)
+endif()
+
+# ----------------------------------------------------------------------
+# Windows：固定 Qt Quick Controls 2 样式
+#
+# Windows 上 QQC2 的默认样式是原生 "Windows" 样式，它不支持覆盖
+# background / contentItem —— 而 ui/ 下大量控件依赖这些覆盖来画自定义皮肤
+# （运行时会打印 "The current style does not support customization..."，
+# 控件退化成原生外观）。Linux 上默认就是非原生样式，所以这个问题只在
+# Windows 上暴露。把 qtquickcontrols2.conf 放到可执行文件旁，Qt 启动时读取。
+# ----------------------------------------------------------------------
+if(WIN32)
+    # Qt 6 从资源系统读取 :/qtquickcontrols2.conf，所以必须编译进可执行文件；
+    # 同时也在 bin/ 旁边留一份，便于用户自己改。
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qtquickcontrols2.conf"
+            PROPERTIES QT_RESOURCE_ALIAS "qtquickcontrols2.conf")
+    qt_add_resources(Syncine "qtquickcontrols2_conf"
+            PREFIX "/"
+            FILES "${CMAKE_CURRENT_SOURCE_DIR}/qtquickcontrols2.conf")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/qtquickcontrols2.conf"
+            DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+# ----------------------------------------------------------------------
+# Windows：随包分发 MSVC 运行库（CRT）
+#
+# 目标机器不一定装了 VC++ Redistributable，而本包是 /MD 动态链接 CRT 的。
+# Linux 包把 Qt 之外的东西都带上了，Windows 包同样应当自包含。
+# VCToolsRedistDir 由 vcvars64.bat 设置（形如 ...\VC\Redist\MSVC\<ver>\）。
+# ----------------------------------------------------------------------
+if(WIN32 AND DEFINED ENV{VCToolsRedistDir})
+    # 必须转成正斜杠：路径里的 "\14.51..." 直接写进 cmake_install.cmake 会变成
+    # 非法转义序列，打包时 CPack 报 "Syntax error in cmake code"。
+    # 注意 TO_CMAKE_PATH 会吃掉结尾的反斜杠，所以拼接时必须自己补一个 "/"。
+    file(TO_CMAKE_PATH "$ENV{VCToolsRedistDir}" SYNCINE_REDIST_DIR)
+    file(GLOB SYNCINE_CRT_DLLS
+            "${SYNCINE_REDIST_DIR}/x64/Microsoft.VC*.CRT/*.dll")
+    if(SYNCINE_CRT_DLLS)
+        install(FILES ${SYNCINE_CRT_DLLS} DESTINATION ${CMAKE_INSTALL_BINDIR})
+    else()
+        message(WARNING
+                "未找到 MSVC 运行库（VCToolsRedistDir=$ENV{VCToolsRedistDir}）："
+                "打出的包需要目标机自行安装 VC++ Redistributable。")
+    endif()
 endif()
 
 # ----------------------------------------------------------------------

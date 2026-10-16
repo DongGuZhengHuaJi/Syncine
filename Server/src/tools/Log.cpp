@@ -14,7 +14,25 @@
 #include <ostream>
 #include <sstream>
 #include <thread>
-#include <unistd.h> // isatty
+#ifdef _WIN32
+#  include <io.h> // _isatty / _fileno
+#  define isatty _isatty
+#  define fileno _fileno
+#else
+#  include <unistd.h> // isatty
+#endif
+
+// localtime_r 是 POSIX 的；MSVC 的等价物叫 localtime_s，而且参数顺序相反。
+namespace {
+inline void syncineLocaltime(const std::time_t *seconds, std::tm *out)
+{
+#ifdef _WIN32
+    localtime_s(out, seconds);
+#else
+    localtime_r(seconds, out);
+#endif
+}
+} // namespace
 
 namespace {
 
@@ -122,7 +140,7 @@ std::string timestamp()
                             now.time_since_epoch()).count() % 1000;
 
     std::tm tm{};
-    localtime_r(&seconds, &tm);
+    syncineLocaltime(&seconds, &tm);
 
     char buffer[32];
     std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &tm);
@@ -137,7 +155,7 @@ std::string today()
     const std::time_t seconds = std::chrono::system_clock::to_time_t(
         std::chrono::system_clock::now());
     std::tm tm{};
-    localtime_r(&seconds, &tm);
+    syncineLocaltime(&seconds, &tm);
     char buffer[16];
     std::strftime(buffer, sizeof(buffer), "%Y-%m-%d", &tm);
     return buffer;

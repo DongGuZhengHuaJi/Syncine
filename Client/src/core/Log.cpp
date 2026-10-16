@@ -14,7 +14,13 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
-#include <unistd.h> // isatty
+#ifdef _WIN32
+#  include <io.h> // _isatty / _fileno
+#  define isatty _isatty
+#  define fileno _fileno
+#else
+#  include <unistd.h> // isatty
+#endif
 
 namespace {
 

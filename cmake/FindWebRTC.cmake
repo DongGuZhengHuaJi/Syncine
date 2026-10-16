@@ -32,7 +32,15 @@ if(NOT WEBRTC_ROOT)
 endif()
 
 set(WEBRTC_OUT_DIR "${WEBRTC_ROOT}/out/Default" CACHE PATH "WebRTC 构建输出目录")
-set(WEBRTC_LIBRARY "${WEBRTC_OUT_DIR}/obj/libwebrtc.a")
+
+# 静态库文件名按平台不同：Linux 是 out/Default/obj/libwebrtc.a；
+# Windows 上是 out/Default/obj/webrtc.lib（Chromium 在 Windows 上把整个 :webrtc
+# 目标打成单个归档，不叫 libwebrtc）。
+if(WIN32)
+    set(WEBRTC_LIBRARY "${WEBRTC_OUT_DIR}/obj/webrtc.lib")
+else()
+    set(WEBRTC_LIBRARY "${WEBRTC_OUT_DIR}/obj/libwebrtc.a")
+endif()
 
 message(STATUS "WebRTC source : ${WEBRTC_ROOT}")
 message(STATUS "WebRTC output : ${WEBRTC_OUT_DIR}")
@@ -42,14 +50,14 @@ message(STATUS "WebRTC library: ${WEBRTC_LIBRARY}")
 # 2. 平台约束
 #
 # 下面这套宏、系统库和链接器都是从一份 Linux 构建的 libwebrtc.a 反推出来的。
-# 换成别的平台，这些全都要重新推导，硬跑只会链接失败。
+# Windows 走另一套（见第 5、6、7 节的 WIN32 分支），macOS 还没做。
 # ----------------------------------------------------------------------
 
-if(NOT UNIX OR APPLE)
+if(APPLE OR (NOT UNIX AND NOT WIN32))
     message(FATAL_ERROR
-            "当前只支持 Linux：libwebrtc.a 是按 Linux/x86_64 构建的。\n"
-            "移植到 Windows/macOS 需要在目标平台上重新构建 WebRTC，\n"
-            "并按 README 的「跨平台」一节补齐宏与链接库。")
+            "当前只支持 Linux 与 Windows：libwebrtc 必须在目标平台上构建"
+            "（Windows 上 Chromium 的构建系统要求 MSVC）。\n"
+            "移植到 macOS 需要按 README 的「跨平台」一节重出静态库并补齐宏与链接库。")
 endif()
 
 # ----------------------------------------------------------------------
@@ -107,9 +115,6 @@ set_target_properties(WebRTC::WebRTC PROPERTIES
 
 target_compile_definitions(WebRTC::WebRTC INTERFACE
         NDEBUG # ABI 对齐用，勿删 —— 理由见上；WebrtcManager.cpp 有编译期护栏
-        WEBRTC_POSIX
-        WEBRTC_LINUX
-        _FILE_OFFSET_BITS=64
         __STDC_CONSTANT_MACROS
         __STDC_FORMAT_MACROS
         ABSL_ALLOCATOR_NOTHROW=1
@@ -117,8 +122,31 @@ target_compile_definitions(WebRTC::WebRTC INTERFACE
         WEBRTC_HAVE_SCTP
         WEBRTC_ENABLE_PROTOBUF=1
         WEBRTC_STRICT_FIELD_TRIALS=0
-        _GLIBCXX_ASSERTIONS=1
 )
+
+if(WIN32)
+    # Windows 版 webrtc.lib 是 Chromium 的 MSVC 工具链编的（is_debug=false，
+    # 即 /MD + _ITERATOR_DEBUG_LEVEL=0）。这几个宏必须和它一致：
+    #   WEBRTC_WIN            —— 选另一套条件编译分支（对应 Linux 的 WEBRTC_POSIX）
+    #   NOMINMAX / WIN32_LEAN_AND_MEAN —— WebRTC 头文件期望的 Windows 头文件姿态
+    #   _CRT_SECURE_NO_WARNINGS        —— 上游到处用 strncpy 之类
+    #   _ITERATOR_DEBUG_LEVEL=0        —— 与 Release CRT 对齐；用 Debug（=2）链接会
+    #                                     直接 LNK2038 mismatch（Qt 官方 debug 包是 /MDd）
+    target_compile_definitions(WebRTC::WebRTC INTERFACE
+            WEBRTC_WIN
+            NOMINMAX
+            WIN32_LEAN_AND_MEAN
+            _CRT_SECURE_NO_WARNINGS
+            _ITERATOR_DEBUG_LEVEL=0
+    )
+else()
+    target_compile_definitions(WebRTC::WebRTC INTERFACE
+            WEBRTC_POSIX
+            WEBRTC_LINUX
+            _FILE_OFFSET_BITS=64
+            _GLIBCXX_ASSERTIONS=1
+    )
+endif()
 
 # ----------------------------------------------------------------------
 # 6. WebRTC 的系统依赖
@@ -129,19 +157,46 @@ target_compile_definitions(WebRTC::WebRTC INTERFACE
 # 就按报错往这里补。
 # ----------------------------------------------------------------------
 
-target_link_libraries(WebRTC::WebRTC INTERFACE
-        Threads::Threads
-        ${CMAKE_DL_LIBS}
-        atomic
-        X11
-        Xcomposite
-        Xdamage
-        Xext
-        Xfixes
-        Xrandr
-        Xrender
-        Xtst
-)
+if(WIN32)
+    # Windows 的清单**不要手抄**：libwebrtc 依赖哪些系统库由 GN 决定，跟
+    # revision 和 GN 参数（比如有没有 rtc_include_tests）一起变。正确做法是
+    # 在编 webrtc.lib 的那台机器/CI 上跑：
+    #     gn desc out/Default //:webrtc libs
+    # 把输出（每行一个 xxx.lib）用分号连起来传给：
+    #     -DWEBRTC_WIN_SYSTEM_LIBS="winmm.lib;ws2_32.lib;..."
+    # 下面是没传时的兜底清单，够常见配置用；链接报 undefined 时优先用 gn desc 的结果。
+    set(WEBRTC_WIN_SYSTEM_LIBS "" CACHE STRING
+            "Windows 下 libwebrtc 需要的系统链接库（gn desc out/Default //:webrtc libs）")
+
+    if(NOT WEBRTC_WIN_SYSTEM_LIBS)
+        message(STATUS "WebRTC: 未指定 WEBRTC_WIN_SYSTEM_LIBS，使用兜底系统库清单")
+        set(WEBRTC_WIN_SYSTEM_LIBS
+                winmm.lib ws2_32.lib secur32.lib crypt32.lib iphlpapi.lib
+                ole32.lib oleaut32.lib advapi32.lib shlwapi.lib user32.lib gdi32.lib
+                msdmo.lib dmoguids.lib wmcodecdspuuid.lib strmiids.lib
+                mfuuid.lib mfplat.lib mfreadwrite.lib d3d11.lib dxgi.lib
+                shcore.lib dwmapi.lib authz.lib mscms.lib ksuser.lib bcrypt.lib)
+    endif()
+
+    target_link_libraries(WebRTC::WebRTC INTERFACE
+            Threads::Threads
+            ${WEBRTC_WIN_SYSTEM_LIBS}
+    )
+else()
+    target_link_libraries(WebRTC::WebRTC INTERFACE
+            Threads::Threads
+            ${CMAKE_DL_LIBS}
+            atomic
+            X11
+            Xcomposite
+            Xdamage
+            Xext
+            Xfixes
+            Xrandr
+            Xrender
+            Xtst
+    )
+endif()
 
 # ----------------------------------------------------------------------
 # 7. 链接器：必须用认识 CREL 重定位的 lld（>= LLVM 19.1）
@@ -160,22 +215,29 @@ target_link_libraries(WebRTC::WebRTC INTERFACE
 #
 # 预编译产物若不附带 third_party/llvm-build，可用系统 lld ≥ 19.1 顶替：
 # 通过 -DWEBRTC_LLD=/usr/bin/ld.lld 指定。
+#
+# Windows 上整节跳过：CREL 是 ELF 的格式，PE/COFF 没有这回事，用 MSVC 的
+# link.exe（或 clang-cl 默认的 lld-link）即可。
 # ----------------------------------------------------------------------
 
-set(WEBRTC_LLD
-        "${WEBRTC_ROOT}/third_party/llvm-build/Release+Asserts/bin/ld.lld"
-        CACHE FILEPATH "认识 CREL 重定位的 lld")
+if(WIN32)
+    message(STATUS "WebRTC: Windows/PE 无 CREL 重定位，不需要指定 lld")
+else()
+    set(WEBRTC_LLD
+            "${WEBRTC_ROOT}/third_party/llvm-build/Release+Asserts/bin/ld.lld"
+            CACHE FILEPATH "认识 CREL 重定位的 lld")
 
-if(NOT EXISTS "${WEBRTC_LLD}")
-    message(FATAL_ERROR
-            "找不到支持 CREL 重定位的链接器：\n"
-            "  ${WEBRTC_LLD}\n"
-            "libwebrtc.a 的对象文件使用 CREL 重定位，用系统 lld（< 19.1）链接不会报错，\n"
-            "但会产出一个所有跨函数调用都失效的可执行文件（启动即段错误）。\n"
-            "请改用 -DWEBRTC_LLD=<lld 路径> 指定一个 LLVM >= 19.1 的 ld.lld。")
+    if(NOT EXISTS "${WEBRTC_LLD}")
+        message(FATAL_ERROR
+                "找不到支持 CREL 重定位的链接器：\n"
+                "  ${WEBRTC_LLD}\n"
+                "libwebrtc.a 的对象文件使用 CREL 重定位，用系统 lld（< 19.1）链接不会报错，\n"
+                "但会产出一个所有跨函数调用都失效的可执行文件（启动即段错误）。\n"
+                "请改用 -DWEBRTC_LLD=<lld 路径> 指定一个 LLVM >= 19.1 的 ld.lld。")
+    endif()
+
+    # 挂在 WebRTC 这个 IMPORTED target 上，链接它的目标自动继承
+    set_target_properties(WebRTC::WebRTC PROPERTIES
+            INTERFACE_LINK_OPTIONS "--ld-path=${WEBRTC_LLD}"
+    )
 endif()
-
-# 挂在 WebRTC 这个 IMPORTED target 上，链接它的目标自动继承
-set_target_properties(WebRTC::WebRTC PROPERTIES
-        INTERFACE_LINK_OPTIONS "--ld-path=${WEBRTC_LLD}"
-)

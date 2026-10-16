@@ -12,7 +12,17 @@
 #include <cstdlib>
 #include <thread>
 
-#include <sys/socket.h> // shutdown()
+// Windows 上没有 <sys/socket.h>：看门狗要把 asio 的 native_handle（Windows 下
+// 是 SOCKET，不是 int）交给 ::shutdown。SD_BOTH 就是 POSIX 的 SHUT_RDWR。
+#ifdef _WIN32
+#  include <winsock2.h> // SOCKET / shutdown / SD_BOTH
+using SyncineNativeSocket = SOCKET;
+#  define SYNCINE_SHUT_RDWR SD_BOTH
+#else
+#  include <sys/socket.h> // shutdown()
+using SyncineNativeSocket = int;
+#  define SYNCINE_SHUT_RDWR SHUT_RDWR
+#endif
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -71,7 +81,7 @@ constexpr const char *kApiPort = "443";
 // 其它连接的风险。
 class SocketWatchdog {
 public:
-    SocketWatchdog(int fd, int seconds)
+    SocketWatchdog(SyncineNativeSocket fd, int seconds)
         : m_thread([this, fd, seconds] {
               for (int i = 0; i < seconds * 10; ++i) {
                   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -79,7 +89,7 @@ public:
                       return;
               }
               m_fired.store(true, std::memory_order_relaxed);
-              ::shutdown(fd, SHUT_RDWR);
+              ::shutdown(fd, SYNCINE_SHUT_RDWR);
           }) {
     }
 

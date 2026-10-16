@@ -12,6 +12,10 @@ docs
 
 design
 
+# 发布手册（Release Handbook）只作本地备忘，不入仓库。
+# 要恢复跟踪：删掉这条规则，然后 `git add -f RELEASING.md`。
+RELEASING.md
+
 logs
 
 Client/tools/*

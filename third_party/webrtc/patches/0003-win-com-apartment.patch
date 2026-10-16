@@ -1,0 +1,59 @@
+diff --git a/rtc_base/win/scoped_com_initializer.cc b/rtc_base/win/scoped_com_initializer.cc
+index 23c9c1c..1a9bb2e 100644
+--- a/rtc_base/win/scoped_com_initializer.cc
++++ b/rtc_base/win/scoped_com_initializer.cc
+@@ -29,7 +29,7 @@ ScopedCOMInitializer::ScopedCOMInitializer(SelectMTA mta) {
+ }
+ 
+ ScopedCOMInitializer::~ScopedCOMInitializer() {
+-  if (Succeeded()) {
++  if (Succeeded() && owns_initialization_) {
+     CoUninitialize();
+   }
+ }
+@@ -40,6 +40,28 @@ void ScopedCOMInitializer::Initialize(COINIT init) {
+   // if one is required. CoInitializeEx must be called at least once, and is
+   // usually called only once, for each thread that uses the COM library.
+   hr_ = CoInitializeEx(NULL, init);
++  if (hr_ == RPC_E_CHANGED_MODE) {
++    // LOCAL BUILD ADAPTATION: the thread already lives in a different
++    // apartment, so it cannot be switched. This is the normal situation for a
++    // Qt application: the Windows platform plugin initializes the GUI thread as
++    // an STA (OleInitialize), while WebRTC asks for an MTA on that same thread
++    // -- e.g. webrtc::CreateAudioDeviceModule() ->
++    // AudioDeviceWindowsCore::CoreAudioIsSupported(), which constructs this
++    // class with kMTA.
++    //
++    // Upstream makes this a fatal RTC_CHECK_NE, which aborts the process at
++    // startup. It also reports failure from Succeeded(), which makes
++    // CoreAudioIsSupported() return false and leaves the app without an audio
++    // device module (and therefore without a media factory at all). Upstream's
++    // own comment at that call site notes "things will work even if an STA
++    // thread is calling this method", so report success here while remembering
++    // that we did not add a COM reference to balance in the destructor.
++    hr_ = S_FALSE;
++    owns_initialization_ = false;
++    RTC_LOG(LS_WARNING) << "COM already initialized with a different apartment "
++                           "model; continuing in the existing one";
++    return;
++  }
+   RTC_CHECK_NE(RPC_E_CHANGED_MODE, hr_)
+       << "Invalid COM thread model change (MTA->STA)";
+   // Multiple calls to CoInitializeEx by the same thread are allowed as long
+diff --git a/rtc_base/win/scoped_com_initializer.h b/rtc_base/win/scoped_com_initializer.h
+index 2427097..b09ca79 100644
+--- a/rtc_base/win/scoped_com_initializer.h
++++ b/rtc_base/win/scoped_com_initializer.h
+@@ -49,6 +49,12 @@ class ScopedCOMInitializer {
+   void Initialize(COINIT init);
+ 
+   HRESULT hr_;
++
++  // LOCAL BUILD ADAPTATION: false when COM was already initialized on this
++  // thread with a different apartment model, i.e. this object did not add a
++  // COM reference and must therefore not call CoUninitialize. See the
++  // accompanying note in scoped_com_initializer.cc.
++  bool owns_initialization_ = true;
+ };
+ 
+ }  // namespace webrtc

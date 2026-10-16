@@ -4,7 +4,7 @@
 
 - **客户端**：Qt 6.10（QML）+ 原生 libwebrtc
 - **服务端**：C++ / Boost.Asio + Beast，一个 WebSocket 房间服务器
-- **跨平台**：目前只支持 Linux
+- **跨平台**：Linux x86-64 与 Windows x86-64
 
 ---
 
@@ -47,7 +47,19 @@ sudo apt install libgl1 libegl1 libglx0 libopengl0 libxkbcommon0 libxkbcommon-x1
 ```
 
 > `.zip` 是同一份内容，但 **Linux 用户建议用 `.tar.gz`**（zip 解压后可能丢失可执行位，且符号链接会变成普通文件）。
-> 注意：Linux 包里那个 `.zip` 不是 Windows 程序，Windows 构建见下文「跨平台」。
+> 注意：Linux 包里那个 `.zip` 里装的是 Linux 程序，**不是** Windows 版；Windows 有独立的包，见下。
+
+### 直接下载运行（Windows x86-64）
+
+从 [Releases](https://github.com/DongGuZhengHuaJi/Syncine/releases) 下载 `Syncine-1.0.0-Windows.zip`，解压后直接跑：
+
+```bat
+Syncine-1.0.0-Windows\bin\Syncine.exe
+```
+
+包里已经带了 Qt 运行库、平台插件、QML 模块、`tools/` 下的 ffmpeg/ffprobe 与 yt-dlp，以及 **MSVC 运行库**——**不需要另外安装 Qt，也不需要装 Visual Studio 或 VC++ Redistributable**。
+
+**系统要求**：Windows 10 / 11 x86-64。
 
 ### 连服务器
 
@@ -61,13 +73,18 @@ sudo apt install libgl1 libegl1 libglx0 libopengl0 libxkbcommon0 libxkbcommon-x1
 
 **依赖**
 
-| 依赖 | 版本 | 说明 |
+| 依赖 | Linux | Windows |
 |---|---|---|
-| Qt | ≥ 6.8（本项目用 6.10.2） | 电影音轨用到了 `QAudioBufferOutput`，6.8 才引入 |
-| 编译器 | clang | libwebrtc.a 是 Chromium 的 clang 编的 |
-| 链接器 | lld ≥ 19.1 | libwebrtc.a 用实验性的 **CREL 重定位**，见下 |
-| WebRTC | 见 [`third_party/webrtc/README.md`](third_party/webrtc/README.md) | 最大的门槛 |
-| ffmpeg / yt-dlp | 见 [`Client/tools/README.md`](Client/tools/README.md) | 网链模式需要，由脚本下载 |
+| Qt | ≥ 6.8（本项目用 6.10.2）的 `gcc_64` | 同版本的 `win64_msvc2022_64`（含 `qtmultimedia`、`qtwebsockets`） |
+| 编译器 | clang | **MSVC**（VS 2022 或 2026 均可） |
+| 链接器 | lld ≥ 19.1 | 不需要，用 MSVC 自带的 `link.exe` |
+| WebRTC | 见 [`third_party/webrtc/README.md`](third_party/webrtc/README.md) | 同上，**两个平台各有一份预编译产物** |
+| ffmpeg / yt-dlp | 见 [`Client/tools/README.md`](Client/tools/README.md) | 同上（Windows 用 `yt-dlp.exe` 与 BtbN 的 `win64-lgpl` 构建） |
+
+> 电影音轨用到了 `QAudioBufferOutput`，Qt 6.8 才引入，所以 Qt 不能低于 6.8。
+> WebRTC 是按平台分别编译的：Linux 那份是 Chromium 的 clang 编的，**Windows 那份必须用 MSVC 编**——Chromium 在 Windows 上强制要求 MSVC，也无法从 Linux 交叉编译。
+
+**Linux**
 
 ```bash
 # 1. 随包工具（约 320 MB，不入仓库）
@@ -86,9 +103,36 @@ cmake --build --preset release
 cd build-release && cpack       # 出 Syncine-1.0.0-Linux.tar.gz 与 .zip
 ```
 
-Qt 与 WebRTC 的位置都从**环境变量/preset** 读取，不写死在仓库里。Qt 不在默认位置时用 `-DCMAKE_PREFIX_PATH=/path/to/Qt/6.10.2/gcc_64` 覆盖。
+**Windows**
 
-**关于 CREL 重定位**：`libwebrtc.a` 的对象文件用的是 Chromium 的实验格式（节名 `.crel.text`）。系统自带的 lld < 19.1 不认识它——**不报错**，只是把那些节当未知节静默忽略，结果所有重定位都没被施加，产出启动即段错误、且从源码完全看不出问题的可执行文件。构建脚本会把随 WebRTC 一起编出来的那份 lld 指给链接器。
+```bat
+:: 0) 在「x64 Native Tools Command Prompt for VS」里执行（或先 call 一次 vcvars64.bat）
+::    这样 cl.exe / link.exe / VCToolsRedistDir 才会在环境里
+
+:: 1) 随包工具 → Client\tools\{ffmpeg,yt-dlp}
+::    yt-dlp.exe 与 BtbN 的 ffmpeg-master-latest-win64-lgpl，见 Client/tools/README.md
+
+:: 2) WebRTC：直接用预编译产物 webrtc-windows-x64-bf31ff6f.zip，解压到任意目录
+::    （要自己从源码编，见 third_party\webrtc\README.md 第 7 节）
+
+:: 3) 配置 + 构建
+cmake -S Client -B Client\build-release -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+  -DCMAKE_PREFIX_PATH=<Qt>\6.10.2\msvc2022_64 ^
+  -DWEBRTC_ROOT=<webrtc-windows-x64-bf31ff6f> ^
+  "-DWEBRTC_WIN_SYSTEM_LIBS=<见 third_party\webrtc\README.md 第 7 节>"
+cmake --build Client\build-release --parallel
+
+:: 4) 打包（出 Syncine-1.0.0-Windows.zip）
+cd Client\build-release
+cpack
+```
+
+> Windows 上**不要用 `cmake --preset release`**：preset 里的 Qt 路径是 Linux 布局（`$env{HOME}/Qt/6.10.2/gcc_64`），Windows 要显式传 `-DCMAKE_PREFIX_PATH`。
+> 另外 WebRTC 在 Windows 上不是「一个 `.a` 加一个 lld」就够，还需要一份 `clang_rt.builtins`，预编译产物里已经带了。
+
+Qt 与 WebRTC 的位置都从**命令行参数/环境变量**读取，不写死在仓库里。Qt 不在默认位置时用 `-DCMAKE_PREFIX_PATH=/path/to/Qt/6.10.2/<平台目录>` 覆盖。
+
+**关于 CREL 重定位（仅 Linux）**：`libwebrtc.a` 的对象文件用的是 Chromium 的实验格式（节名 `.crel.text`）。系统自带的 lld < 19.1 不认识它——**不报错**，只是把那些节当未知节静默忽略，结果所有重定位都没被施加，产出启动即段错误、且从源码完全看不出问题的可执行文件。构建脚本会把随 WebRTC 一起编出来的那份 lld 指给链接器。
 
 ### 服务端
 
@@ -147,8 +191,10 @@ sudo systemctl enable --now syncine
 | 平台 | 状态 |
 |---|---|
 | Linux x86-64 | ✅ 1.0 支持 |
-| Windows | ❌ 尚未构建。缺的不是 CMake 分支，而是 **Windows 版的 WebRTC**：Chromium 的构建系统在 Windows 上强制要求 MSVC，无法从 Linux 交叉编译，必须在 Windows 机器上重跑一遍 `scripts/build-webrtc.sh` 的流程（数小时）。`cmake/FindWebRTC.cmake` 遇到非 Linux 会直接 `FATAL_ERROR`，就是为了避免悄悄产出坏二进制。CI 里已备好 Windows job 的骨架（`.github/workflows/release.yml`，当前注释着） |
+| Windows x86-64 | ✅ 1.0 支持。`webrtc.lib` 是在 Windows + MSVC 上从源码编出来的（Chromium 的构建系统在 Windows 上强制要求 MSVC，无法从 Linux 交叉编译），预编译产物为 `webrtc-windows-x64-bf31ff6f.zip` |
 | macOS | ❌ 未验证 |
+
+Windows 侧在**客户端**与 **WebRTC** 两边都做了平台适配（工具链与 SDK 版本、CRT、COM 套间、Qt Quick Controls 样式、随包运行库），逐条记录在 [`third_party/webrtc/README.md`](third_party/webrtc/README.md) 第 7 节。
 
 ---
 
@@ -171,10 +217,9 @@ sudo systemctl enable --now syncine
 | 组件 | 许可证 | 备注 |
 |---|---|---|
 | Qt 6 | LGPLv3 | **动态链接**分发，满足 LGPL 对「允许用户替换 Qt」的要求 |
-| WebRTC | BSD-3-Clause | 本地补丁见 `third_party/webrtc/patches/` |
+| WebRTC | BSD-3-Clause | 本地补丁见 `third_party/webrtc/patches/`（含 Windows 的 COM 套间修复） |
+| MSVC 运行库 | Microsoft 可再分发（VC++ Redistributable 许可） | 仅 Windows 包：`msvcp140.dll` / `vcruntime140.dll` 等随包分发，安装规则见 `Client/CMakeLists.txt` |
 | ffmpeg | LGPLv3 | 用的是 BtbN 的 **lgpl** 构建（只做转封装，不需要 GPL 编码器）。`tools/ffmpeg/LICENSE.txt` |
 | yt-dlp | Unlicense（源码） | 打好的可执行文件含 PyInstaller/GPLv3+ 组件，整份按 GPLv3+ 分发——属**聚合分发**，不影响本项目自身的许可 |
 | Boost | Boost Software License | 仅服务端 |
 | OpenSSL | Apache-2.0 | 仅服务端 |
-
-发版流程见 [`RELEASING.md`](RELEASING.md)。

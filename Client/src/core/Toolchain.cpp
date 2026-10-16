@@ -81,9 +81,19 @@ QString Toolchain::findTool(const QString &subdir, const QStringList &names)
 
 void Toolchain::detect()
 {
+    // 候选名是**按原样**去 QFileInfo::exists() 查的，不补扩展名，所以带包分发的
+    // tools/ 目录在 Windows 上要显式写 .exe（只有末尾 findExecutable() 那条 PATH
+    // 回退会按 PATHEXT 补）。非 Windows 上后缀是空串，行为与之前完全一致。
+#if defined(Q_OS_WIN)
+    const QString exeSuffix = QStringLiteral(".exe");
+#else
+    const QString exeSuffix = QString();
+#endif
+
     m_ytDlpPath = findTool(QStringLiteral("yt-dlp"),
-                           {QStringLiteral("yt-dlp_linux"), QStringLiteral("yt-dlp"),QStringLiteral("yt-dlp_macos")});
-    m_ffmpegPath = findTool(QStringLiteral("ffmpeg"), {QStringLiteral("ffmpeg")});
+                           {QStringLiteral("yt-dlp_linux"), QStringLiteral("yt-dlp") + exeSuffix,
+                            QStringLiteral("yt-dlp_macos")});
+    m_ffmpegPath = findTool(QStringLiteral("ffmpeg"), {QStringLiteral("ffmpeg") + exeSuffix});
     m_ffmpegDir = m_ffmpegPath.isEmpty()
                       ? QString()
                       : QFileInfo(m_ffmpegPath).absolutePath();
@@ -101,7 +111,7 @@ void Toolchain::detect()
     // ffprobe:不是必需的（合并音视频只用 ffmpeg）,但 yt-dlp 修 m3u8 时间戳之类的
     // 场合会用到它 —— 少了它只是降级 + 一条警告。找一下、记进日志，便于排查。
     // 存起来：除了 yt-dlp 修时间戳，客户端的 HDR 检查也用它
-    m_ffprobePath = findTool(QStringLiteral("ffmpeg"), {QStringLiteral("ffprobe")});
+    m_ffprobePath = findTool(QStringLiteral("ffmpeg"), {QStringLiteral("ffprobe") + exeSuffix});
     if (!m_ffprobePath.isEmpty())
         LOG_INFO("Toolchain") << "ffprobe:" << m_ffprobePath;
     else if (!m_ffmpegPath.isEmpty())
