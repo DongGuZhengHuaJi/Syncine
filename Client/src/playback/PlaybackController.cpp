@@ -259,10 +259,21 @@ void PlaybackController::onMovieAudioBuffer(const QAudioBuffer &buffer) {
     if (!buffer.isValid())
         return;
 
+    static int count = 0;
+
+    // 首帧格式用 info 记一次。默认级别就是 info，而这条链路的两处格式约定
+    // （QAudioBufferOutput 的构造格式、opus 协商出的声道数）一旦对不上，
+    // 观众端就是全程静音 —— 这是事后唯一能证明"发送端产出了什么"的记录。
+    if (count == 0) {
+        const QAudioFormat format = buffer.format();
+        LOG_INFO("Playback") << "电影音频首帧:" << format.sampleRate() << "Hz,"
+                 << format.channelCount() << "声道,"
+                 << format.sampleFormat();
+    }
+
     // 诊断：音频帧比视频密得多（一帧几十毫秒）,全打会淹掉日志，
     // 所以只打开头几次 + 每隔一段。排障时先看这一行有没有出现 ——
     // 没有就说明"取 PCM"这一环没通，和 WebRTC 那边无关。
-    static int count = 0;
     if (count < 3 || count % 500 == 0) {
         const QAudioFormat format = buffer.format();
 

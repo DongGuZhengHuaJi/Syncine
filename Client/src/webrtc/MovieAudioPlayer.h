@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include <QAudioDevice>
 #include <QObject>
@@ -78,8 +79,14 @@ private:
 
     // 诊断：前几帧 + 每隔一段记录一条，避免淹没日志
     int m_frameCount = 0;
-    // 因格式或声道数不符而被丢弃的帧数
+    // 因采样率/位深不符而被丢弃的帧数
     int m_droppedCount = 0;
+    // 单声道帧数。只用于「第一次遇到时提示一句」，不参与丢弃判断。
+    int m_monoCount = 0;
+
+    // 单声道铺成立体声用的暂存区。只在 OnData 里用，而 OnData 由 WebRTC 的
+    // 音频线程串行调用，故无需加锁；做成成员是为了不在音频线程上反复分配。
+    std::vector<int16_t> m_monoScratch;
 };
 
 #endif //SYNCINE_MOVIEAUDIOPLAYER_H

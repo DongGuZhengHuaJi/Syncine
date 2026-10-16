@@ -220,35 +220,103 @@ QString qualityName(WebrtcManager::VideoQuality quality) {
 
 // ---- 音频设备的两个小工具 ----
 
-// 按名字在设备表中查找索引。名字为空（= 系统默认）或未找到时均返回 0。
+// 按名字在设备表中查找索引。名字为空（= 跟随系统默认）或未找到时均返回 kDefaultDevice。
 //
-// 未找到时退回 0 而非报错：设备被拔出是常态（上次使用的 USB 耳机本次未插入），
+// 未找到时退回默认而非报错：设备被拔出是常态（上次使用的 USB 耳机本次未插入），
 // 退回「跟随系统默认」优于完全不出声。
 int indexOfDeviceName(const QString &name,
                       const std::vector<WebrtcManager::DeviceInfo> &devices) {
     if (name.isEmpty())
-        return 0;
+        return WebrtcManager::kDefaultDevice;
 
     for (const WebrtcManager::DeviceInfo &device : devices) {
-        // 0 号为 "default: xxx" 伪设备，由空名字表示，不参与按名字匹配
-        if (device.index > 0 && device.name == name)
+        if (device.name == name)
             return device.index;
     }
-    return 0;
+    return WebrtcManager::kDefaultDevice;
 }
 
-// 设备表 → OptionList 所需的 [{label, value}]
+// 设备表 → OptionList 所需的 [{label, value}]。
+//
+// 首项固定是「跟随系统默认」（value 为空串），而不是把 ADM 的 0 号当作默认：
+// 0 号在 PulseAudio 上是 ADM 自己插的 "default: xxx" 伪设备（名字随系统默认变化，
+// 存下来会失效），在 WASAPI 上却是一个真实端点（枚举出来的第一个，与系统默认
+// 毫无约定关系）。故 Linux 上跳过 0 号这一项（语义与首项重复），Windows 上保留。
 QVariantList devicesToVariant(const std::vector<WebrtcManager::DeviceInfo> &devices) {
     QVariantList list;
+
+    QVariantMap defaultItem;
+    defaultItem[QStringLiteral("label")] = QStringLiteral("跟随系统默认");
+    defaultItem[QStringLiteral("value")] = QString();
+    list.append(defaultItem);
+
     for (const WebrtcManager::DeviceInfo &device : devices) {
+#if !defined(Q_OS_WIN)
+        if (device.index == 0)
+            continue;
+#endif
         QVariantMap item;
         item[QStringLiteral("label")] = device.name;
-        // 0 号在界面上表示「跟随系统默认」，取值用空串：它在 ADM 中的名字为
-        // "default: <当前默认设备>"，会随系统默认设备变化，存储后会失效。
-        item[QStringLiteral("value")] = device.index == 0 ? QString() : device.name;
+        item[QStringLiteral("value")] = device.name;
         list.append(item);
     }
     return list;
+}
+
+// 「跟随系统默认」落到 ADM 上。这是全项目唯一按平台分叉的地方，两条路完全不同：
+//
+//   Linux/PulseAudio：设备表 0 号就是 ADM 插进来的 "default: xxx" 伪设备，开流时
+//     重新解析当前默认 sink（audio_device_pulse_linux.cc:255、:703），故传索引 0
+//     即「跟着系统默认走」。注意不能改用下面那个 WindowsDeviceType 重载——Pulse
+//     与 ALSA 都直接返回 -1（"WindowsDeviceType not supported"，同文件 :697、:819）。
+//
+//   Windows/WASAPI：设备表就是 EnumAudioEndpoints 的原样集合，0 号是「枚举出来的
+//     第一个端点」，与系统默认没有任何约定关系（ADM 自己想知道默认排第几，也要
+//     遍历集合比对设备 ID，见 _GetDefaultDeviceIndex）。默认设备只能用另一个重载
+//     按角色查 GetDefaultAudioEndpoint。传索引 0 会静默播到一个用户听不见的设备上：
+//     SetXxxDevice(0) 完全合法、不报错，声音只是进了别处（实测：Steam 虚拟声卡）。
+//
+// 角色取 kDefaultCommunicationDevice（「默认通信设备」）而非 kDefaultDevice
+// （「系统默认设备」）：与 WebRTC 引擎自己初始化时的选择保持一致（adm_helpers.cc:30），
+// 于是「跟随系统默认」这一步在建起第一条连接后重套时是个语义空操作，不会把引擎
+// 刚设好的设备改到别处。两者在没单独设过通信设备的机器上是同一个设备。
+int32_t setDefaultDevice(webrtc::AudioDeviceModule *adm, bool recording) {
+#if defined(Q_OS_WIN)
+    const auto role = webrtc::AudioDeviceModule::kDefaultCommunicationDevice;
+    return recording ? adm->SetRecordingDevice(role) : adm->SetPlayoutDevice(role);
+#else
+    return recording ? adm->SetRecordingDevice(0) : adm->SetPlayoutDevice(0);
+#endif
+}
+
+// 「默认设备」在设备名查询接口里的索引，与上面的 setDefaultDevice 配套：
+//   Windows：ADM 把索引 (uint16_t)-1 特判成默认通信设备（audio_device_core_win.cc:1490），
+//            与 kDefaultCommunicationDevice 取到的正是同一个设备；
+//   Linux  ：0 号伪设备的名字即 "default: <当前默认 sink>"。
+uint16_t defaultDeviceQueryIndex() {
+#if defined(Q_OS_WIN)
+    return static_cast<uint16_t>(-1);
+#else
+    return 0;
+#endif
+}
+
+// 取设备名，仅用于日志。取不到时返回空串。
+//
+// 为什么值得专门记一行：设备选错是**静默**故障——SetXxxDevice 一律返回 0，
+// 不比对一下名字，事后无从判断声音到底进了哪个设备。
+QString deviceNameAt(webrtc::AudioDeviceModule *adm, bool recording, uint16_t index) {
+    if (adm == nullptr)
+        return {};
+
+    char name[128] = {0};   // kAdmMaxDeviceNameSize
+    char guid[128] = {0};   // Linux 上恒为空,传进去只为凑接口
+    const int32_t result = recording
+                               ? adm->RecordingDeviceName(index, name, guid)
+                               : adm->PlayoutDeviceName(index, name, guid);
+    if (result != 0)
+        return {};
+    return QString::fromUtf8(name);
 }
 
 } // namespace
@@ -487,7 +555,7 @@ bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataC
 
     if (firstPeer) {
         // 上一步 CreatePeerConnection 内部会先启动引擎，而
-        // adm_helpers::Init() 会将声卡设备复位为系统默认。
+        // adm_helpers::Init() 已按平台自行选过一次设备（见本节第 2 条）。
         // 需把用户选择的设备套回——缺少此步骤，每次进房都会静默回到默认设备。
         // （顺序有保证：引擎初始化走 worker 线程上的 BlockingCall，
         //  在 CreatePeerConnection 返回前即已完成。）
@@ -603,9 +671,11 @@ void WebrtcManager::setAudioEnabled(bool enabled) {
 //    media_engine_->Init() → adm->Init()；在此之前枚举设备一律返回 -1
 //    （audio_device_impl.cc:48）。设置页需在未进房时看到设备列表，故
 //    ensureVoiceAdmOnWorker() 自行补一次（该操作幂等，见同文件 :287）。
-// 2) 引擎每次（重新）初始化都将设备复位为 0（adm_helpers.cc:43、63 写死
-//    SetPlayoutDevice(0)/SetRecordingDevice(0)），故用户所选设备必须在建起第一条
-//    连接后重新套用，见 createPeerConnection() 中的 applyDevice(force=true)。
+// 2) 引擎每次（重新）初始化都会自行选一次设备（adm_helpers.cc:43、63），把用户
+//    所选的那个覆盖掉，故必须在建起第一条连接后重新套用，见 createPeerConnection()
+//    中的 applyDevice(force=true)。它选的值按平台不同（同文件 :30 的宏）：
+//    Windows 是 kDefaultCommunicationDevice（角色查询），其余平台才是索引 0。
+//    这条差异正是「跟随系统默认」必须分平台实现的原因，见 setDefaultDevice()。
 // 3) 播放/录音已启动时改设备会直接失败：PulseAudio 的 ADM 在 _playIsInitialized /
 //    _recIsInitialized 时返回 -1（audio_device_pulse_linux.cc:677、798），运行中
 //    切换必须走 Stop → Set → Init → Start；SetXxxDevice 仅记录索引，真正打开
@@ -694,7 +764,7 @@ std::vector<WebrtcManager::DeviceInfo> WebrtcManager::enumerateDevicesOnWorker(b
     return devices;
 }
 
-bool WebrtcManager::applyRecordingDeviceOnWorker(uint16_t index) {
+bool WebrtcManager::applyRecordingDeviceOnWorker(int index) {
     if (!ensureVoiceAdmOnWorker())
         return false;
 
@@ -706,9 +776,15 @@ bool WebrtcManager::applyRecordingDeviceOnWorker(uint16_t index) {
     if (wasInitialized)
         m_voiceAdm->StopRecording();
 
-    const int32_t setResult = m_voiceAdm->SetRecordingDevice(index);
+    const bool useDefault = (index == kDefaultDevice);
+    const int32_t setResult = useDefault
+                                  ? setDefaultDevice(m_voiceAdm.get(), true)
+                                  : m_voiceAdm->SetRecordingDevice(static_cast<uint16_t>(index));
     if (setResult != 0) {
-        LOG_ERROR("WebRTC") << "选择麦克风设备索引" << index << "失败(返回" << setResult << ")";
+        LOG_ERROR("WebRTC") << "选择麦克风设备"
+                            << (useDefault ? QStringLiteral("「跟随系统默认」")
+                                           : QString::number(index) + QStringLiteral(":"))
+                            << "失败(返回" << setResult << ")";
         // 恢复录音
         if (wasInitialized && m_voiceAdm->InitRecording() == 0 && wasRecording)
             m_voiceAdm->StartRecording();
@@ -722,13 +798,19 @@ bool WebrtcManager::applyRecordingDeviceOnWorker(uint16_t index) {
             LOG_ERROR("WebRTC") << "切换后重新开始录音失败,麦克风可能不出声";
     }
 
-    LOG_INFO("WebRTC") << "麦克风已切到设备索引" << index
-                       << (wasRecording ? "(热切换)"
-                                        : "");
+    // 把解析结果一起记下：选错设备是静默故障，事后只能靠名字判断声音进了哪儿。
+    const QString name = deviceNameAt(m_voiceAdm.get(), true,
+                                      useDefault ? defaultDeviceQueryIndex()
+                                                 : static_cast<uint16_t>(index));
+    LOG_INFO("WebRTC") << "麦克风已切到"
+                       << (useDefault ? QStringLiteral("跟随系统默认:")
+                                      : QString::number(index) + QStringLiteral(":"))
+                       << (name.isEmpty() ? QStringLiteral("(取不到设备名)") : name)
+                       << (wasRecording ? "(热切换)" : "");
     return true;
 }
 
-bool WebrtcManager::applyPlayoutDeviceOnWorker(uint16_t index) {
+bool WebrtcManager::applyPlayoutDeviceOnWorker(int index) {
     if (!ensureVoiceAdmOnWorker())
         return false;
 
@@ -738,9 +820,15 @@ bool WebrtcManager::applyPlayoutDeviceOnWorker(uint16_t index) {
     if (wasInitialized)
         m_voiceAdm->StopPlayout();
 
-    const int32_t setResult = m_voiceAdm->SetPlayoutDevice(index);
+    const bool useDefault = (index == kDefaultDevice);
+    const int32_t setResult = useDefault
+                                  ? setDefaultDevice(m_voiceAdm.get(), false)
+                                  : m_voiceAdm->SetPlayoutDevice(static_cast<uint16_t>(index));
     if (setResult != 0) {
-        LOG_ERROR("WebRTC") << "选择听筒设备索引" << index << "失败(返回" << setResult << ")";
+        LOG_ERROR("WebRTC") << "选择听筒设备"
+                            << (useDefault ? QStringLiteral("「跟随系统默认」")
+                                           : QString::number(index) + QStringLiteral(":"))
+                            << "失败(返回" << setResult << ")";
         if (wasInitialized && m_voiceAdm->InitPlayout() == 0 && wasPlaying)
             m_voiceAdm->StartPlayout();
         return false;
@@ -753,9 +841,15 @@ bool WebrtcManager::applyPlayoutDeviceOnWorker(uint16_t index) {
             LOG_ERROR("WebRTC") << "切换后重新开始播放失败,可能听不到对方语音";
     }
 
-    LOG_INFO("WebRTC") << "听筒已切到设备索引" << index
-                       << (wasPlaying ? "(热切换)"
-                                      : "");
+    // 把解析结果一起记下：选错设备是静默故障，事后只能靠名字判断声音进了哪儿。
+    const QString name = deviceNameAt(m_voiceAdm.get(), false,
+                                      useDefault ? defaultDeviceQueryIndex()
+                                                 : static_cast<uint16_t>(index));
+    LOG_INFO("WebRTC") << "听筒已切到"
+                       << (useDefault ? QStringLiteral("跟随系统默认:")
+                                      : QString::number(index) + QStringLiteral(":"))
+                       << (name.isEmpty() ? QStringLiteral("(取不到设备名)") : name)
+                       << (wasPlaying ? "(热切换)" : "");
     return true;
 }
 
@@ -798,7 +892,7 @@ bool WebrtcManager::applyDevice(bool recording, const QString &name, bool force)
         reloadDevices();
 
     const int index = indexOfDeviceName(name, deviceList(recording));
-    if (!name.isEmpty() && index == 0) {
+    if (!name.isEmpty() && index == kDefaultDevice) {
         LOG_WARN("WebRTC") << (recording ? "麦克风" : "听筒") << "设备\"" << name
                            << "\"不在设备表里,退回系统默认";
     }
@@ -807,11 +901,10 @@ bool WebrtcManager::applyDevice(bool recording, const QString &name, bool force)
     if (!force && index == currentDeviceIndex(recording))
         return true;
 
-    const uint16_t target = static_cast<uint16_t>(index);
     bool ok = false;
     runOnVoiceWorker([&] {
-        ok = recording ? applyRecordingDeviceOnWorker(target)
-                       : applyPlayoutDeviceOnWorker(target);
+        ok = recording ? applyRecordingDeviceOnWorker(index)
+                       : applyPlayoutDeviceOnWorker(index);
     });
     if (!ok)
         return false;

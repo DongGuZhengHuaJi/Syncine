@@ -212,12 +212,17 @@ public:
     // 只影响 voice 连接（真声卡）。media 连接是假声卡、不涉及设备，但观众侧电影声
     // 由 MovieAudioPlayer 播放，听筒需一并切换，否则语音在耳机而电影声在外放。
     // 以下事实均核对过 libwebrtc 源码（含源码位置与行为细节，见 .cpp 中同名小节）：
-    // ADM 惰性初始化（未进房时枚举返回 -1，需自行补 Init）；索引 0 恒为系统默认，
-    // 1 起为真实设备；Linux 无 GUID 可用，只能按名字识别；索引插拔即漂移，
-    // 不可持久化；播放/录音已启动时 SetXxxDevice 返回 -1，须走 Stop → Set → Init →
-    // Start；引擎重新初始化会把设备复位为 0；这些调用必须在 voice worker 线程执行。
+    // ADM 惰性初始化（未进房时枚举返回 -1，需自行补 Init）；「系统默认」不是设备表
+    // 里的某一项，各平台表达方式不同（见 kDefaultDevice）；Linux 无 GUID 可用，
+    // 只能按名字识别；索引插拔即漂移，不可持久化；播放/录音已启动时 SetXxxDevice
+    // 返回 -1，须走 Stop → Set → Init → Start；引擎重新初始化会复位设备选择；
+    // 这些调用必须在 voice worker 线程执行。
 
-    // 一个声卡设备。index 为 ADM 索引（0 = 系统默认），name 为显示名
+    // 「跟随系统默认」在内部的表示。它**不是**一个 ADM 索引：ADM 的设备表里没有
+    // "默认"这一项，各平台表达默认的方式不同，统一在 .cpp 的 setDefaultDevice() 里分叉。
+    static constexpr int kDefaultDevice = -1;
+
+    // 一个声卡设备。index 为 ADM 索引，name 为显示名
     // （Linux 上无 GUID 可用，故名字是唯一标识）
     struct DeviceInfo {
         int index = 0;
@@ -229,7 +234,7 @@ public:
     };
 
     // 设备列表，QML 的 {label, value} 形状（与 CookieManager::browsers 一致）。
-    // value 为 "" 表示跟随系统默认。
+    // 首项恒为「跟随系统默认」，value 为 ""；其余为 ADM 实际枚举出的设备。
     QVariantList recordingDevices() const;
     QVariantList playoutDevices() const;
 
@@ -308,9 +313,10 @@ private:
     // 声卡未初始化时先替其执行一次 Init（幂等）。缺少此步骤，枚举只会得到 -1。
     bool ensureVoiceAdmOnWorker();
     std::vector<DeviceInfo> enumerateDevicesOnWorker(bool recording);
-    // 套用指定索引。内部按「先停、再设、再起」执行——热改会失败。
-    bool applyRecordingDeviceOnWorker(uint16_t index);
-    bool applyPlayoutDeviceOnWorker(uint16_t index);
+    // 套用设备。index 为 ADM 索引，kDefaultDevice 表示跟随系统默认。
+    // 内部按「先停、再设、再起」执行——热改会失败。
+    bool applyRecordingDeviceOnWorker(int index);
+    bool applyPlayoutDeviceOnWorker(int index);
 
     // 以下几个在 Qt 主线程上执行：
 
@@ -373,9 +379,10 @@ private:
     std::vector<DeviceInfo> m_playoutDevices;
 
     // ADM 当前实际使用的索引。ADM 没有查询接口，只能自行记录——
-    // 引擎初始化时会被复位为 0，故每次重新套用后都需同步更新。
-    int m_recordingDeviceIndex = 0;
-    int m_playoutDeviceIndex = 0;
+    // 引擎初始化时会按平台复位（Windows 是默认通信设备，其余是索引 0），
+    // 故每次重新套用后都需同步更新。初值与「未选过设备」的情况一致。
+    int m_recordingDeviceIndex = kDefaultDevice;
+    int m_playoutDeviceIndex = kDefaultDevice;
 
     // 用户的选择（即意图）。"" 表示系统默认。跨重启由 AppSettings 保管，
     // 此处只负责在引擎（重新）初始化后将其套回。

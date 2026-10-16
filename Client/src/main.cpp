@@ -25,6 +25,7 @@
 #include "session/RoomSession.h"
 #include "session/SessionController.h"
 #include "webrtc/SignalingChannel.h"
+#include "webrtc/WebrtcLog.h"
 #include "webrtc/WebrtcManager.h"
 
 int main(int argc, char *argv[]) {
@@ -36,12 +37,17 @@ int main(int argc, char *argv[]) {
     // 目录用 SYNCINE_LOG_DIR 覆盖。
     Log::init(QStringLiteral("syncine"));
 
-    // 诊断开关：设了 SYNCINE_WEBRTC_LOG=1 才打开 WebRTC 自己的日志。
+    // WebRTC 自己的日志一律接进日志文件（警告及以上），见 WebrtcLog.h 的说明。
+    // 必须在 Log::init 之后：接收器直接写 Log。
+    const bool webRtcVerbose = qEnvironmentVariableIsSet("SYNCINE_WEBRTC_LOG");
+    WebrtcLog::install(webRtcVerbose);
+
+    // 诊断开关：设了 SYNCINE_WEBRTC_LOG=1 再额外把它打到终端。
     //
     // 用来查"数据进了适配器却没发出去"这一类问题 —— WebRTC 内部很多失败
     // 是静默的（比如 SetSend 失败只在 LS_ERROR 级别留一行）,平时不该刷屏，
-    // 需要时再开。
-    if (qEnvironmentVariableIsSet("SYNCINE_WEBRTC_LOG")) {
+    // 需要时再开。日志文件那份由 WebrtcLog 负责，这里只管终端。
+    if (webRtcVerbose) {
         webrtc::LogMessage::LogToDebug(webrtc::LS_INFO);
         webrtc::LogMessage::LogTimestamps(true);
     }

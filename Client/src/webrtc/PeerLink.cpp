@@ -544,13 +544,18 @@ void PeerLink::OnSuccess(webrtc::SessionDescriptionInterface *desc) {
     // fmtp 里有没有 stereo=1,一眼就能看出这条连接的协商是不是立体声
     // (rtpmap 里的 /2 只是能力声明，不算数 —— 见 WebrtcManager.cpp 的
     // StereoOpusAudioEncoderFactory 注释)。
+    //
+    // 两个子串都要匹配：stereo=1 在 fmtp 行上，而那条行里并没有 "opus" 字样
+    // （形如 a=fmtp:111 minptime=10;useinbandfec=1;stereo=1），只按 "opus"
+    // 过滤会把最要紧的一行漏掉。
     {
         std::string sdp;
         if (desc->ToString(&sdp)) {
             std::istringstream lines(sdp);
             std::string line;
             while (std::getline(lines, line)) {
-                if (line.find("opus") != std::string::npos)
+                if (line.find("opus") != std::string::npos
+                    || line.find("fmtp") != std::string::npos)
                     LOG_TRACE("PeerLink") << m_peerId << "SDP:" << line;
             }
         }

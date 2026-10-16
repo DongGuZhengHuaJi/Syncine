@@ -18,10 +18,12 @@
 
 namespace {
 
-// 电影音频的格式约定。和发送端 PlaybackController 里 QAudioBufferOutput
-// 构造时指定的格式必须一致 —— 那是这条链路的源头。
-// 双声道：发送端给的立体声 PCM 会被按 2 声道编码(前提是 media 工厂的
-// 编解码器工厂都加了 stereo=1,见 WebrtcManager.cpp),这里按 2 声道放。
+// 电影音频的格式约定。采样率与位深必须和发送端 PlaybackController 里
+// QAudioBufferOutput 构造时指定的格式一致 —— 那是这条链路的源头。
+//
+// 声道数不等于源头：源头给的是立体声，但对端解码出几个声道由 opus 协商的
+// stereo 参数决定（见 OnData 里的说明），单声道同样要能放。这里的 kChannels
+// 是**放音**侧的声道数，那由 QAudioSink 决定，设备普遍只接受立体声。
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 
@@ -158,7 +160,7 @@ void MovieAudioPlayer::startSink() {
     if (!device.isFormatSupported(format)) {
         // 不是致命错误：QAudioSink 会自己转。但采样率/声道对不上时
         // 音调和速度会不对，所以还是喊一声。
-        LOG_WARN("MovieAudio") << "输出设备不直接支持 48kHz 单声道,交由 Qt 转换(可能有细微音质损失)";
+        LOG_WARN("MovieAudio") << "输出设备不直接支持 48kHz 双声道,交由 Qt 转换(可能有细微音质损失)";
     }
 
     m_sink = std::make_unique<QAudioSink>(device, format, this);
@@ -238,11 +240,18 @@ void MovieAudioPlayer::OnData(const void *audio_data,
     if (audio_data == nullptr || number_of_frames == 0)
         return;
 
-    // 格式不符合预期就丢掉。不在这里做转换：发送端已经用
-    // QAudioBufferOutput 把格式定死成 48k/单声道/Int16,
-    // 真出现别的格式说明链路上游出了问题，应该去修上游而不是在这里兼容。
+    // 采样率与位深不符合预期就丢掉。不在这里做重采样：发送端已经用
+    // QAudioBufferOutput 把这两项定死成 48k/Int16,真出现别的值说明链路上游
+    // 出了问题，应该去修上游而不是在这里兼容。
+    //
+    // 声道数则**只接受 1 或 2**，不做丢弃判断 —— 它不是发送端定的，而是协商出来的：
+    // 远端那条 opus 的 SDP 里带 stereo=1 才是双声道，否则 NetEq 按单声道解码
+    // （解码器的声道数取自 stereo 参数，缺省为 1：audio_decoder_opus.cc 的
+    // GetDefaultNumChannels；neteq_impl.cc:430 又把输出声道数取自解码器）。
+    // 协商成单声道时整条链路是自洽的（发送端 ACM 也会把立体声下混成单声道），
+    // 这里若照着双声道丢弃，结果就是全程静音。
     if (bits_per_sample != 16 || sample_rate != kSampleRate
-        || number_of_channels != kChannels) {
+        || (number_of_channels != 1 && number_of_channels != kChannels)) {
         if (m_droppedCount == 0) {
             LOG_WARN("MovieAudio") << "收到的音频格式不符合预期,已丢弃:"
                        << bits_per_sample << "bit" << sample_rate << "Hz"
@@ -252,8 +261,25 @@ void MovieAudioPlayer::OnData(const void *audio_data,
         return;
     }
 
-    const int bytes = static_cast<int>(number_of_frames * number_of_channels * 2);
-    m_device->push(static_cast<const char *>(audio_data), bytes);
+    if (number_of_channels == 1) {
+        // 单声道 → 双声道：每个样本复制一份给左右。QAudioSink 那份格式是立体声
+        // （设备普遍不接受单声道格式），不铺开就等于不出声。
+        if (m_monoCount == 0)
+            LOG_INFO("MovieAudio") << "远端电影声为单声道(opus 未协商 stereo),已铺成立体声播放";
+        ++m_monoCount;
+
+        const auto *samples = static_cast<const int16_t *>(audio_data);
+        m_monoScratch.resize(number_of_frames * 2);
+        for (size_t i = 0; i < number_of_frames; ++i) {
+            m_monoScratch[i * 2] = samples[i];
+            m_monoScratch[i * 2 + 1] = samples[i];
+        }
+        m_device->push(reinterpret_cast<const char *>(m_monoScratch.data()),
+                       static_cast<int>(m_monoScratch.size() * sizeof(int16_t)));
+    } else {
+        const int bytes = static_cast<int>(number_of_frames * number_of_channels * 2);
+        m_device->push(static_cast<const char *>(audio_data), bytes);
+    }
 
     // 诊断：开头几次 + 每隔一段。
     //
