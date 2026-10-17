@@ -179,8 +179,12 @@ private:
     // 下载用
     QString m_destDir;
     QString m_outputTemplate;   // -o 模板(产物靠 glob 找,见 handleDownloadFinished)
-    qint64 m_downloadedBytes = 0;
     qint64 m_totalBytes = 0;
+    // 分离流的整体进度：yt-dlp 先下画面再下声音，每条流的进度都从 0 重新计数。
+    // 用「已完成的流 + 当前流」折算整体百分比，否则进度条会在换流时倒退。
+    qint64 m_currentFileBytes = 0;
+    qint64 m_finishedBytes = 0;
+    qint64 m_expectedTotalBytes = 0;
     double m_speedBps = 0;
     int m_etaSec = -1;
     // 手选的精确流在本端不存在时，只允许退回档位重下一次（见 handleDownloadFinished）

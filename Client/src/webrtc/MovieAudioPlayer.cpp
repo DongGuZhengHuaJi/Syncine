@@ -296,12 +296,16 @@ void MovieAudioPlayer::OnData(const void *audio_data,
                 peak = v;
         }
 
-        LOG_TRACE("MovieAudio") << "第" << (m_frameCount + 1) << "帧: 峰值" << peak
-                 << "队列积压" << m_device->queuedBytes() << "字节"
-                 << "音量" << volume()
-                 << "sink 状态" << (m_sink ? static_cast<int>(m_sink->state()) : -1)
-                 << "sink 错误" << (m_sink ? static_cast<int>(m_sink->error()) : -1)
-                 << "丢帧" << m_device->droppedForLag();
+        // 只在前几帧报告静音。发送端停发后，接收端仍会从 NetEq 持续拿到
+        // 全 0 帧（muted state），每 5 秒一行的静音日志没有信息量。
+        if (m_frameCount < 3 || peak != 0) {
+            LOG_TRACE("MovieAudio") << "第" << (m_frameCount + 1) << "帧: 峰值" << peak
+                     << "队列积压" << m_device->queuedBytes() << "字节"
+                     << "音量" << volume()
+                     << "sink 状态" << (m_sink ? static_cast<int>(m_sink->state()) : -1)
+                     << "sink 错误" << (m_sink ? static_cast<int>(m_sink->error()) : -1)
+                     << "丢帧" << m_device->droppedForLag();
+        }
     }
     ++m_frameCount;
 }

@@ -11,6 +11,7 @@
 #include "WebrtcManager.h"
 #include "core/Log.h"
 
+#include "rtc_base/copy_on_write_buffer.h"
 #include "rtc_base/thread.h"
 
 namespace {
@@ -51,6 +52,26 @@ std::string describeStreams(const webrtc::scoped_refptr<webrtc::RtpReceiverInter
 
 } // namespace
 
+// 数据通道观察者。回调在 WebRTC 信令线程上执行，故只做数据拷贝与转发，
+// 所有文件逻辑由主线程的 FileTransferManager 处理。
+class PeerLink::ChannelObserver final : public webrtc::DataChannelObserver {
+public:
+    explicit ChannelObserver(PeerLink *link)
+        : m_link(link) {
+    }
+
+    void OnStateChange() override {
+        m_link->onDataChannelStateChanged();
+    }
+
+    void OnMessage(const webrtc::DataBuffer &buffer) override {
+        m_link->onDataChannelMessage(buffer);
+    }
+
+private:
+    PeerLink *m_link = nullptr;
+};
+
 
 // ============================
 // 构造 / 销毁
@@ -72,6 +93,8 @@ PeerLink::PeerLink(const QString &peerId,
         return;
     }
 
+    m_channelObserver = std::make_unique<ChannelObserver>(this);
+
     webrtc::PeerConnectionDependencies dependencies(this);
     auto result = m_factory->CreatePeerConnectionOrError(config, std::move(dependencies));
     if (!result.ok()) {
@@ -81,19 +104,40 @@ PeerLink::PeerLink(const QString &peerId,
     }
     m_connection = result.value();
 
-    // 建一条数据通道，暂时没有数据传输，只是验证链路联通性
+    // 创建数据通路，用于文件传输。只有 offer 方创建：answer 方在
+    // SetRemoteDescription 后经 OnDataChannel 拿到同一条通道。两侧都创建会
+    // 协商出两条同名通道（甚至流号冲突），反而更麻烦。
     if (createDataChannel) {
         webrtc::DataChannelInit init;
+        // ordered=true 让对端收到的消息顺序与发送顺序一致
         init.ordered = true;
-        auto channel = m_connection->CreateDataChannelOrError("syncine-probe", &init);
+        auto channel = m_connection->CreateDataChannelOrError("syncine-file", &init);
         if (!channel.ok()) {
             LOG_ERROR("PeerLink") << m_peerId << "创建数据通道失败:"
                                   << channel.error().message();
+        } else {
+            attachDataChannel(channel.value());
         }
     }
 }
 
+PeerLink::~PeerLink() {
+    close();
+}
+
 void PeerLink::close() {
+    // 先摘观察者再放通道：UnregisterObserver 会阻塞到网络线程完成，
+    // 返回后不会再有回调摸到本对象。观察者对象本身留到析构（见头文件）。
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel;
+    {
+        webrtc::MutexLock lock(&m_dataChannelLock);
+        m_dataChannelClosing = true;
+        channel = m_dataChannel;
+        m_dataChannel = nullptr;
+    }
+    if (channel != nullptr)
+        channel->UnregisterObserver();
+
     m_pendingCandidateSdps.clear();
     m_pendingCandidateMids.clear();
     m_pendingCandidateIndexes.clear();
@@ -287,9 +331,12 @@ void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterf
     LOG_INFO("PeerLink") << m_peerId << "已挂载本地视频轨";
 }
 
-void PeerLink::addLocalMovieAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track) {
+void PeerLink::addLocalMovieAudioTrack(
+    webrtc::scoped_refptr<webrtc::AudioTrackInterface> track, bool sending) {
     if (m_connection == nullptr || track == nullptr)
         return;
+
+    m_movieAudioSending = sending;
 
     if (m_kind != LinkKind::Media) {
         LOG_WARN("PeerLink") << (m_peerId + ":" + linkId())
@@ -303,13 +350,20 @@ void PeerLink::addLocalMovieAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackI
     }
 
     // stream id 用 kMovieStreamId —— 接收端就是靠它把这条轨认成"电影"的。
-    auto sender = m_connection->AddTrack(track, {kMovieStreamId});
+    // active 作为初始 encoding 参数一并传入：非共享模式下发送流从协商时就
+    // 不会启动。否则 SetSsrc 会按默认的 active=true 重新应用一次，把建连前
+    // 设置的 false 覆盖掉。
+    webrtc::RtpEncodingParameters movieEncoding;
+    movieEncoding.active = sending;
+    auto sender = m_connection->AddTrack(track, {kMovieStreamId}, {movieEncoding});
     if (!sender.ok()) {
         LOG_ERROR("PeerLink") << m_peerId << "添加电影音轨失败:" << sender.error().message();
         return;
     }
 
     m_localMovieAudioTrack = track;
+    // sender 留着：停发/恢复电影音轨要改它的 encodings[0].active
+    m_movieAudioSender = sender.value();
 
     LOG_INFO("PeerLink") << m_peerId << "已挂载本地电影音轨";
 }
@@ -381,8 +435,8 @@ void PeerLink::OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface>
     if (channel == nullptr)
         return;
 
-    // 数据通道打通后输出
     LOG_INFO("PeerLink") << m_peerId << "收到数据通道:" << channel->label();
+    attachDataChannel(channel);
 
     // 协商完成后再设一次画质：AddTrack 之后立刻设有时还太早
     pushVideoQuality();
@@ -397,6 +451,10 @@ void PeerLink::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnect
     switch (state) {
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionConnected:
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionCompleted:
+        // 协商完成后必须再落一次电影音轨的发送状态：协商会重新启动发送流，
+        // 只靠建连前的设置会被覆盖。OnConnectionChange 未必在所有版本都触发，
+        // 两个回调都补一次是幂等的。
+        pushMovieAudioSending();
         emit connected(m_peerId, linkId());
         break;
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionFailed:
@@ -510,6 +568,9 @@ void PeerLink::setRemoteVideoSink(webrtc::VideoSinkInterface<webrtc::VideoFrame>
 void PeerLink::OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectionState state) {
     switch (state) {
     case webrtc::PeerConnectionInterface::PeerConnectionState::kConnected:
+        // 协商完成前设置的 RTP 参数可能没落下去（SendStream 还没建），
+        // 连上后补一次。Media 连接的电影音轨就是靠这里真正停发的。
+        pushMovieAudioSending();
         emit connected(m_peerId, linkId());
         break;
     case webrtc::PeerConnectionInterface::PeerConnectionState::kFailed:
@@ -681,6 +742,190 @@ void PeerLink::pushVideoQuality() {
                                      ? QString::number(m_videoMaxFramerate) + "fps"
                                      : QStringLiteral("默认"));
     });
+}
+
+void PeerLink::applyMovieAudioSending(bool active) {
+    if (m_movieAudioSending == active)
+        return;
+
+    m_movieAudioSending = active;
+    // 建连前 sender 还不存在，push 会直接返回；连接建立后由
+    // OnIceConnectionChange / OnConnectionChange 补一次。
+    pushMovieAudioSending();
+}
+
+void PeerLink::pushMovieAudioSending() {
+    if (m_movieAudioSender == nullptr || m_connection == nullptr)
+        return;
+
+    // SetParameters 要求在信令线程上调用。BlockingCall 在"本来就在该线程"时
+    // 会直接执行，不会自锁。
+    webrtc::Thread *signaling = m_connection->signaling_thread();
+    if (signaling == nullptr)
+        return;
+
+    const bool active = m_movieAudioSending;
+    signaling->BlockingCall([this, active]() {
+        if (m_movieAudioSender == nullptr)
+            return;
+
+        webrtc::RtpParameters parameters = m_movieAudioSender->GetParameters();
+        if (parameters.encodings.empty()) {
+            LOG_DEBUG("PeerLink") << m_peerId << "电影音轨 sender 没有 encoding，"
+                                                 "无法设置发送状态";
+            return;
+        }
+
+        // **不能因为缓存里已经是目标值就跳过**：协商前 SetParameters 写的是
+        // 当时的 sender 参数，随后 SetLocalDescription/SetRemoteDescription
+        // 会把发送流重新启动起来，而缓存里的 active 仍是旧值。必须在连接建立
+        // 后真正再调用一次，UpdateSendState() 才会执行 Stop()。
+        parameters.encodings[0].active = active;
+
+        const webrtc::RTCError error = m_movieAudioSender->SetParameters(parameters);
+        if (!error.ok()) {
+            // 协商完成前 SendStream 尚未建立，这里会失败；OnConnectionChange
+            // 中会在连上之后补一次。连上后仍失败才是真正的问题。
+            LOG_DEBUG("PeerLink") << m_peerId << "设置电影音轨发送状态失败(目标"
+                                  << (active ? "开" : "关") << "):"
+                                  << error.message();
+            return;
+        }
+
+        LOG_INFO("PeerLink") << m_peerId << (active ? "恢复发送电影音轨"
+                                                    : "停止发送电影音轨");
+    });
+}
+
+// ============================
+// 数据通道
+// ============================
+
+void PeerLink::attachDataChannel(
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel) {
+    if (channel == nullptr)
+        return;
+
+    bool accepted = false;
+    bool shouldClose = false;
+    {
+        webrtc::MutexLock lock(&m_dataChannelLock);
+        if (m_dataChannelClosing) {
+            // 连接已在拆除流程中，别再挂上来
+            shouldClose = true;
+        } else if (m_dataChannel == nullptr) {
+            m_dataChannel = channel;
+            accepted = true;
+        } else if (m_dataChannel.get() != channel.get()) {
+            // offer 方已有一条本地创建的通道，answer 方则是首次到达。
+            // 同一连接上只认一条（旧版对端两侧都创建时会到这里）
+            LOG_WARN("PeerLink") << m_peerId << "忽略重复的数据通道:"
+                                 << channel->label();
+            shouldClose = true;
+        }
+    }
+
+    if (shouldClose) {
+        channel->Close();
+        return;
+    }
+    if (!accepted)
+        return;
+
+    channel->RegisterObserver(m_channelObserver.get());
+
+    // 注册期间连接可能已经开始拆除（close() 并发进来）。这种情况下
+    // 取消注册，避免回调落在已经作废的通道上。
+    {
+        webrtc::MutexLock lock(&m_dataChannelLock);
+        if (m_dataChannelClosing || m_dataChannel.get() != channel.get()) {
+            channel->UnregisterObserver();
+            return;
+        }
+    }
+
+    // 注册时通道可能已经打开，OnStateChange 不会补发，这里主动对一次状态
+    onDataChannelStateChanged();
+}
+
+void PeerLink::onDataChannelStateChanged() {
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel;
+    {
+        webrtc::MutexLock lock(&m_dataChannelLock);
+        channel = m_dataChannel;
+    }
+    if (channel == nullptr)
+        return;
+
+    const webrtc::DataChannelInterface::DataState state = channel->state();
+    if (state == webrtc::DataChannelInterface::kOpen) {
+        bool reported = false;
+        {
+            webrtc::MutexLock lock(&m_dataChannelLock);
+            if (!m_dataChannelOpenReported) {
+                m_dataChannelOpenReported = true;
+                m_dataChannelClosedReported = false;
+                reported = true;
+            }
+        }
+        if (reported) {
+            LOG_INFO("PeerLink") << (m_peerId + ":" + linkId()) << "数据通道已打开";
+            emit dataChannelOpened(m_peerId);
+        }
+        return;
+    }
+
+    if (state == webrtc::DataChannelInterface::kClosing
+        || state == webrtc::DataChannelInterface::kClosed) {
+        bool reported = false;
+        {
+            webrtc::MutexLock lock(&m_dataChannelLock);
+            if (!m_dataChannelClosedReported) {
+                m_dataChannelClosedReported = true;
+                m_dataChannelOpenReported = false;
+                reported = true;
+            }
+        }
+        if (reported) {
+            LOG_INFO("PeerLink") << (m_peerId + ":" + linkId()) << "数据通道已关闭";
+            emit dataChannelClosed(m_peerId);
+        }
+    }
+}
+
+void PeerLink::onDataChannelMessage(const webrtc::DataBuffer &buffer) {
+    // 到主线程之前就把数据拷出来：buffer 的内存在回调返回后失效
+    const QByteArray data(reinterpret_cast<const char *>(buffer.data.data()),
+                          static_cast<int>(buffer.data.size()));
+    emit dataChannelMessageReceived(m_peerId, buffer.binary, data);
+}
+
+bool PeerLink::isDataChannelOpen() const {
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel;
+    {
+        webrtc::MutexLock lock(&m_dataChannelLock);
+        channel = m_dataChannel;
+    }
+    return channel != nullptr
+           && channel->state() == webrtc::DataChannelInterface::kOpen;
+}
+
+bool PeerLink::sendDataChannelMessage(const QByteArray &data, bool binary) {
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel;
+    {
+        webrtc::MutexLock lock(&m_dataChannelLock);
+        channel = m_dataChannel;
+    }
+    if (channel == nullptr
+        || channel->state() != webrtc::DataChannelInterface::kOpen) {
+        return false;
+    }
+
+    webrtc::DataBuffer buffer(
+        webrtc::CopyOnWriteBuffer(reinterpret_cast<const uint8_t *>(data.constData()),
+                                  static_cast<size_t>(data.size())),
+        binary);
+    return channel->Send(buffer);
 }
 
 void PeerLink::emitError(const QString &message) {

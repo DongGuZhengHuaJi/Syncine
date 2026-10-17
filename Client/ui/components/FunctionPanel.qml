@@ -24,6 +24,8 @@ Rectangle {
     signal urlAddRequested()
     // 要给某一条指定本机文件（本地模式下每人补自己的那一份）
     signal localFileRequested(string itemId)
+    // 打开与某位成员的文件传输窗口
+    signal fileTransferRequested(string peerId, string nickname)
 
     color: Style.card
     radius: Style.radius
@@ -444,12 +446,13 @@ Rectangle {
                             }
                         }
 
-                        // 网链模式：当前条目的准备状态（解析中/下载中 42%/合并中/失败）
+                        // 网链模式：当前条目的准备状态（解析中/下载中 42%/合并中/失败）。
+                        // 用紧凑文案，完整的速度与剩余时间在画面中央的提示里
                         Text {
                             visible: playlistTab.isUrlMode && isCurrent
-                                     && playbackSync.downloadStageText !== ""
+                                     && playbackSync.downloadShortText !== ""
                             Layout.alignment: Qt.AlignVCenter
-                            text: playbackSync.downloadStageText
+                            text: playbackSync.downloadShortText
                             font.pixelSize: 11
                             color: playbackSync.downloadStage === "failed"
                                    ? Style.danger : Style.textFaint
@@ -534,6 +537,29 @@ Rectangle {
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: roomSession.removeFromPlaylist(itemId)
                             }
+                        }
+                    }
+
+                    // 下载进度条：贴在行内容下沿（状态文字里另有百分比与速度）
+                    Rectangle {
+                        visible: playlistTab.isUrlMode && isCurrent
+                                 && playbackSync.downloadStage === "downloading"
+                                 && playbackSync.downloadProgress >= 0
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.topMargin: 51
+                        anchors.leftMargin: 10
+                        anchors.rightMargin: 14
+                        height: 3
+                        radius: 1.5
+                        color: Style.fieldBg
+
+                        Rectangle {
+                            width: parent.width * playbackSync.downloadProgress / 100
+                            height: parent.height
+                            radius: parent.radius
+                            color: Style.accent
                         }
                     }
 
@@ -648,7 +674,8 @@ Rectangle {
                         }
 
                         Column {
-                            width: parent.width - 34 - 9
+                            // 34 头像 + 两侧各 9 间距 + 28 邮件按钮
+                            width: parent.width - 34 - 9 - 9 - 28
                             anchors.verticalCenter: parent.verticalCenter
                             spacing: 3
 
@@ -722,6 +749,62 @@ Rectangle {
                                 font.pixelSize: 11
                                 color: Style.textFaint
                             }
+                        }
+
+                        // 邮件按钮：打开与这位成员的文件传输窗口。
+                        // 自己不显示 —— 没有可用的对端连接。
+                        Item {
+                            id: mailButton
+                            width: 28
+                            height: 28
+                            visible: clientId !== roomSession.clientId
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: Style.radiusSmall
+                                color: mailHover.containsMouse ? Style.fieldHover
+                                                              : "transparent"
+                            }
+
+                            AppIcon {
+                                anchors.centerIn: parent
+                                width: 16
+                                height: 16
+                                name: "mail"
+                                color: mailHover.containsMouse ? Style.accent
+                                                               : Style.textSecondary
+                            }
+
+                            // 有待接收的文件时亮红点，窗口关着也不会漏掉
+                            Rectangle {
+                                visible: pendingFiles > 0
+                                width: 14
+                                height: 14
+                                radius: 7
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                color: Style.danger
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: pendingFiles > 9 ? "9+" : pendingFiles
+                                    font.pixelSize: 9
+                                    color: "#FFFFFF"
+                                }
+                            }
+
+                            MouseArea {
+                                id: mailHover
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.fileTransferRequested(clientId, nickname)
+                            }
+
+                            ToolTip.visible: mailHover.containsMouse
+                            ToolTip.text: pendingFiles > 0 ? "有文件待接收" : "文件传输"
+                            ToolTip.delay: 500
                         }
                     }
                 }

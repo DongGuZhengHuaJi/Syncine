@@ -181,6 +181,12 @@ qt_add_executable(Syncine
         src/session/SessionController.cpp
         src/session/SessionController.h
 
+        # transfer：文件传输（依赖 WebRTC 数据通道，不认识播放器）
+        src/transfer/FileTransferModel.cpp
+        src/transfer/FileTransferModel.h
+        src/transfer/FileTransferManager.cpp
+        src/transfer/FileTransferManager.h
+
         # webrtc
         src/webrtc/WebrtcManager.cpp
         src/webrtc/WebrtcManager.h
@@ -215,6 +221,7 @@ target_include_directories(Syncine
         "${CMAKE_CURRENT_SOURCE_DIR}/src/media"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/playback"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/session"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/transfer"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/webrtc"
         "${CMAKE_CURRENT_BINARY_DIR}" # version.h
 )
@@ -265,6 +272,7 @@ qt_add_qml_module(Syncine
         ui/components/VideoPlayer.qml
         ui/components/PlaybackControl.qml
         ui/components/PlaybackSeekControl.qml
+        ui/components/FileTransferDialog.qml
 
         # Pages
         ui/pages/SettingsPage.qml

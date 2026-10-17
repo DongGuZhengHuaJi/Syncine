@@ -208,7 +208,9 @@ bool SignalingChannel::ensurePeer(const QString &peerId) {
     if (m_webrtcManager->peer(peerId, LinkKind::Voice) != nullptr)
         return true;
 
-    if (!m_webrtcManager->createPeerConnection(peerId))
+    // 数据通道只在发起 offer 的一侧创建（见 WebrtcManager::createPeerConnection）。
+    // shouldInitiate 在建连双方给出的答案相反，正好保证只有一侧创建。
+    if (!m_webrtcManager->createPeerConnection(peerId, shouldInitiate(peerId)))
         return false;
 
     // 一个对端现在有两条连接，各自独立协商，所以要分别监听它们的信号。

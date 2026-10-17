@@ -6,11 +6,14 @@
 #define SYNCINE_PEERLINK_H
 
 #include <atomic>
+#include <memory>
 
+#include <QByteArray>
 #include <QObject>
 #include <QString>
 #include <QVector>
 
+#include "api/data_channel_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/media_stream_interface.h"
 #include "api/rtp_sender_interface.h"
@@ -44,6 +47,7 @@ public:
              const webrtc::PeerConnectionInterface::RTCConfiguration &config,
              bool createDataChannel,
              QObject *parent = nullptr);
+    ~PeerLink() override;
 
     void close();
 
@@ -80,8 +84,14 @@ public:
     void addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track);
     // 添加本地视频轨（只允许 Media 连接调用）
     void addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterface> track);
-    // 添加本地电影音轨（只允许 Media 连接调用）
-    void addLocalMovieAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track);
+    // 添加本地电影音轨（只允许 Media 连接调用）。
+    // sending 决定初始 RTP 参数里的 active：false 时发送流从协商起就不启动。
+    void addLocalMovieAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track,
+                                 bool sending);
+
+    // 控制是否真正发送电影音轨（RTP 参数 encodings[0].active）。
+    // false = 停发 RTP，不只是把它静音；SDP 不变，恢复时无需重新协商。
+    void applyMovieAudioSending(bool active);
 
     // 设置远端视频轨的渲染器。由 WebrtcManager 注入，生命周期比本对象长。
     void setRemoteVideoSink(webrtc::VideoSinkInterface<webrtc::VideoFrame> *sink);
@@ -108,6 +118,13 @@ public:
     // 临时闭麦
     void setAudioMuted(bool muted);
 
+    // ---- 数据通道（文件传输）----
+    // 只在 offer 方创建，answer 方通过 OnDataChannel 拿到同一条通道。
+    // 消息分文本（控制 JSON）与二进制（文件块）两种，通道本身可靠且保序。
+    bool isDataChannelOpen() const;
+    // 发送一条消息。通道未打开或队列已满时返回 false
+    bool sendDataChannelMessage(const QByteArray &data, bool binary);
+
     // 生命周期由 WebrtcManager 管理，Release返回 kOtherRefsRemained
     void AddRef() const override {
         ++m_refCount;
@@ -126,6 +143,13 @@ signals:
     void connected(const QString &peerId, const QString &link);
     void closed(const QString &peerId, const QString &link);
     void errorOccurred(const QString &peerId, const QString &link, const QString &message);
+
+    // 数据通道状态与消息。信号可能从 WebRTC 信令线程发出，
+    // 接收方位于主线程时由 Qt 自动排队投递
+    void dataChannelOpened(const QString &peerId);
+    void dataChannelClosed(const QString &peerId);
+    void dataChannelMessageReceived(const QString &peerId, bool binary,
+                                    const QByteArray &data);
 
 private:
     // ---- PeerConnectionObserver ----
@@ -165,6 +189,15 @@ private:
     void emitError(const QString &message);
     // 把当前画质档位写进视频 sender 的参数（内部会切到信令线程）
     void pushVideoQuality();
+    // 把发送/停发状态写进电影音轨 sender（内部会切到信令线程）
+    void pushMovieAudioSending();
+
+    // ---- 数据通道 ----
+    // 观察者由 DataChannelInterface 在信令线程回调
+    class ChannelObserver;
+    void attachDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> channel);
+    void onDataChannelStateChanged();
+    void onDataChannelMessage(const webrtc::DataBuffer &buffer);
 
     QString m_peerId;
     LinkKind m_kind;
@@ -179,6 +212,12 @@ private:
     webrtc::scoped_refptr<webrtc::RtpSenderInterface> m_videoSender;
     int m_videoMaxBitrateBps = 0;    // 0 = 不设上限(用 WebRTC 默认)
     double m_videoMaxFramerate = 0;  // 0 = 不设上限
+
+    // 电影音轨对应的 sender。encodings[0].active 决定是否真正发送；
+    // false 时 AudioSendStream 会 Stop()，不产生任何 RTP 包。
+    webrtc::scoped_refptr<webrtc::RtpSenderInterface> m_movieAudioSender;
+    // 主线程与信令线程都会读：连接建立后要按它补设一次参数
+    bool m_movieAudioSending = true;
 
     // 对端的视频轨
     webrtc::scoped_refptr<webrtc::VideoTrackInterface> m_remoteVideoTrack;
@@ -198,6 +237,18 @@ private:
 
     // 远端画面往哪送。由 WebrtcManager 注入，生命周期比本对象长。
     webrtc::VideoSinkInterface<webrtc::VideoFrame> *m_remoteVideoSink = nullptr;
+
+    // ---- 数据通道 ----
+    // 观察者回调在 WebRTC 信令线程，send/查询在主线程，故 m_dataChannel
+    // 的读写由 m_dataChannelLock 保护。观察者本身活到本对象析构：
+    // base 类的析构函数是 protected，不能按基类指针删除。
+    std::unique_ptr<ChannelObserver> m_channelObserver;
+    mutable webrtc::Mutex m_dataChannelLock;
+    webrtc::scoped_refptr<webrtc::DataChannelInterface>
+        m_dataChannel RTC_GUARDED_BY(m_dataChannelLock);
+    bool m_dataChannelClosing RTC_GUARDED_BY(m_dataChannelLock) = false;
+    bool m_dataChannelOpenReported RTC_GUARDED_BY(m_dataChannelLock) = false;
+    bool m_dataChannelClosedReported RTC_GUARDED_BY(m_dataChannelLock) = false;
 
     // 等待执行的操作
     PendingOperation m_pendingOperation = PendingOperation::None;

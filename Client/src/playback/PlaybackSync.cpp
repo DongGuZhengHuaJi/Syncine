@@ -214,6 +214,26 @@ QString PlaybackSync::downloadStageText() const
     return {};
 }
 
+QString PlaybackSync::downloadShortText() const
+{
+    if (m_urlDownloader == nullptr)
+        return {};
+
+    const QString stage = m_urlDownloader->stage();
+    if (stage == QLatin1String("probing"))
+        return QStringLiteral("解析中");
+    if (stage == QLatin1String("downloading")) {
+        const int progress = m_urlDownloader->progress();
+        return progress < 0 ? QStringLiteral("下载中")
+                            : QStringLiteral("下载中 %1%").arg(progress);
+    }
+    if (stage == QLatin1String("merging"))
+        return QStringLiteral("合并中");
+    if (stage == QLatin1String("failed"))
+        return QStringLiteral("下载失败");
+    return {};
+}
+
 void PlaybackSync::retryCurrentItem() {
     if (m_session == nullptr)
         return;

@@ -487,6 +487,14 @@ PeerLink *WebrtcManager::createLink(const QString &peerId, LinkKind kind,
         if (m_localAudioTrack != nullptr)
             link->addLocalAudioTrack(m_localAudioTrack);
         link->setRemoteAudioVolume(m_remoteChatVolume);
+
+        // 数据通道只挂在 voice 连接上，原样转发给上层
+        connect(link, &PeerLink::dataChannelOpened,
+                this, &WebrtcManager::dataChannelOpened);
+        connect(link, &PeerLink::dataChannelClosed,
+                this, &WebrtcManager::dataChannelClosed);
+        connect(link, &PeerLink::dataChannelMessageReceived,
+                this, &WebrtcManager::dataChannelMessageReceived);
     } else {
         if (m_localVideoTrack != nullptr) {
             link->addLocalVideoTrack(m_localVideoTrack);
@@ -494,8 +502,12 @@ PeerLink *WebrtcManager::createLink(const QString &peerId, LinkKind kind,
             const VideoQualityPreset preset = presetForQuality(m_videoQuality);
             link->applyVideoQuality(preset.maxBitrateBps, preset.maxFramerate);
         }
-        if (m_localMovieAudioTrack != nullptr)
-            link->addLocalMovieAudioTrack(m_localMovieAudioTrack);
+        if (m_localMovieAudioTrack != nullptr) {
+            // 初始 active 直接写进 init_send_encodings，协商时发送流
+            // 从一开始就是停的（非共享模式）
+            link->addLocalMovieAudioTrack(m_localMovieAudioTrack,
+                                          m_movieAudioSending);
+        }
 
         // 接收侧：远端画面送入共享渲染器
         if (m_remoteRenderer != nullptr)
@@ -583,7 +595,20 @@ void WebrtcManager::removePeer(const QString &peerId) {
     if (links.voice != nullptr || links.media != nullptr) {
         LOG_INFO("WebRTC") << "已移除对端连接:" << peerId << "(剩余" << m_peers.size()
                            << "个对端)";
+        // 数据通道随之消失。通知上层结束进行中的文件传输
+        emit peerRemoved(peerId);
     }
+}
+
+bool WebrtcManager::isDataChannelOpen(const QString &peerId) const {
+    PeerLink *link = peer(peerId, LinkKind::Voice);
+    return link != nullptr && link->isDataChannelOpen();
+}
+
+bool WebrtcManager::sendDataChannelMessage(const QString &peerId,
+                                           const QByteArray &data, bool binary) {
+    PeerLink *link = peer(peerId, LinkKind::Voice);
+    return link != nullptr && link->sendDataChannelMessage(data, binary);
 }
 
 void WebrtcManager::closeAllPeers() {
@@ -1041,6 +1066,22 @@ void WebrtcManager::setMovieAudioEnabled(bool enabled) {
     LOG_DEBUG("WebRTC") << (enabled ? "电影音轨已开启" : "电影音轨已关闭")
                         << "(当前" << m_peers.size() << "个对端)";
     emit movieAudioEnabledChanged(enabled);
+}
+
+void WebrtcManager::setMovieAudioSending(bool enabled) {
+    if (m_movieAudioSending == enabled)
+        return;
+
+    m_movieAudioSending = enabled;
+
+    // 每个对端各有一条 media 连接，也就各有一个电影音轨 sender
+    for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it) {
+        if (it.value().media != nullptr)
+            it.value().media->applyMovieAudioSending(enabled);
+    }
+
+    LOG_DEBUG("WebRTC") << (enabled ? "电影音轨恢复发送" : "电影音轨停止发送")
+                        << "(当前" << m_peers.size() << "个对端)";
 }
 
 void WebrtcManager::pushMovieAudioPcm(const int16_t *data, size_t samplesPerChannel,

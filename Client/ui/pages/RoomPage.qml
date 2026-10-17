@@ -97,6 +97,8 @@ Item {
         if (win && win.visibility === Window.FullScreen)
             win.visibility = root.visibilityBeforeFullscreen
 
+        fileTransferDialog.close()
+
         // 先把麦克风关掉再走。否则人已经离开房间了，麦克风还在采集 ——
         // 系统托盘上的录音指示灯会一直亮着，是用户最先注意到的异常。
         signalingChannel.setAudioEnabled(false)
@@ -159,6 +161,17 @@ Item {
         id: audioSettingsDialog
     }
 
+    // 文件传输：入口在成员列表的邮件按钮上（见 FunctionPanel）
+    FileTransferDialog {
+        id: fileTransferDialog
+    }
+
+    function openTransferDialog(peerId, nickname) {
+        if (peerId === "")
+            return
+        fileTransferDialog.openFor(peerId, nickname)
+    }
+
     FileDialog {
         id: fileDialog
 
@@ -211,6 +224,7 @@ Item {
         function onLeft() {
             addVideoDialog.close()      // 房间都没了,开着的加条目窗口不该留着
             audioSettingsDialog.close() // 同理
+            fileTransferDialog.close()
             if (leaving)
                 return
             const win = root.Window.window
@@ -221,6 +235,18 @@ Item {
             // 被动离开（被服务端断开 / 房间解散）也要把挂着的片子卸掉
             playbackController.unload()
             stackView.pop()
+        }
+    }
+
+    // 收到文件请求：提示一条系统消息；窗口没开着就替对方弹出来
+    // （关掉窗口不影响传输，红点会留在成员列表上）
+    Connections {
+        target: fileTransferManager
+
+        function onIncomingOffer(peerId, peerName, fileName) {
+            root.pushSystem(peerName + " 想发送文件「" + fileName + "」")
+            if (!fileTransferDialog.visible)
+                root.openTransferDialog(peerId, peerName)
         }
     }
 
@@ -456,6 +482,7 @@ Item {
                 onAddRequested: root.requestNewItem()
                 onUrlAddRequested: addVideoDialog.open()
                 onLocalFileRequested: (itemId) => root.requestLocalFile(itemId)
+                onFileTransferRequested: (peerId, nickname) => root.openTransferDialog(peerId, nickname)
             }
         }
     }

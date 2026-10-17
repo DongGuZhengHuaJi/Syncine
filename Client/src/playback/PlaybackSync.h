@@ -83,6 +83,12 @@ class PlaybackSync : public QObject {
                READ downloadStageText
                NOTIFY downloadStateChanged)
 
+    // 播放列表行用的紧凑文案（"下载中 42%"），不含速度/剩余时间 ——
+    // 侧栏只有 336 宽，长文案会挤掉标题
+    Q_PROPERTY(QString downloadShortText
+               READ downloadShortText
+               NOTIFY downloadStateChanged)
+
     // 当前条目是不是直播源。界面用它把进度条/时间换成"直播"标识。
     Q_PROPERTY(bool live
                READ live
@@ -111,6 +117,7 @@ public:
     QString downloadDetail() const;
     QString downloadError() const;
     QString downloadStageText() const;
+    QString downloadShortText() const;
     bool live() const;
 
     // 网链模式：重新准备当前条目（解析或下载失败后点"重试"）

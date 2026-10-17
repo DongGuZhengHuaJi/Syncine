@@ -272,13 +272,26 @@ void UrlDownloader::beginDownload(int /*exitCode*/)
         return;
     }
 
-    m_downloadedBytes = 0;
     m_totalBytes = 0;
+    m_currentFileBytes = 0;
+    m_finishedBytes = 0;
     m_speedBps = 0;
     m_etaSec = -1;
     m_progress = -1;
     m_error.clear();
     m_outputTail.clear();
+
+    // 分离流要下两条，按解析到的确切大小估算整体进度。拿不到大小时退回
+    // 单条流的百分比（见 handleDownloadLine），绝不会算出负数。
+    m_expectedTotalBytes = 0;
+    if (m_selection.video.kind == MediaFormat::Combined) {
+        m_expectedTotalBytes = m_selection.video.bestSize();
+    } else {
+        const qint64 videoBytes = m_selection.video.bestSize();
+        const qint64 audioBytes = m_selection.audio.bestSize();
+        if (videoBytes > 0 && audioBytes > 0)
+            m_expectedTotalBytes = videoBytes + audioBytes;
+    }
     QDir().mkpath(m_destDir);
 
     // 清理旧残留，避免 glob "media.*" 拿到上次的文件
@@ -290,8 +303,12 @@ void UrlDownloader::beginDownload(int /*exitCode*/)
     // 输出名固定成 media.<ext>:扩展名事先不知道（要看源格式，合并后是 mkv）,
     // 结束时在目录里 glob "media.*" 就能拿到。
     m_outputTemplate = m_destDir + QStringLiteral("/media.%(ext)s");
+    // `--progress-template` 中冒号前是**类型**（download/postprocess/...），
+    // 不是字面输出。要得到一个可识别的标记，标记必须写在模板本身里 ——
+    // 曾把 "download:" 当成前缀解析，结果所有进度行都被丢弃，界面永远停在
+    // 「下载中…」。
     const QString progressTemplate = QStringLiteral(
-        "download:%(progress.downloaded_bytes)s %(progress.total_bytes)s "
+        "download:SYNCINE %(progress.downloaded_bytes)s %(progress.total_bytes)s "
         "%(progress.total_bytes_estimate)s %(progress.speed)s %(progress.eta)s");
 
     QStringList options{QStringLiteral("--newline"),
@@ -333,21 +350,28 @@ void UrlDownloader::handleDownloadLine(const QString &line)
     // yt-dlp 在合并时会打 "[Merger] Merging formats into ..." ——
     // 这一段没有任何进度输出，不告诉用户的话界面会卡在 100% 不动
     if (line.contains(QLatin1String("[Merger]"))) {
+        m_progress = 100;
         setStage(QStringLiteral("merging"));
         emit stateChanged();
         return;
     }
 
-    if (!line.startsWith(QLatin1String("download:")))
+    // 标记由上面的 progressTemplate 输出，形如 "SYNCINE 1024 20399323 NA ..."
+    if (!line.startsWith(QLatin1String("SYNCINE ")))
         return;
 
-    const QStringList fields = line.mid(9).split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    const QStringList fields = line.mid(8).split(QLatin1Char(' '), Qt::SkipEmptyParts);
     if (fields.size() < 5)
         return;
 
     double value = 0;
-    if (numberOrNa(fields.at(0), &value))
-        m_downloadedBytes = static_cast<qint64>(value);
+    if (numberOrNa(fields.at(0), &value)) {
+        const qint64 downloaded = static_cast<qint64>(value);
+        // 换到下一条流：后一条的计数从 0 开始，把上一条已下的字节并入基数
+        if (downloaded < m_currentFileBytes && m_currentFileBytes > 0)
+            m_finishedBytes += m_currentFileBytes;
+        m_currentFileBytes = downloaded;
+    }
 
     if (numberOrNa(fields.at(1), &value)) {
         m_totalBytes = static_cast<qint64>(value);
@@ -361,8 +385,12 @@ void UrlDownloader::handleDownloadLine(const QString &line)
     if (numberOrNa(fields.at(4), &value))
         m_etaSec = static_cast<int>(value);
 
-    if (m_totalBytes > 0) {
-        const qint64 percent = qMin<qint64>(100, m_downloadedBytes * 100 / m_totalBytes);
+    if (m_expectedTotalBytes > 0) {
+        const qint64 overall = m_finishedBytes + m_currentFileBytes;
+        const qint64 percent = qMin<qint64>(100, overall * 100 / m_expectedTotalBytes);
+        m_progress = static_cast<int>(qMax<qint64>(0, percent));
+    } else if (m_totalBytes > 0) {
+        const qint64 percent = qMin<qint64>(100, m_currentFileBytes * 100 / m_totalBytes);
         m_progress = static_cast<int>(qMax<qint64>(0, percent));
     } else {
         m_progress = -1; // 总大小未知(DASH/HLS 常见)—— 界面显示不确定进度
@@ -567,6 +595,9 @@ void UrlDownloader::cancel()
     m_selection = MediaSelection();
     m_destDir.clear();
     m_outputTemplate.clear();
+    m_currentFileBytes = 0;
+    m_finishedBytes = 0;
+    m_expectedTotalBytes = 0;
     m_manualFallbackTried = false;
     const bool stageChanged = m_stage != QLatin1String("idle");
     setStage(QStringLiteral("idle"));

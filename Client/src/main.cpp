@@ -24,6 +24,7 @@
 #include "playback/PlaybackSync.h"
 #include "session/RoomSession.h"
 #include "session/SessionController.h"
+#include "transfer/FileTransferManager.h"
 #include "webrtc/SignalingChannel.h"
 #include "webrtc/WebrtcLog.h"
 #include "webrtc/WebrtcManager.h"
@@ -39,18 +40,18 @@ int main(int argc, char *argv[]) {
 
     // WebRTC 自己的日志一律接进日志文件（警告及以上），见 WebrtcLog.h 的说明。
     // 必须在 Log::init 之后：接收器直接写 Log。
-    const bool webRtcVerbose = qEnvironmentVariableIsSet("SYNCINE_WEBRTC_LOG");
-    WebrtcLog::install(webRtcVerbose);
+    // const bool webRtcVerbose = qEnvironmentVariableIsSet("SYNCINE_WEBRTC_LOG");
+    // WebrtcLog::install(webRtcVerbose);
 
     // 诊断开关：设了 SYNCINE_WEBRTC_LOG=1 再额外把它打到终端。
     //
     // 用来查"数据进了适配器却没发出去"这一类问题 —— WebRTC 内部很多失败
     // 是静默的（比如 SetSend 失败只在 LS_ERROR 级别留一行）,平时不该刷屏，
     // 需要时再开。日志文件那份由 WebrtcLog 负责，这里只管终端。
-    if (webRtcVerbose) {
-        webrtc::LogMessage::LogToDebug(webrtc::LS_INFO);
-        webrtc::LogMessage::LogTimestamps(true);
-    }
+    // if (webRtcVerbose) {
+    //     webrtc::LogMessage::LogToDebug(webrtc::LS_INFO);
+    //     webrtc::LogMessage::LogTimestamps(true);
+    // }
 
     // 全局设置（~/.config/Syncine/syncine.ini）。
     // **必须最先构造**:后面好几个对象在构造时就要读它(服务器地址、日志级别、
@@ -92,6 +93,10 @@ int main(int argc, char *argv[]) {
 
     // ---- WebRTC 信令：房间 <-> WebRTC 状态机 ----
     SignalingChannel signalingChannel(&roomSession, &networkManager, &webrtcManager);
+
+    // ---- 文件传输：走 voice 连接上已建立的数据通道 ----
+    // 状态全部保存在这里，QML 的传输窗口只是视图，关掉不影响任务
+    FileTransferManager fileTransferManager(&webrtcManager, &roomSession);
 
     // ICE 配置不在此处提供：它随房间下发（服务端在 room_created / room_joined 中
     // 给出，含 Cloudflare 兑换的临时 TURN 凭据），由 SignalingChannel 在每次建连前
@@ -160,16 +165,22 @@ int main(int argc, char *argv[]) {
                              static_cast<size_t>(format.channelCount()));
                      });
 
-    // 电影音轨的开关：既要在播，又要在"共享"模式。
+    // 电影音轨的两级开关：
+    //   发送层（active）：只有共享模式才真正发 RTP。非共享模式直接停发，
+    //                     不再为没人听的音轨持续付静音包的带宽。
+    //   静音层（enabled）：共享模式下暂停时只静音、不停流，恢复播放没有
+    //                     启动延迟（停流再启动要重新搭编码/打包链路）。
     auto updateMovieAudioEnabled = [&playbackController, &roomSession, &webrtcManager] {
         const bool sharing = roomSession.roomMode() == RoomSession::RoomMode::Share;
         webrtcManager.setMovieAudioEnabled(sharing && playbackController.playing());
+        webrtcManager.setMovieAudioSending(sharing);
     };
 
     QObject::connect(&playbackController, &PlaybackController::playingChanged,
                      &app, updateMovieAudioEnabled);
     QObject::connect(&roomSession, &RoomSession::roomModeChanged,
                      &app, updateMovieAudioEnabled);
+    updateMovieAudioEnabled(); // 启动时对齐一次（默认同步模式 → 停发）
 
     // 视频轨开关：同理，仅在共享模式下开启。
     // 注意 WebRTC 语义：set_enabled(false) 并非停发，而是改发黑帧以保持流不断；
@@ -225,6 +236,7 @@ int main(int argc, char *argv[]) {
     engine->rootContext()->setContextProperty("sessionController", &sessionController);
     engine->rootContext()->setContextProperty("playbackSync", &playbackSync);
     engine->rootContext()->setContextProperty("signalingChannel", &signalingChannel);
+    engine->rootContext()->setContextProperty("fileTransferManager", &fileTransferManager);
     // 界面用的探测器：添加条目时解析链接（标题/时长/画质档位/流列表），只解析不下载；
     // 实际下载走 playbackSync 那条线
     engine->rootContext()->setContextProperty("urlInspector", &urlInspector);

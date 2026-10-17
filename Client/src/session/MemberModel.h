@@ -15,6 +15,7 @@
 #define SYNCINE_MEMBERMODEL_H
 
 #include <QAbstractListModel>
+#include <QHash>
 #include <QList>
 #include <optional>
 
@@ -38,6 +39,8 @@ public:
         IsHostRole,
         LoadedRole,
         DurationRole,
+        // 该成员发来、尚待本端接收的文件数（界面上的红点）
+        PendingFilesRole,
     };
     Q_ENUM(Role)
 
@@ -57,6 +60,8 @@ public:
     std::optional<Member> remove(const QString &clientId);
     // 更新某成员的视频加载状态；返回是否命中
     bool setVideoStatus(const QString &clientId, bool loaded, qint64 duration);
+    // 更新「待接收文件数」。文件传输与成员数据分属两层，由 FileTransferManager 写入
+    bool setPendingFiles(const QString &clientId, int count);
     void clear();
 
     // ---- 只读访问 ----
@@ -85,6 +90,8 @@ private:
     void notifyChanged();
 
     QList<Member> m_members;
+    // 成员快照（Member）由服务端生成，不该塞入纯本地的传输状态，故单列一份
+    QHash<QString, int> m_pendingFiles;
 };
 
 #endif //SYNCINE_MEMBERMODEL_H

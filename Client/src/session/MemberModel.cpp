@@ -36,6 +36,8 @@ QVariant MemberModel::data(const QModelIndex &index, int role) const {
         return member.loaded;
     case DurationRole:
         return member.duration;
+    case PendingFilesRole:
+        return m_pendingFiles.value(member.clientId, 0);
     default:
         return {};
     }
@@ -48,6 +50,7 @@ QHash<int, QByteArray> MemberModel::roleNames() const {
         {IsHostRole, "isHost"},
         {LoadedRole, "loaded"},
         {DurationRole, "duration"},
+        {PendingFilesRole, "pendingFiles"},
     };
 }
 
@@ -59,6 +62,12 @@ void MemberModel::reset(const QList<Member> &members) {
     LOG_DEBUG("Member") << "重置成员表: 数量=" << members.size();
     beginResetModel();
     m_members = members;
+    // 名单之外残留的传输计数一并丢掉（跨房间时不带过去）
+    const QList<QString> pendingIds = m_pendingFiles.keys();
+    for (const QString &id : pendingIds) {
+        if (!contains(id))
+            m_pendingFiles.remove(id);
+    }
     endResetModel();
     notifyChanged();
 }
@@ -87,6 +96,7 @@ std::optional<Member> MemberModel::remove(const QString &clientId) {
 
         beginRemoveRows(QModelIndex(), i, i);
         const Member removed = m_members.takeAt(i);
+        m_pendingFiles.remove(removed.clientId);
         endRemoveRows();
         notifyChanged();
         return removed;
@@ -121,6 +131,26 @@ bool MemberModel::setVideoStatus(const QString &clientId, bool loaded, qint64 du
     return false;
 }
 
+bool MemberModel::setPendingFiles(const QString &clientId, int count) {
+    const int normalized = qMax(0, count);
+    if (m_pendingFiles.value(clientId, 0) == normalized)
+        return true;
+
+    for (int i = 0; i < m_members.size(); ++i) {
+        if (m_members.at(i).clientId != clientId)
+            continue;
+
+        if (normalized == 0)
+            m_pendingFiles.remove(clientId);
+        else
+            m_pendingFiles.insert(clientId, normalized);
+
+        emit dataChanged(index(i), index(i), {PendingFilesRole});
+        return true;
+    }
+    return false;
+}
+
 void MemberModel::clear() {
     if (m_members.isEmpty())
         return;
@@ -128,6 +158,7 @@ void MemberModel::clear() {
     LOG_DEBUG("Member") << "清空成员表: 数量=" << m_members.size();
     beginResetModel();
     m_members.clear();
+    m_pendingFiles.clear();
     endResetModel();
     notifyChanged();
 }

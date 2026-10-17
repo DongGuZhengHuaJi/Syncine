@@ -25,6 +25,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <QByteArray>
 #include <QHash>
 #include <QObject>
 #include <QString>
@@ -87,8 +88,14 @@ public:
     // ---- 对端管理 ----
 
     // 为 peerId 创建两条连接（voice + media）。已存在则直接返回 true（幂等）。
-    // createDataChannel 目前无作用
-    bool createPeerConnection(const QString &peerId, bool createDataChannel = true);
+    // createDataChannel 只应为 true 的一侧（offer 方）传入：数据通道随 offer
+    // 协商，answer 方通过 OnDataChannel 拿到同一条，无需自行创建。
+    bool createPeerConnection(const QString &peerId, bool createDataChannel = false);
+
+    // ---- 数据通道（文件传输）----
+    // 通道挂在 voice 连接上（该连接在所有模式下都会建立）
+    bool isDataChannelOpen(const QString &peerId) const;
+    bool sendDataChannelMessage(const QString &peerId, const QByteArray &data, bool binary);
 
     // 关闭并销毁某对端的两条连接。对端离开房间时调用。
     void removePeer(const QString &peerId);
@@ -181,10 +188,17 @@ public:
     void pushMovieAudioPcm(const int16_t *data, size_t samplesPerChannel,
                            int sampleRate, size_t channels);
 
-    // 开关电影音轨。暂停或非共享时关闭以节省带宽，轨道本身保留在 SDP 中不动。
+    // 开关电影音轨（只控制静音）。暂停或非共享时关闭；轨道本身保留在 SDP 中不动。
     void setMovieAudioEnabled(bool enabled);
 
+    // 控制电影音轨是否真正发送 RTP（encodings[0].active）。
+    // 非共享模式传 false：发送流 Stop()，不再发静音包，省带宽。
+    // 共享模式应保持 true —— 暂停时只需 setMovieAudioEnabled(false) 静音，
+    // 保持流热，恢复播放时没有启动延迟。
+    void setMovieAudioSending(bool enabled);
+
     bool movieAudioEnabled() const;
+    bool movieAudioSending() const { return m_movieAudioSending; }
 
     // ---- 接收端音量（0.0 ~ 1.0，1.0 为原始音量）----
     // 两条路径的音量由不同机制实现：
@@ -275,6 +289,15 @@ signals:
     // 选中的设备变化。名字为 "" 表示系统默认。QML 显示当前选择与落盘均使用它。
     void recordingDeviceChanged(const QString &name);
     void playoutDeviceChanged(const QString &name);
+
+    // ---- 数据通道 ----
+    // 接收可能来自 WebRTC 信令线程，连接方在主线程时由 Qt 排队投递
+    void dataChannelOpened(const QString &peerId);
+    void dataChannelClosed(const QString &peerId);
+    void dataChannelMessageReceived(const QString &peerId, bool binary,
+                                    const QByteArray &data);
+    // 对端连接被移除（离开房间 / 重建）。文件传输据此结束进行中的任务
+    void peerRemoved(const QString &peerId);
 
 private:
     // 一个对端的两条连接。裸指针 + Qt 父子关系：
@@ -415,6 +438,10 @@ private:
 
     // 当前推送画质。默认为原画（不额外设限）
     VideoQuality m_videoQuality = VideoQuality::Original;
+
+    // 电影音轨是否真正发送。默认 true；启动后由 main 按房间模式对齐
+    // （非共享模式会立刻置 false）。
+    bool m_movieAudioSending = true;
 
     // 接收侧：WebRTC 帧 → QVideoFrame → QVideoSink。
     // 所有对端共用一个——房间里同时只显示一路视频。

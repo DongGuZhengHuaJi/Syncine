@@ -20,6 +20,8 @@ logs
 
 Client/tools/*
 
+Client/CMakeUserPresets.json
+
 # 工具目录的说明文档要跟着仓库走（讲清版本、来源、许可），
 # 它被上面的规则误伤了，这里放行。
 !Client/tools/README.md
