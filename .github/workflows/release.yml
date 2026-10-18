@@ -42,7 +42,9 @@ jobs:
           fi
           mkdir -p webrtc
           curl -fL --retry 3 -o webrtc.tar.zst "${WEBRTC_ASSET_URL}"
-          tar --zstd -xf webrtc.tar.zst -C webrtc
+          # 产物顶层是 webrtc-linux-<arch>-<rev>/，剥掉这一层，
+          # 使 webrtc/ 本身可以直接作为 WEBRTC_ROOT（含 api/ 与 out/）
+          tar --zstd -xf webrtc.tar.zst -C webrtc --strip-components=1
 
       - name: 配置
         run: |
