@@ -22,6 +22,23 @@
 
 - 修正 yt-dlp 进度模板的解析错误：`download:` 是模板类型前缀而非输出内容，导致下载进度一直停留在「下载中…」
 
+## [1.0.1] — 2026-10-17
+
+### 平台支持
+
+- **Windows 客户端**：新增 Windows 构建与运行支持
+  - `FindWebRTC.cmake` 增加 WIN32 分支（`webrtc.lib`、`WEBRTC_WIN` 平台宏、系统库清单，不走 CREL/lld）
+  - MSVC 关闭 RTTI（`/GR-`）；打包时随附 VC++ 运行库；固定 Qt Quick Controls 2 样式
+  - 新增 WebRTC 补丁 `0003-win-com-apartment.patch`：修复 Qt 的 STA 与 WebRTC 音频路径 MTA 冲突导致的启动崩溃
+  - `Log` / `Toolchain` 增加 Windows 可移植性处理；README 按平台拆分构建与运行说明
+- 新增 `scripts/fetch-webrtc.sh`、`scripts/pack-webrtc.sh`，用于下载和打包 WebRTC 预编译产物
+
+### 修复
+
+- **Windows 端「跟随系统默认」落到错误设备**：默认设备不再被翻译成 ADM 索引 0，Windows 上改用 `kDefaultCommunicationDevice`；修复两个 Windows 客户端互相听不到语音的问题
+- **单声道电影声被整帧丢弃**：接收端接受单声道并铺成立体声播放；SDP 日志补上 `fmtp` 行，便于排查 `stereo=1` 协商
+- **WebRTC 内部日志未落盘**：新增 `WebrtcLog`，默认收集警告及以上；设置 `SYNCINE_WEBRTC_LOG=1` 时包含 INFO
+
 ## [1.0.0] — 2026-10-15
 
 首个公开版本。
