@@ -29,10 +29,9 @@ jobs:
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.10.2'
-          # 除基础模块外还要显式装这些：QuickControls2 是 CMake 硬依赖，
-          # Quick.Dialogs 被 QML 的 FileDialog 使用（qt_generate_deploy_qml_app_script
-          # 在打包时也会扫描它）。
-          modules: 'qtmultimedia qtwebsockets qtquickcontrols2 qtquickdialogs2'
+          # QuickControls2 / Quick.Dialogs 在 6.10.2 已并入基础 qtdeclarative，
+          # aqt 里没有同名独立包（写了会直接报 packages not found）
+          modules: 'qtmultimedia qtwebsockets'
 
       - name: 下载随包工具
         run: ./scripts/fetch-tools.sh
@@ -115,7 +114,7 @@ jobs:
   #     - uses: jurplel/install-qt-action@v4
   #       with:
   #         version: '6.10.2'
-  #         modules: 'qtmultimedia qtwebsockets qtquickcontrols2 qtquickdialogs2'
+  #         modules: 'qtmultimedia qtwebsockets'
   #     - name: 下载随包工具
   #       shell: bash
   #       run: ./scripts/fetch-tools.sh
