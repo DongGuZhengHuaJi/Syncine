@@ -17,12 +17,20 @@ jobs:
       - name: 安装构建依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build clang lld
+          # libwebrtc.a 的链接需要 X11/GL 系列开发包；GitHub 的
+          # ubuntu-24.04 镜像不保证这些都在，显式装上
+          sudo apt-get install -y \
+            ninja-build clang lld \
+            libgl1-mesa-dev \
+            libx11-dev libxcomposite-dev libxdamage-dev libxext-dev \
+            libxfixes-dev libxrandr-dev libxrender-dev libxtst-dev
 
       - name: 安装 Qt
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.10.2'
+          # QuickControls2 / Quick.Dialogs 在 6.10.2 已并入基础 qtdeclarative，
+          # aqt 里没有同名独立包（写了会直接报 packages not found）
           modules: 'qtmultimedia qtwebsockets'
 
       - name: 下载随包工具
@@ -42,7 +50,9 @@ jobs:
           fi
           mkdir -p webrtc
           curl -fL --retry 3 -o webrtc.tar.zst "${WEBRTC_ASSET_URL}"
-          tar --zstd -xf webrtc.tar.zst -C webrtc
+          # 产物顶层是 webrtc-linux-<arch>-<rev>/，剥掉这一层，
+          # 使 webrtc/ 本身可以直接作为 WEBRTC_ROOT（含 api/ 与 out/）
+          tar --zstd -xf webrtc.tar.zst -C webrtc --strip-components=1
 
       - name: 配置
         run: |

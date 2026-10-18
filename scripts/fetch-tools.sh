@@ -9,11 +9,12 @@
 #   ./scripts/fetch-tools.sh --force    # 已存在也重新下载
 #
 # 设计取舍：
-#   yt-dlp 按**版本号**钉死（URL 里带版本），哈希可长期校验。
-#   ffmpeg 用 BtbN 的 master-latest（该 URL 始终指向最新构建），所以钉不住
-#   版本 —— 本机的哈希只对记录的某个构建有效。哈希不匹配时脚本会**拒绝**
-#   安装并提示如何更新，而不会静默接受一个来路不明的二进制。
-#   要严格复现，请把 FFMPEG_URL 换成一个带日期标签的具体资源。
+#   yt-dlp 按**版本号**钉死（URL 里带版本），哈希严格校验。
+#   ffmpeg 用 BtbN 的 master-latest（该 URL 始终指向最新构建），版本无法
+#   钉死 —— 下面的哈希只是「最近一次记录过的构建」，上游重新构建后必然
+#   对不上。此时只告警并继续安装（CI 跟随上游最新），不中断打包。
+#   要严格复现，请把 FFMPEG_URL 换成一个带日期标签的具体资源，并把
+#   verify 的 strict 参数改回 1。
 
 set -euo pipefail
 
@@ -22,7 +23,7 @@ YTDLP_VERSION="2026.08.19"
 YTDLP_SHA256_linux_x86_64="58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a"
 
 # ffmpeg 来自 BtbN/FFmpeg-Builds 的 lgpl 版（只做转封装，不需要 GPL 编码器，
-# 分发义务最轻）。下列哈希对应 N-127271-gba987fe24d-20261010 那次构建。
+# 分发义务最轻）。下列哈希记录的是最近一次人工核对过的构建。
 FFMPEG_BUILD="N-127271-gba987fe24d-20261010"
 FFMPEG_SHA256_linux_x86_64_ffmpeg="3b22c09db3600f234ef317ca61609c86d605359ca4164b8801f7e9e5bdb435ae"
 FFMPEG_SHA256_linux_x86_64_ffprobe="97803e1c1034443c6e696a72be65f1a17c6d8b2335a0eb33cb28204d2a9e8074"
@@ -36,13 +37,15 @@ die() { echo "错误：$*" >&2; exit 1; }
 warn() { echo "警告：$*" >&2; }
 
 # 校验哈希。第二个参数为空表示「没有记录可用的哈希」。
+# strict=1（默认）：不符即失败；strict=0：只告警，继续使用（跟随上游最新）。
 verify() {
-    local file="$1" want="$2"
+    local file="$1" want="$2" strict="${3:-1}"
     [ -n "${want}" ] || die "没有 $(basename "$file") 的记录哈希，拒绝安装未校验的二进制"
     local got
     got="$(sha256sum "$file" | cut -d' ' -f1)"
     if [ "${got}" != "${want}" ]; then
-        cat >&2 <<EOF
+        if [ "${strict}" -eq 1 ]; then
+            cat >&2 <<EOF
 错误：$(basename "$file") 的哈希与记录不符，已删除。
 
   期望：${want}
@@ -51,8 +54,13 @@ verify() {
 上游很可能重新构建过。请人工确认这份二进制可信，然后把脚本里对应的
 SHA256 变量更新成上面那个「实际」值。
 EOF
-        rm -f "$file"
-        exit 1
+            rm -f "$file"
+            exit 1
+        fi
+        warn "$(basename "$file") 的哈希已变化，继续使用（跟随 BtbN master-latest）"
+        echo "    记录的构建：${FFMPEG_BUILD}" >&2
+        echo "    期望：${want}" >&2
+        echo "    实际：${got}" >&2
     fi
 }
 
@@ -126,8 +134,10 @@ fetch_ffmpeg() {
     [ -n "${lic}" ] && cp "${lic}" "${DEST}/ffmpeg/LICENSE.txt"
 
     if [ "${tag}" = "linux64" ]; then
-        verify "${DEST}/ffmpeg/ffmpeg"  "${FFMPEG_SHA256_linux_x86_64_ffmpeg}"
-        verify "${DEST}/ffmpeg/ffprobe" "${FFMPEG_SHA256_linux_x86_64_ffprobe}"
+        # 倒数第二个参数 0 = 哈希不符只告警。ffmpeg 跟随 master-latest，
+        # 上游重新构建是常态，不能因此让 CI 失败。
+        verify "${DEST}/ffmpeg/ffmpeg"  "${FFMPEG_SHA256_linux_x86_64_ffmpeg}"  0
+        verify "${DEST}/ffmpeg/ffprobe" "${FFMPEG_SHA256_linux_x86_64_ffprobe}" 0
     else
         warn "未校验 ${tag} 版 ffmpeg 的哈希（本仓库只验证过 linux64 那份）
     这同时说明：那份二进制尚未在本仓库的构建里验证过，Windows 支持也未实测。"
