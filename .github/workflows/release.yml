@@ -110,9 +110,11 @@ jobs:
   windows:
     name: Windows 包
     needs: linux
-    # 固定 windows-2022：windows-latest 已切到 Windows 2025 + VS 2026，
-    # 而 Qt 官方包与预编译 webrtc.lib 都是 MSVC 2022 ABI，生成器也要用 17 2022。
-    runs-on: windows-2022
+    # 预编译 webrtc.lib 是 Chromium clang-cl 24 + VS 2026 (MSVC 14.51) STL
+    # 编出来的；用 VS 2022 链接会缺 __std_* 符号。这里固定到 VS 2026 镜像，
+    # 生成器也必须是 Visual Studio 18 2026。Qt 的 msvc2022_64 与其 ABI 兼容
+    # （BUILD-INFO.md 已验证过）。
+    runs-on: windows-2025-vs2026
     steps:
       - uses: actions/checkout@v4
 
@@ -167,7 +169,7 @@ jobs:
       - name: 配置（MSVC + VS 生成器）
         shell: pwsh
         run: |
-          cmake -S Client -B Client/build-release -G "Visual Studio 17 2022" -A x64 `
+          cmake -S Client -B Client/build-release -G "Visual Studio 18 2026" -A x64 `
             -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
             -DWEBRTC_ROOT="$env:WEBRTC_ROOT" `
             -DWEBRTC_WIN_SYSTEM_LIBS="$env:WEBRTC_WIN_SYSTEM_LIBS"

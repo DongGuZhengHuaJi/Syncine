@@ -173,7 +173,7 @@ if(WIN32)
         set(WEBRTC_WIN_SYSTEM_LIBS
                 winmm.lib ws2_32.lib secur32.lib crypt32.lib iphlpapi.lib
                 ole32.lib oleaut32.lib advapi32.lib shlwapi.lib user32.lib gdi32.lib
-                msdmo.lib dmoguids.lib wmcodecdspuuid.lib strmiids.lib
+                msdmo.lib dmoguids.lib wmcodecdspuuid.lib strmiids.lib amstrmid.lib
                 mfuuid.lib mfplat.lib mfreadwrite.lib d3d11.lib dxgi.lib
                 shcore.lib dwmapi.lib authz.lib mscms.lib ksuser.lib bcrypt.lib)
     endif()
