@@ -7,6 +7,12 @@ on:
   # 手动触发，方便在不打 tag 的情况下试跑打包流程
   workflow_dispatch:
 
+# 附加到 Release 需要写仓库内容的权限。默认令牌通常是只读的，
+# 不显式声明会在 softprops/action-gh-release 报
+# "Resource not accessible by integration"。
+permissions:
+  contents: write
+
 jobs:
   linux:
     name: Linux 包
