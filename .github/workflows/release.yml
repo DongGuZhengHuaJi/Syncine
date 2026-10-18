@@ -208,3 +208,79 @@ jobs:
           files: |
             Client/build-release/Syncine-*.zip
             Client/build-release/SHA256SUMS-Windows.txt
+
+  # ====================================================================
+  # 服务端包。
+  #
+  # 服务端只依赖 Boost（asio / beast / uuid，均为 header-only）和 OpenSSL，
+  # 不依赖 Qt，所以单独一个轻量 job，不跟 Linux 客户端共用。
+  #
+  # Server/CMakeLists.txt 目前没有 CPack 配置，这里走 cmake --install
+  # 装到暂存目录后自行打 tar.gz —— 只为出包改构建脚本没必要，也让这个 PR
+  # 的改动范围保持在 release.yml 一个文件内。
+  #
+  # needs: linux —— 同 windows，让 Linux job 先把 Release 建出来，
+  # 避免多个 job 同时创建 Release / 上传资产时互相打架。
+  # ====================================================================
+  server:
+    name: 服务端包
+    needs: linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          # C++23 需要 GCC 13+，ubuntu-24.04 自带 GCC 14，无需额外装编译器
+          sudo apt-get install -y ninja-build libboost-dev libssl-dev
+
+      - name: 确定版本号
+        id: version
+        # 打 tag 发版时用 tag 里的版本，让 Release 中的资产与客户端一致；
+        # 手动触发（workflow_dispatch）时回落到 Server/CMakeLists.txt 的
+        # project VERSION，避免产出一个版本号不明的包。
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            # 取不到就退化成 0.0.0，避免空版本号产出畸形文件名
+            V=$(sed -n 's/^project(Server VERSION \([0-9.]*\).*/\1/p' Server/CMakeLists.txt)
+            echo "value=${V:-0.0.0}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 配置
+        run: |
+          cmake -S Server -B Server/build-release \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: 构建
+        run: cmake --build Server/build-release --parallel
+
+      - name: 打包
+        run: |
+          PKG="Syncine-Server-${{ steps.version.outputs.value }}-Linux-x86_64"
+          # install 规则会把可执行文件放到 <prefix>/bin/Server
+          cmake --install Server/build-release --prefix "$PKG"
+          tar -czf "${PKG}.tar.gz" "${PKG}"
+          mkdir -p dist && mv "${PKG}.tar.gz" dist/
+          # 文件名带 Server 后缀，避免和 Linux/Windows job 的
+          # SHA256SUMS.txt 在 Release 里同名冲突
+          ( cd dist && sha256sum *.tar.gz > SHA256SUMS-Server.txt && cat SHA256SUMS-Server.txt )
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Syncine-Server
+          path: |
+            dist/Syncine-Server-*.tar.gz
+            dist/SHA256SUMS-Server.txt
+
+      - name: 附加到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Syncine-Server-*.tar.gz
+            dist/SHA256SUMS-Server.txt
