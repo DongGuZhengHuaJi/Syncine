@@ -110,7 +110,9 @@ jobs:
   windows:
     name: Windows 包
     needs: linux
-    runs-on: windows-latest
+    # 固定 windows-2022：windows-latest 已切到 Windows 2025 + VS 2026，
+    # 而 Qt 官方包与预编译 webrtc.lib 都是 MSVC 2022 ABI，生成器也要用 17 2022。
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
