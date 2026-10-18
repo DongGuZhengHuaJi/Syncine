@@ -54,14 +54,14 @@ Item {
         messageModel.append({ "who": sessionController.nickname, "text": t })
         // 自己的弹幕要自己补：服务端广播时把发送者排除了（LogicSystem.cpp）,
         // 不会回发给我
-        videoPlayer.pushDanmaku(t)
+        videoPlayer.pushDanmaku(t, sessionController.nickname, true)
         roomSession.sendChat(t)
     }
 
     // 别人发来的：进列表 + 飘弹幕
     function receiveMessage(who, text) {
         messageModel.append({ "who": who, "text": text })
-        videoPlayer.pushDanmaku(text)
+        videoPlayer.pushDanmaku(text, who, false)
     }
 
     function pushSystem(text) {

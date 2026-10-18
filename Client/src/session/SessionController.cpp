@@ -291,6 +291,7 @@ RoomSnapshot SessionController::snapshotFrom(const Protocol::Message &message) c
     snapshot.hasState = message.hasState;
     snapshot.playing = message.playing;
     snapshot.position = message.position;
+    snapshot.rate = message.rate;
     snapshot.videoMismatched = message.videoMismatched;
     snapshot.shortestDuration = message.shortestDuration;
     // 播放列表随 state 一并下发，漏掉这两行会导致入房者看到空列表

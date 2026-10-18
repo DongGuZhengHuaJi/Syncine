@@ -27,6 +27,7 @@
 
 class PlaybackController;
 class UrlDownloader;
+class DanmakuController;
 
 class PlaybackSync : public QObject {
     Q_OBJECT
@@ -58,6 +59,13 @@ class PlaybackSync : public QObject {
     Q_PROPERTY(bool seekable
                READ seekable
                NOTIFY seekableChanged)
+
+    // 统一倍速：房主/本地 = 本地播放器；观众 = 从房主同步来的值。
+    // 共享模式与直播源不支持倍速（见 setPlaybackRate 的说明）。
+    Q_PROPERTY(qreal playbackRate
+               READ playbackRate
+               WRITE setPlaybackRate
+               NOTIFY playbackRateChanged)
 
     // ---- 网链模式的准备进度（给界面显示） ----
     // 解析中 / 下载中 / 合并中 / 就绪 / 失败。共享模式和同步模式下恒为空。
@@ -106,6 +114,7 @@ public:
     PlaybackSync(RoomSession *session,
                  PlaybackController *playback,
                  UrlDownloader *urlDownloader,
+                 DanmakuController *danmaku,
                  QObject *parent = nullptr);
     ~PlaybackSync() override = default;
 
@@ -128,6 +137,9 @@ public:
     qint64 position() const;
     bool playing() const;
     bool seekable() const;
+    qreal playbackRate() const;
+
+    Q_INVOKABLE void setPlaybackRate(qreal rate);
 
     // ---- 统一控制入口（界面只调这几个） ----
     Q_INVOKABLE void play();
@@ -142,13 +154,15 @@ signals:
     void positionChanged();
     void playingChanged();
     void seekableChanged();
+    void playbackRateChanged();
     void downloadStateChanged();
     void liveChanged();
 
 private slots:
     void onLocalPlayingChanged();
     void onLocalSeeked(qint64 position);
-    void onRemoteCommand(RoomSession::PlaybackAction action, qint64 position);
+    void onRemoteCommand(RoomSession::PlaybackAction action, qint64 position,
+                         qreal rate);
     void onPositionUpdate(qint64 position, bool playing);
     void onMediaChanged();
     void onRoomChanged();
@@ -157,6 +171,8 @@ private slots:
     // 网链模式：解析出直链（路径 A,秒开）或开始下载合并（路径 B）
     void onUrlResolved();
     void onUrlReady(const QString &filePath);
+    // 探测结果就绪（含 cid）：开始下载弹幕 XML，与视频下载并行
+    void onUrlProbed();
 
 private:
     void pushVideoStatus();
@@ -168,12 +184,16 @@ private:
     // (缓存只在退出软件时清，见 removeClientTempDir 的说明)
     void cancelOngoingDownload();
     void updateSyncedState(qint64 position, bool playing);
+    // 回到原速。共享模式/直播/离开房间时用；broadcast 为真时把 1.0 发给房间
+    // （只有房主需要发，避免每个客户端各广播一条）。
+    void resetPlaybackRate(bool broadcast);
     // 从成员表里取房主的视频时长（观众端的 duration 来源）
     qint64 hostDuration() const;
 
     RoomSession *m_session = nullptr;
     PlaybackController *m_playback = nullptr;
     UrlDownloader *m_urlDownloader = nullptr;
+    DanmakuController *m_danmaku = nullptr;
 
     // 网链模式：正在准备（解析/下载）的条目，和已经准备好、临时文件还在的条目
     QString m_preparingItemId;
@@ -191,6 +211,7 @@ private:
     qint64 m_syncedPosition = 0;
     bool m_syncedPlaying = false;
     qint64 m_syncedDuration = 0;
+    qreal m_syncedRate = 1.0;
 
     // 房主周期性广播自己的播放位置，观众端据此推进度条。
     // 只有"共享/网链 + 房主 + 播放中"时真正发出，其余时刻空转。

@@ -52,6 +52,14 @@ class PlaybackController : public QObject
                WRITE setMuted
                NOTIFY mutedChanged)
 
+    // 播放速度倍率（1.0 = 原速）。
+    // 音高由 Qt 6.10 的 pitch compensation 保持（ffmpeg 后端默认开启），
+    // 本地不需要自己做时间伸缩；position/duration 仍是媒体时间，进度条不受影响。
+    Q_PROPERTY(qreal playbackRate
+               READ playbackRate
+               WRITE setPlaybackRate
+               NOTIFY playbackRateChanged)
+
     Q_PROPERTY(QMediaPlayer* player
                READ player
                CONSTANT)
@@ -82,6 +90,9 @@ public:
     bool seekable() const;
     qint64 position() const;
     qint64 duration() const;
+
+    qreal playbackRate() const;
+    void setPlaybackRate(qreal playbackRate);
 
     double volume() const;
     void setVolume(double volume);
@@ -164,6 +175,7 @@ signals:
 
     void volumeChanged();
     void mutedChanged();
+    void playbackRateChanged(qreal rate);
 
     void errorOccurred(const QString &message);
 

@@ -10,6 +10,7 @@
 #include "core/Log.h"
 #include "core/MediaHash.h"
 #include "core/UrlDownloader.h"
+#include "danmaku/DanmakuController.h"
 #include "media/FormatModel.h"
 #include "playback/PlaybackController.h"
 
@@ -40,11 +41,13 @@ private:
 PlaybackSync::PlaybackSync(RoomSession *session,
                            PlaybackController *playback,
                            UrlDownloader *urlDownloader,
+                           DanmakuController *danmaku,
                            QObject *parent)
     : QObject(parent),
       m_session(session),
       m_playback(playback),
-      m_urlDownloader(urlDownloader) {
+      m_urlDownloader(urlDownloader),
+      m_danmaku(danmaku) {
 
     if (m_session == nullptr || m_playback == nullptr)
         return;
@@ -53,6 +56,8 @@ PlaybackSync::PlaybackSync(RoomSession *session,
     if (m_urlDownloader != nullptr) {
         connect(m_urlDownloader, &UrlDownloader::resolved,
                 this, &PlaybackSync::onUrlResolved);
+        connect(m_urlDownloader, &UrlDownloader::probed,
+                this, &PlaybackSync::onUrlProbed);
         connect(m_urlDownloader, &UrlDownloader::ready,
                 this, &PlaybackSync::onUrlReady);
         connect(m_urlDownloader, &UrlDownloader::stateChanged,
@@ -80,6 +85,9 @@ PlaybackSync::PlaybackSync(RoomSession *session,
             this, &PlaybackSync::durationChanged);
     connect(m_playback, &PlaybackController::seekableChanged,
             this, &PlaybackSync::seekableChanged);
+    // 本地换挡后界面要立刻更新；远端命令应用时也会走到这里（统一外观）
+    connect(m_playback, &PlaybackController::playbackRateChanged,
+            this, [this](qreal) { emit playbackRateChanged(); });
 
     // ---- 房间 -> 本地播放器 / 同步状态 ----
     connect(m_session, &RoomSession::playbackCommandReceived,
@@ -168,6 +176,54 @@ bool PlaybackSync::seekable() const {
     return m_playback != nullptr && m_playback->seekable();
 }
 
+qreal PlaybackSync::playbackRate() const {
+    if (m_showRemote)
+        return m_syncedRate;
+
+    return m_playback != nullptr ? m_playback->playbackRate() : 1.0;
+}
+
+void PlaybackSync::setPlaybackRate(qreal rate) {
+    rate = qBound(0.25, rate, 4.0);
+
+    // 共享模式第一版不支持倍速：电影音频是"原始 PCM 按实时节奏推给
+    // WebRTC"的，换挡后采样到达速度会跟着变，接收端只能靠 NetEq 变速/丢包，
+    // 表现为断续。直播也没有共同时间轴，播放器对直播换挡的支持不可靠。
+    if (m_session != nullptr && m_session->inRoom()
+        && m_session->roomMode() == RoomSession::RoomMode::Share)
+        return;
+    if (live())
+        return;
+
+    if (qFuzzyCompare(playbackRate(), rate))
+        return;
+
+    // 观众：本地没有媒体，只更新同步状态并把换挡命令发出去
+    if (m_showRemote) {
+        m_syncedRate = rate;
+        emit playbackRateChanged();
+        if (m_session->inRoom())
+            m_session->sendPlayback(RoomSession::PlaybackAction::Rate,
+                                    m_syncedPosition, rate);
+        return;
+    }
+
+    if (m_playback == nullptr)
+        return;
+
+    m_playback->setPlaybackRate(rate);
+
+    // 广播实际生效的值。播放器还没加载媒体时位置未知（-1），只同步倍速，
+    // 不能让接收方按 0 去对齐 —— 那会把正在看的人拖回片头。
+    const qint64 ratePosition = m_playback->hasLoaded()
+                                    ? m_playback->position()
+                                    : -1;
+    if (m_session != nullptr && m_session->inRoom())
+        m_session->sendPlayback(RoomSession::PlaybackAction::Rate,
+                                ratePosition,
+                                m_playback->playbackRate());
+}
+
 // 网链模式的准备进度。其它模式下下载器是空闲的，这几个值自然是空的。
 QString PlaybackSync::downloadStage() const {
     return m_urlDownloader != nullptr ? m_urlDownloader->stage() : QString();
@@ -246,6 +302,10 @@ void PlaybackSync::retryCurrentItem() {
     // 先掐掉可能在跑的那次（失败后通常已经结束；取消是对"下载卡住"的兜底）
     if (m_urlDownloader != nullptr)
         m_urlDownloader->cancel();
+    // 弹幕也一起复位；beginItem 仍会优先复用已有的 danmaku.xml，
+    // 上次没下成功时才会重新拉取
+    if (m_danmaku != nullptr)
+        m_danmaku->reset();
     m_preparedItemId.clear();
     m_preparingItemId.clear();
     // "重试"的意思是**重新下一遍**:把缓存的映射删掉，否则 prepareUrlItem
@@ -397,6 +457,13 @@ void PlaybackSync::onRoomChanged() {
 
     m_playback->setShowingRemote(m_showRemote);
 
+    // 共享模式不支持倍速；离开房间也回到原速。只让房主广播 1.0，
+    // 其它人本地复位即可，避免每个客户端各发一条位置略有差异的换挡命令。
+    if (!m_session->inRoom()
+        || m_session->roomMode() == RoomSession::RoomMode::Share) {
+        resetPlaybackRate(m_session->inRoom() && m_session->isHost());
+    }
+
     // 观众端的时长来自房主的 video_status(成员表里就有)
     m_syncedDuration = hostDuration();
 
@@ -409,6 +476,9 @@ void PlaybackSync::onRoomChanged() {
     // 再发 left()，信号到达时房间号已被清空。所以删的是整个 clientId 目录，
     // 见 UrlDownloader::removeClientTempDir。
     if (!m_session->inRoom()) {
+        // 先把在飞的弹幕请求掐掉，再删临时目录，避免回调晚一步往里写
+        if (m_danmaku != nullptr)
+            m_danmaku->reset();
         if (m_urlDownloader != nullptr) {
             m_urlDownloader->cancel();
             UrlDownloader::removeClientTempDir(m_session->clientId());
@@ -442,11 +512,17 @@ void PlaybackSync::onPlaylistSwitched(const QString &itemId) {
     applyPlaylistItem(itemId);
     emit liveChanged();
     emit gateChanged();
+
+    // 直播没有共同时间轴，播放器对直播倍速的支持也不可靠：切到直播即回原速
+    if (live())
+        resetPlaybackRate(m_session->inRoom() && m_session->isHost());
 }
 
 void PlaybackSync::applyPlaylistItem(const QString &itemId) {
     if (itemId.isEmpty()) {
         // 列表空了：把播放器卸载掉，画面回到"请先加载视频"
+        if (m_danmaku != nullptr)
+            m_danmaku->reset();
         m_playback->unload();
         return;
     }
@@ -456,6 +532,8 @@ void PlaybackSync::applyPlaylistItem(const QString &itemId) {
     // 共享模式的观众不加载任何东西 —— 画面是房主推过来的，
     // 本地文件在他们机器上根本不存在
     if (mode == RoomSession::RoomMode::Share && !m_session->isHost()) {
+        if (m_danmaku != nullptr)
+            m_danmaku->reset();
         m_playback->unload();
         return;
     }
@@ -464,6 +542,11 @@ void PlaybackSync::applyPlaylistItem(const QString &itemId) {
         prepareUrlItem(itemId);
         return;
     }
+
+    // 同步模式 / 共享模式的房主：本地文件，没有 B 站弹幕。
+    // reset() 是幂等的，房间成员刷新时反复调用无副作用。
+    if (m_danmaku != nullptr)
+        m_danmaku->reset();
 
     // 本地模式 / 共享模式的房主：读本机文件映射
     const QString path = m_session->localFileFor(itemId);
@@ -485,6 +568,8 @@ void PlaybackSync::prepareUrlItem(const QString &itemId)
 {
     const QString url = m_session->urlFor(itemId);
     if (url.isEmpty()) {
+        if (m_danmaku != nullptr)
+            m_danmaku->reset();
         m_playback->unload();
         return;
     }
@@ -505,12 +590,22 @@ void PlaybackSync::prepareUrlItem(const QString &itemId)
     if (itemId == m_preparedItemId && m_playback->hasLoaded())
         return; // 已经就绪,播放器上就是它
 
+    // 弹幕与视频同目录、同生命周期。beginItem 对同一目录的在飞请求是幂等的，
+    // 不会因为成员表刷新而反复 abort 重来。
+    const QString dir = UrlDownloader::itemTempDir(
+        m_session->roomId(), m_session->clientId(), itemId);
+    const bool danmakuCached =
+        m_danmaku != nullptr && m_danmaku->beginItem(dir, url);
+
     // 这一条之前下过了（会话内缓存）:直接放，不再解析下载。
     // 缓存文件只在这两种时候消失：退出软件时整体清掉(见 PlaybackSync 的
     // onSessionChanged),或者用户手点重试重新下载（那时会覆盖同一目录）。
     const QString cached = m_session->playlist()->localFile(itemId);
     if (!cached.isEmpty() && QFileInfo::exists(cached)) {
         LOG_INFO("Playback") << "复用已下载的缓存:" << cached;
+        // 弹幕 XML 没命中缓存时，用会话内 cid / 页面 URL 补拉一次
+        if (!danmakuCached && m_danmaku != nullptr)
+            m_danmaku->loadFromUrl();
         m_preparedItemId = itemId;
         m_playback->load(QUrl::fromLocalFile(cached));
         return;
@@ -526,6 +621,8 @@ void PlaybackSync::prepareUrlItem(const QString &itemId)
 
     if (m_urlDownloader == nullptr) {
         // 没有下载器就退回直连（能播就播，不能播会走播放器的错误路径）
+        if (m_danmaku != nullptr)
+            m_danmaku->loadFromUrl();
         m_playback->load(QUrl(url));
         return;
     }
@@ -538,8 +635,7 @@ void PlaybackSync::prepareUrlItem(const QString &itemId)
                          << QStringLiteral("→")
                          << StreamSpec::label(spec, MediaInfo());
     // 下载合并要落盘，目录按条目算（clientId 不能少，见 itemTempDir 的说明）
-    m_urlDownloader->setDownloadDir(
-        UrlDownloader::itemTempDir(m_session->roomId(), m_session->clientId(), itemId));
+    m_urlDownloader->setDownloadDir(dir);
     m_urlDownloader->start(url, spec);
 }
 
@@ -565,6 +661,25 @@ void PlaybackSync::onUrlResolved()
     // 记成"已就绪":直链这条路没有临时文件，但同样不该被反复重新解析
     m_preparedItemId = itemId;
     m_playback->load(QUrl(m_urlDownloader->directUrl()));
+}
+
+void PlaybackSync::onUrlProbed()
+{
+    if (m_danmaku == nullptr || m_urlDownloader == nullptr || m_session == nullptr)
+        return;
+    if (!m_session->inRoom()
+        || m_session->roomMode() != RoomSession::RoomMode::Url)
+        return;
+
+    // 解析这几秒里用户可能已经切走了 —— 不能把新条目的弹幕槽位写进旧结果
+    const QString itemId = m_session->playlist()->currentItemId();
+    if (itemId.isEmpty() || itemId != m_preparingItemId) {
+        LOG_DEBUG("Playback") << "探测结果已过期(条目换过了),丢弃弹幕";
+        return;
+    }
+
+    // 与视频下载并行：XML 很小，通常远早于视频下完
+    m_danmaku->loadFor(m_urlDownloader->mediaInfo());
 }
 
 void PlaybackSync::onUrlReady(const QString &filePath)
@@ -640,19 +755,43 @@ void PlaybackSync::pushVideoStatus() {
 // 房间 -> 本地 / 同步状态
 // ============================
 
-void PlaybackSync::onRemoteCommand(RoomSession::PlaybackAction action, qint64 position) {
+void PlaybackSync::onRemoteCommand(RoomSession::PlaybackAction action, qint64 position,
+                                   qreal rate) {
     if (m_session == nullptr || m_playback == nullptr)
         return;
 
+    rate = qBound(0.25, rate, 4.0);
+
     // 观众端：命令是"状态更新",不是驱动本地播放器（观众没有媒体）
     if (m_showRemote) {
+        if (action == RoomSession::PlaybackAction::Rate) {
+            // 共享模式的观众没有本地播放器，倍速只用于同步状态（界面在
+            // 共享模式下本来就藏起了倍速入口，这里保持状态一致而已）
+            if (!qFuzzyCompare(m_syncedRate, rate)) {
+                m_syncedRate = rate;
+                emit playbackRateChanged();
+            }
+            return;
+        }
         updateSyncedState(position, action == RoomSession::PlaybackAction::Play);
         return;
     }
 
     const RemoteScope scope(m_applyingRemote);
 
-    // 三种动作都先对齐位置，再执行动作。
+    if (action == RoomSession::PlaybackAction::Rate) {
+        // 换挡命令带位置，但只有在明显对不上时才 seek —— 换挡本身不该让画面卡一下。
+        // 同步模式没有周期性纠偏，所以这个对齐比其它模式更重要。
+        // position < 0 表示发送方没有已加载的媒体，此时只换挡、不对齐。
+        if (position >= 0 && !live() && m_playback->hasLoaded()
+            && qAbs(m_playback->position() - position) > 500)
+            m_playback->seek(position);
+
+        m_playback->setPlaybackRate(rate);
+        return;
+    }
+
+    // 其余动作都先对齐位置，再执行动作。
 
     if (!live())
         m_playback->seek(position);
@@ -669,7 +808,31 @@ void PlaybackSync::onRemoteCommand(RoomSession::PlaybackAction action, qint64 po
         break;
 
     case RoomSession::PlaybackAction::Seek:
+    case RoomSession::PlaybackAction::Rate:
         break;
+    }
+}
+
+void PlaybackSync::resetPlaybackRate(bool broadcast) {
+    const bool localChanged = m_playback != nullptr
+                              && !qFuzzyCompare(m_playback->playbackRate(), 1.0);
+
+    if (localChanged)
+        m_playback->setPlaybackRate(1.0);
+
+    const bool syncedChanged = !qFuzzyCompare(m_syncedRate, 1.0);
+    if (syncedChanged) {
+        m_syncedRate = 1.0;
+        emit playbackRateChanged();
+    }
+
+    if (broadcast && m_session != nullptr && m_session->inRoom()
+        && (localChanged || syncedChanged)) {
+        const qint64 ratePosition = (m_playback != nullptr && m_playback->hasLoaded())
+                                        ? m_playback->position()
+                                        : -1;
+        m_session->sendPlayback(RoomSession::PlaybackAction::Rate,
+                                ratePosition, 1.0);
     }
 }
 

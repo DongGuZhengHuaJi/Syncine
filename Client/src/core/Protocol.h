@@ -79,12 +79,13 @@ struct Message {
     QString from;
     QString text;
 
-    // playback：action + position
-    // room_joined 中的 state.playing / state.position 也复用这两个字段
+    // playback：action + position（rate 仅换挡动作有意义）
+    // room_joined 中的 state.playing / state.position / state.rate 也复用这几个字段
     QString action;
     bool hasState = false;
     bool playing = false;
     qint64 position = 0;
+    qreal rate = 1.0;
 
     // webrtc_*
     //
@@ -121,7 +122,8 @@ QString encodeSetRoomMode(const QString &mode);
 
 QString encodeChat(const QString &text);
 
-QString encodePlayback(const QString &action, qint64 position);
+// action 为 "rate" 时携带 rate（1.0 = 原速）；其它动作忽略该参数
+QString encodePlayback(const QString &action, qint64 position, qreal rate = 1.0);
 
 QString encodePlaybackPosition(qint64 position, bool playing);
 

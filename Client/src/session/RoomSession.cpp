@@ -161,12 +161,15 @@ void RoomSession::enterRoom(const RoomSnapshot &snapshot) {
     // 先发 entered，使 PlaybackSync 有机会上报自身的视频状态
     emit entered();
 
-    // 服务端附带房间当前播放状态，新成员据此对齐：先 seek 再 play/pause
+    // 服务端附带房间当前播放状态，新成员据此对齐：先换挡，再 seek，最后 play/pause
     if (snapshot.hasState) {
-        emit playbackCommandReceived(PlaybackAction::Seek, snapshot.position);
+        emit playbackCommandReceived(PlaybackAction::Rate,
+                                     snapshot.position, snapshot.rate);
+        emit playbackCommandReceived(PlaybackAction::Seek, snapshot.position,
+                                     snapshot.rate);
         emit playbackCommandReceived(
             snapshot.playing ? PlaybackAction::Play : PlaybackAction::Pause,
-            snapshot.position);
+            snapshot.position, snapshot.rate);
     }
 
     // 入房时房间可能已在播放某一条，通知下游解析并加载
@@ -251,11 +254,11 @@ void RoomSession::sendChat(const QString &text) {
         emit errorOccurred("未连接到服务器");
 }
 
-void RoomSession::sendPlayback(PlaybackAction action, qint64 position) {
+void RoomSession::sendPlayback(PlaybackAction action, qint64 position, qreal rate) {
     if (!m_inRoom)
         return;
 
-    send(Protocol::encodePlayback(actionToWire(action), position));
+    send(Protocol::encodePlayback(actionToWire(action), position, rate));
 }
 
 void RoomSession::sendPlaybackPosition(qint64 position, bool playing) {
@@ -486,7 +489,8 @@ void RoomSession::handleMemberLeft(const Protocol::Message &message) {
 }
 
 void RoomSession::handlePlayback(const Protocol::Message &message) {
-    emit playbackCommandReceived(actionFromWire(message.action), message.position);
+    emit playbackCommandReceived(actionFromWire(message.action), message.position,
+                                 message.rate);
 }
 
 void RoomSession::handleVideoStatus(const Protocol::Message &message) {
@@ -592,6 +596,8 @@ QString RoomSession::actionToWire(PlaybackAction action) {
         return QStringLiteral("pause");
     case PlaybackAction::Seek:
         return QStringLiteral("seek");
+    case PlaybackAction::Rate:
+        return QStringLiteral("rate");
     }
     return QStringLiteral("seek");
 }
@@ -601,5 +607,9 @@ RoomSession::PlaybackAction RoomSession::actionFromWire(const QString &action) {
         return PlaybackAction::Play;
     if (action == QLatin1String("pause"))
         return PlaybackAction::Pause;
+    if (action == QLatin1String("rate"))
+        return PlaybackAction::Rate;
+    // 未知动作（例如更新版客户端的新命令）退化为 seek：老客户端收到 rate
+    // 时只是跳一下位置，不会把播放状态弄乱
     return PlaybackAction::Seek;
 }

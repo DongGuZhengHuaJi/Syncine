@@ -16,6 +16,20 @@ Rectangle {
     // 共享模式下的推送画质可选项。索引即 WebrtcManager::VideoQuality 的值
     readonly property var videoQualities: ["流畅", "标准", "高清", "原画"]
 
+    // 倍速档位。共享模式与直播不提供（原因见 playbackSync.setPlaybackRate）
+    readonly property var playbackRates: [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+
+    // 弹幕设置的五个档位
+    readonly property var danmakuAreas: [10, 25, 50, 75, 100]
+    readonly property var danmakuSpeedLabels: ["0.5x", "0.75x", "1.0x", "1.25x", "1.5x"]
+
+    function rateLabel(rate) {
+        // 1.0 → "1.0x"，0.75 → "0.75x"
+        return (Math.abs(rate - Math.round(rate)) < 0.001
+                ? rate.toFixed(1)
+                : String(rate)) + "x"
+    }
+
     signal interacted()
     signal danmakuSubmitted(string text)
     signal danmakuToggleRequested()
@@ -89,6 +103,339 @@ Rectangle {
                             qualityPopup.close()
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // 倍速选择浮层：和画质浮层同一套做法（贴在按钮正上方）
+    Popup {
+        id: ratePopup
+
+        parent: rateBtn
+
+        width: 96
+        padding: 0
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        x: rateBtn.width - width
+        y: -height - 8
+
+        background: Rectangle {
+            radius: Style.radius
+            color: "#E6161922"
+            border.width: 1
+            border.color: Style.playerLine
+        }
+
+        contentItem: Column {
+            spacing: 2
+
+            Repeater {
+                model: root.playbackRates
+
+                delegate: Rectangle {
+                    readonly property bool current:
+                        Math.abs(root.playbackRates[index]
+                                 - playbackSync.playbackRate) < 0.001
+
+                    width: ratePopup.width
+                    height: 30
+                    radius: Style.radiusSmall
+                    color: current ? "#2E00AEEC"
+                                   : (rateRow.containsMouse ? "#29FFFFFF" : "transparent")
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: root.rateLabel(root.playbackRates[index])
+                        font.pixelSize: 13
+                        color: current ? Style.accent : Style.playerIcon
+                    }
+
+                    MouseArea {
+                        id: rateRow
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            playbackSync.setPlaybackRate(root.playbackRates[index])
+                            ratePopup.close()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 弹幕设置的小控件 ─────────────────────────
+    component ChoiceChip: Rectangle {
+        id: chip
+
+        property string label: ""
+        property bool current: false
+        signal picked()
+
+        implicitWidth: Math.max(34, chipLabel.implicitWidth + 12)
+        implicitHeight: 24
+        radius: Style.radiusSmall
+        border.width: 1
+        color: chip.current ? "#2E00AEEC"
+                            : (chipMouse.containsMouse ? "#29FFFFFF" : "transparent")
+        border.color: chip.current ? Style.accent : "#33FFFFFF"
+
+        Text {
+            id: chipLabel
+            anchors.centerIn: parent
+            text: chip.label
+            font.pixelSize: 11
+            color: chip.current ? Style.accent : Style.playerIcon
+        }
+
+        MouseArea {
+            id: chipMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: chip.picked()
+        }
+    }
+
+    component PlayerSlider: Slider {
+        id: control
+
+        implicitHeight: 22
+
+        background: Rectangle {
+            x: control.leftPadding
+            y: control.topPadding + control.availableHeight / 2 - height / 2
+            implicitWidth: 100
+            implicitHeight: 3
+            width: control.availableWidth
+            height: implicitHeight
+            color: Style.playerTrack
+
+            Rectangle {
+                width: control.visualPosition * parent.width
+                height: parent.height
+                color: Style.accent
+            }
+        }
+
+        handle: Rectangle {
+            x: control.leftPadding + control.visualPosition
+               * (control.availableWidth - width)
+            y: control.topPadding + control.availableHeight / 2 - height / 2
+            implicitWidth: 10
+            implicitHeight: 10
+            radius: 5
+            color: "#FFFFFF"
+        }
+    }
+
+    component PlayerSwitch: Item {
+        id: toggle
+
+        property bool checked: false
+        signal toggled()
+
+        implicitWidth: 40
+        implicitHeight: 22
+
+        Rectangle {
+            anchors.fill: parent
+            radius: height / 2
+            color: toggle.checked ? Style.accent : "#3DFFFFFF"
+            border.width: 1
+            border.color: toggle.checked ? Style.accent : "#33FFFFFF"
+
+            Rectangle {
+                x: toggle.checked ? parent.width - width - 2 : 2
+                y: 2
+                width: 16
+                height: 16
+                radius: 8
+                color: "#FFFFFF"
+                Behavior on x {
+                    NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+                }
+            }
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: toggle.toggled()
+        }
+    }
+
+    // 弹幕设置浮层。入口是「弹」开关右侧的小三角。
+    Popup {
+        id: danmakuSettingsPopup
+
+        parent: danmakuSettingsBtn
+
+        width: 286
+        padding: 14
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        x: danmakuSettingsBtn.width - width
+        y: -height - 8
+
+        background: Rectangle {
+            radius: Style.radius
+            color: "#E6161922"
+            border.width: 1
+            border.color: Style.playerLine
+        }
+
+        contentItem: ColumnLayout {
+            width: danmakuSettingsPopup.availableWidth
+            spacing: 10
+
+            Text {
+                text: "弹幕设置"
+                color: Style.playerIcon
+                font.pixelSize: 13
+                font.bold: true
+            }
+
+            // 显示区域
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 4
+
+                Text {
+                    text: "显示区域"
+                    color: Style.playerIconDim
+                    font.pixelSize: 11
+                }
+
+                Row {
+                    spacing: 4
+
+                    Repeater {
+                        model: root.danmakuAreas
+
+                        delegate: ChoiceChip {
+                            required property var modelData
+                            label: modelData + "%"
+                            current: appSettings.danmakuArea === modelData
+                            onPicked: appSettings.danmakuArea = modelData
+                        }
+                    }
+                }
+            }
+
+            // 不透明度
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+
+                RowLayout {
+                    Layout.fillWidth: true
+
+                    Text {
+                        text: "不透明度"
+                        color: Style.playerIconDim
+                        font.pixelSize: 11
+                    }
+
+                    Item { Layout.fillWidth: true }
+
+                    Text {
+                        text: Math.round(appSettings.danmakuOpacity) + "%"
+                        color: Style.playerIcon
+                        font.pixelSize: 11
+                    }
+                }
+
+                PlayerSlider {
+                    Layout.fillWidth: true
+                    from: 10
+                    to: 100
+                    stepSize: 5
+                    value: appSettings.danmakuOpacity
+                    onMoved: appSettings.danmakuOpacity = Math.round(value)
+                }
+            }
+
+            // 字号
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+
+                RowLayout {
+                    Layout.fillWidth: true
+
+                    Text {
+                        text: "字号"
+                        color: Style.playerIconDim
+                        font.pixelSize: 11
+                    }
+
+                    Item { Layout.fillWidth: true }
+
+                    Text {
+                        text: Math.round(appSettings.danmakuFontSize) + "%"
+                        color: Style.playerIcon
+                        font.pixelSize: 11
+                    }
+                }
+
+                PlayerSlider {
+                    Layout.fillWidth: true
+                    from: 50
+                    to: 200
+                    stepSize: 10
+                    value: appSettings.danmakuFontSize
+                    onMoved: appSettings.danmakuFontSize = Math.round(value)
+                }
+            }
+
+            // 速度
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 4
+
+                Text {
+                    text: "速度"
+                    color: Style.playerIconDim
+                    font.pixelSize: 11
+                }
+
+                Row {
+                    spacing: 4
+
+                    Repeater {
+                        model: root.danmakuSpeedLabels
+
+                        delegate: ChoiceChip {
+                            required property var modelData
+                            required property int index
+                            label: modelData
+                            current: appSettings.danmakuSpeed === index
+                            onPicked: appSettings.danmakuSpeed = index
+                        }
+                    }
+                }
+            }
+
+            // 随屏幕缩放
+            RowLayout {
+                Layout.fillWidth: true
+
+                Text {
+                    text: "随屏幕缩放"
+                    color: Style.playerIconDim
+                    font.pixelSize: 11
+                }
+
+                Item { Layout.fillWidth: true }
+
+                PlayerSwitch {
+                    checked: appSettings.danmakuScaleWithScreen
+                    onToggled: appSettings.danmakuScaleWithScreen =
+                               !appSettings.danmakuScaleWithScreen
                 }
             }
         }
@@ -253,6 +600,20 @@ Rectangle {
 
             Item { Layout.fillWidth: true }
 
+            // ── 播放速度 ────────────────────────────
+            // 共享模式下禁用：电影音频按实时节奏推流，换挡会让观众端断续；
+            // 直播也禁用：没有共同时间轴，播放器对直播换挡的支持不可靠。
+            ControlButton {
+                id: rateBtn
+                visible: !playbackSync.live
+                         && roomSession.roomMode !== RoomSession.Share
+                onVisibleChanged: if (!visible) ratePopup.close()
+                text: root.rateLabel(playbackSync.playbackRate)
+                tip: "播放速度"
+                active: Math.abs(playbackSync.playbackRate - 1.0) > 0.001
+                onClicked: ratePopup.opened ? ratePopup.close() : ratePopup.open()
+            }
+
             // ── 推送画质 ────────────────────────────
             // 只有共享模式下的房主在推流，所以只有他能设。
             // 观众看不到这个按钮 —— 他们看到的画质由房主决定。
@@ -299,6 +660,18 @@ Rectangle {
                 ToolTip.delay: 500
 
                 onClicked: root.danmakuToggleRequested()
+            }
+
+            // 弹幕设置入口：紧挨着「弹」开关
+            ControlButton {
+                id: danmakuSettingsBtn
+                implicitWidth: 20
+                Layout.preferredWidth: 20
+                text: "▾"
+                tip: "弹幕设置"
+                onClicked: danmakuSettingsPopup.opened
+                           ? danmakuSettingsPopup.close()
+                           : danmakuSettingsPopup.open()
             }
 
             Item { Layout.preferredWidth: 6 }

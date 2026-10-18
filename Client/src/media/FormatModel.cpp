@@ -636,6 +636,10 @@ MediaInfo parseMediaInfo(const QJsonObject &root)
 
     info.live = root.value(QStringLiteral("is_live")).toBool(false);
     info.wasLive = root.value(QStringLiteral("was_live")).toBool(false);
+    info.extractor = root.value(QStringLiteral("extractor")).toString();
+    if (info.extractor.isEmpty())
+        info.extractor = root.value(QStringLiteral("extractor_key")).toString();
+    info.id = root.value(QStringLiteral("id")).toString();
 
     info.formats = parse(root.value(QStringLiteral("formats")).toArray());
 

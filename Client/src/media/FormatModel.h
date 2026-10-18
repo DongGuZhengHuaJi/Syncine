@@ -124,6 +124,12 @@ struct MediaInfo {
     qint64 durationMs = 0;
     bool live = false;       // 正在直播(没有时长、不能下载合并)
     bool wasLive = false;    // 直播回放:有时长,当普通视频处理
+
+    // yt-dlp 的站点标识与平台内 id。弹幕层据此判断是不是 B 站源、
+    // 以及在没有 cid 时按 BV/av/ep 调 API 兜底。
+    QString extractor;       // "BiliBili" / "BiliBiliBangumi" / ...
+    QString id;              // "BV1xx411c7mD" / "267851"(番剧 ep 号) / ...
+
     QList<MediaFormat> formats;
 
     // 多集（yt-dlp 的 _type == "playlist"）:顶层没有 formats,每一集自带。

@@ -197,13 +197,18 @@ long long Room::position() const {
     return m_position;
 }
 
-void Room::updatePlayback(const std::string &action, long long position) {
-    LOG_DEBUG("Room") << "播放状态更新: action=" << action << " position=" << position;
-    m_position = position;
+void Room::updatePlayback(const std::string &action, long long position, double rate) {
+    LOG_DEBUG("Room") << "播放状态更新: action=" << action << " position=" << position
+                      << (action == "rate" ? " rate=" + std::to_string(rate) : "");
+    // position < 0 表示发送方位置未知（换挡时播放器尚未加载），不改房间位置
+    if (position >= 0)
+        m_position = position;
     if (action == "play")
         m_playing = true;
     else if (action == "pause")
         m_playing = false;
+    else if (action == "rate")
+        m_rate = std::clamp(rate, 0.25, 4.0);
     // seek 只改位置，不改变播放状态（暂停中拖动进度条不应使房间变为播放中）
 }
 
@@ -226,6 +231,7 @@ json Room::stateJson(bool includePlaylist) const {
     json state = {
         {"playing", m_playing},
         {"position", m_position},
+        {"rate", m_rate},
     };
 
     // 播放列表随房间状态一起下发，新成员入房即可看到队列与当前条目，

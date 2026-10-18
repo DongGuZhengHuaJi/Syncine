@@ -44,8 +44,8 @@ Item {
     // 控制条上的齿轮：声音设置。弹窗声明在 RoomPage 根上，这里只往上传意图
     signal audioSettingsRequested()
 
-    function pushDanmaku(text) {
-        danmakuLayer.push(text)
+    function pushDanmaku(text, sender, isSelf) {
+        danmakuLayer.push(text, sender, isSelf)
     }
 
     // 播放源不再由 QML 决定：房间的"当前条目"解析成本地文件 / URL 之后，

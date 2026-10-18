@@ -34,7 +34,7 @@ endif()
 # SYNCINE_VERSION 都由它派生。改版本只改这一行。
 # ----------------------------------------------------------------------
 
-project(Syncine VERSION 1.1.0 LANGUAGES CXX)
+project(Syncine VERSION 1.2.0 LANGUAGES CXX)
 
 # WebRTC 使用 C++20
 set(CMAKE_CXX_STANDARD 20)
@@ -165,6 +165,12 @@ qt_add_executable(Syncine
         src/media/UrlInspector.cpp
         src/media/UrlInspector.h
 
+        # danmaku：B 站弹幕 XML 的解析与按播放进度取条目
+        src/danmaku/DanmakuController.cpp
+        src/danmaku/DanmakuController.h
+        src/danmaku/DanmakuXmlParser.cpp
+        src/danmaku/DanmakuXmlParser.h
+
         # playback：本地播放器 + 播放同步策略
         src/playback/PlaybackController.cpp
         src/playback/PlaybackController.h
@@ -218,6 +224,7 @@ target_include_directories(Syncine
         PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/danmaku"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/media"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/playback"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/session"

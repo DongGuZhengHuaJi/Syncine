@@ -569,16 +569,22 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
             room->broadcast(relay, session);
         } else {
             const std::string action = message.value("action", "");
-            const long long position = message.value("position", 0LL);
+            // 换挡消息可能不带 position（发送方没有已加载的媒体）
+            const bool hasPosition = message.contains("position");
+            const long long position = message.value("position", -1LL);
+            const double rate = message.value("rate", 1.0);
 
             // 记录房间最后播放状态，新成员加入时据此对齐
-            room->updatePlayback(action, position);
+            room->updatePlayback(action, position, rate);
 
             json relay;
             relay["type"] = "playback";
             relay["from"] = nickname;
             relay["action"] = action;
-            relay["position"] = position;
+            if (hasPosition)
+                relay["position"] = position;
+            if (action == "rate")
+                relay["rate"] = rate;
             room->broadcast(relay, session);
         }
         return;

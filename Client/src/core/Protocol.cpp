@@ -158,6 +158,8 @@ std::optional<Message> decode(const QString &text) {
         message.hasState = !state.isEmpty();
         message.playing = state.value("playing").toBool();
         message.position = int64Of(state, "position");
+        // 旧服务端没有 rate 字段：默认 1.0，等价于旧行为
+        message.rate = state.value("rate").toDouble(1.0);
         message.playlist = playlistFromJson(state.value("playlist"));
         message.currentIndex = state.contains("currentIndex")
                                    ? state.value("currentIndex").toInt(-1)
@@ -187,7 +189,11 @@ std::optional<Message> decode(const QString &text) {
 
     case MessageType::Playback:
         message.action = object.value("action").toString();
-        message.position = int64Of(object, "position");
+        // rate 动作可能不带 position（发送方还没加载媒体，位置未知）
+        message.position = object.contains("position")
+                               ? int64Of(object, "position")
+                               : -1;
+        message.rate = object.value("rate").toDouble(1.0);
         break;
 
     case MessageType::PlaybackPosition:
@@ -295,11 +301,17 @@ QString encodeChat(const QString &text) {
     return serialize(message);
 }
 
-QString encodePlayback(const QString &action, qint64 position) {
+QString encodePlayback(const QString &action, qint64 position, qreal rate) {
     QJsonObject message;
     message["type"] = "playback";
     message["action"] = action;
-    message["position"] = position;
+    // 换挡时 position 为负表示"发送方没有已加载的媒体，位置未知"，
+    // 此时不带该字段，接收方只换挡、不对齐位置，避免把别人拖到片头。
+    if (position >= 0)
+        message["position"] = position;
+    // 只有换挡动作需要 rate；其它动作不带，旧服务端/旧客户端都按 1.0 处理
+    if (action == QLatin1String("rate"))
+        message["rate"] = rate;
     return serialize(message);
 }
 

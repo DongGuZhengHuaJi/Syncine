@@ -85,6 +85,17 @@ PlaybackController::PlaybackController(QObject *parent)
         }
     );
 
+    // 倍速变化。Qt 可能在引擎重建后重新应用 setPlaybackRate，
+    // 所以统一从这里转发，而不是在 setter 里手动发信号。
+    connect(
+        m_player,
+        &QMediaPlayer::playbackRateChanged,
+        this,
+        [this](qreal rate) {
+            emit playbackRateChanged(rate);
+        }
+    );
+
     // 播放器错误
     connect(
         m_player,
@@ -148,6 +159,18 @@ qint64 PlaybackController::position() const
 qint64 PlaybackController::duration() const
 {
     return m_player->duration();
+}
+
+qreal PlaybackController::playbackRate() const {
+    return m_player->playbackRate();
+}
+
+void PlaybackController::setPlaybackRate(qreal playbackRate) {
+    // 界面只给固定档位，这里兜底防止协议或其它调用方传进异常值。
+    // 0 在 Qt 里意味着"完全停住"，不应作为倍速使用。
+    playbackRate = qBound(0.25, playbackRate, 4.0);
+
+    m_player->setPlaybackRate(playbackRate);
 }
 
 

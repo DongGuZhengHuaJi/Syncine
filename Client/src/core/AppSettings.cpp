@@ -20,6 +20,11 @@ const char *kFallbackServerUrl = "ws://8.148.12.233:8765";
 const char *kKeyServerUrl = "server/userUrl";
 const char *kKeyQuality = "playback/quality";
 const char *kKeyHdrAllowed = "playback/hdrAllowed";
+const char *kKeyDanmakuArea = "danmaku/area";
+const char *kKeyDanmakuOpacity = "danmaku/opacity";
+const char *kKeyDanmakuFontSize = "danmaku/fontSize";
+const char *kKeyDanmakuSpeed = "danmaku/speed";
+const char *kKeyDanmakuScaleWithScreen = "danmaku/scaleWithScreen";
 const char *kKeyMicDevice = "audio/micDevice";
 const char *kKeySpeakerDevice = "audio/speakerDevice";
 const char *kKeyLogLevel = "log/level";
@@ -64,6 +69,11 @@ AppSettings::AppSettings(QObject *parent)
     if (m_defaultQuality == QLatin1String("0"))
         m_defaultQuality.clear();
     m_hdrAllowed = m_settings->value(QLatin1String(kKeyHdrAllowed), false).toBool();
+    m_danmakuArea = qBound(10, m_settings->value(QLatin1String(kKeyDanmakuArea), 100).toInt(), 100);
+    m_danmakuOpacity = qBound(10, m_settings->value(QLatin1String(kKeyDanmakuOpacity), 100).toInt(), 100);
+    m_danmakuFontSize = qBound(50, m_settings->value(QLatin1String(kKeyDanmakuFontSize), 100).toInt(), 200);
+    m_danmakuSpeed = qBound(0, m_settings->value(QLatin1String(kKeyDanmakuSpeed), 2).toInt(), 4);
+    m_danmakuScaleWithScreen = m_settings->value(QLatin1String(kKeyDanmakuScaleWithScreen), true).toBool();
     m_micDevice = m_settings->value(QLatin1String(kKeyMicDevice)).toString();
     m_speakerDevice = m_settings->value(QLatin1String(kKeySpeakerDevice)).toString();
     m_logLevel = m_settings->value(QLatin1String(kKeyLogLevel),
@@ -168,6 +178,61 @@ void AppSettings::setHdrAllowed(bool allowed)
     m_hdrAllowed = allowed;
     m_settings->setValue(QLatin1String(kKeyHdrAllowed), m_hdrAllowed);
     emit hdrAllowedChanged();
+}
+
+void AppSettings::setDanmakuArea(int area)
+{
+    area = qBound(10, area, 100);
+    if (m_danmakuArea == area)
+        return;
+
+    m_danmakuArea = area;
+    m_settings->setValue(QLatin1String(kKeyDanmakuArea), m_danmakuArea);
+    emit danmakuAreaChanged();
+}
+
+void AppSettings::setDanmakuOpacity(int opacity)
+{
+    opacity = qBound(10, opacity, 100);
+    if (m_danmakuOpacity == opacity)
+        return;
+
+    m_danmakuOpacity = opacity;
+    m_settings->setValue(QLatin1String(kKeyDanmakuOpacity), m_danmakuOpacity);
+    emit danmakuOpacityChanged();
+}
+
+void AppSettings::setDanmakuFontSize(int percent)
+{
+    percent = qBound(50, percent, 200);
+    if (m_danmakuFontSize == percent)
+        return;
+
+    m_danmakuFontSize = percent;
+    m_settings->setValue(QLatin1String(kKeyDanmakuFontSize), m_danmakuFontSize);
+    emit danmakuFontSizeChanged();
+}
+
+void AppSettings::setDanmakuSpeed(int speed)
+{
+    speed = qBound(0, speed, 4);
+    if (m_danmakuSpeed == speed)
+        return;
+
+    m_danmakuSpeed = speed;
+    m_settings->setValue(QLatin1String(kKeyDanmakuSpeed), m_danmakuSpeed);
+    emit danmakuSpeedChanged();
+}
+
+void AppSettings::setDanmakuScaleWithScreen(bool enabled)
+{
+    if (m_danmakuScaleWithScreen == enabled)
+        return;
+
+    m_danmakuScaleWithScreen = enabled;
+    m_settings->setValue(QLatin1String(kKeyDanmakuScaleWithScreen),
+                         m_danmakuScaleWithScreen);
+    emit danmakuScaleWithScreenChanged();
 }
 
 void AppSettings::setMicDevice(const QString &deviceName)

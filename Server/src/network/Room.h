@@ -87,7 +87,8 @@ public:
     // 播放状态（用于新成员加入时对齐）
     bool playing() const;
     long long position() const;
-    void updatePlayback(const std::string &action, long long position);
+    // rate 只有 action == "rate" 时才会写进房间状态
+    void updatePlayback(const std::string &action, long long position, double rate);
 
     // ---- 播放列表（都作用于当前模式那一份）----
     const std::vector<PlaylistEntry> &playlist() const;
@@ -138,6 +139,8 @@ private:
 
     bool m_playing = false;
     long long m_position = 0;
+    // 播放速度倍率。服务端不解释语义，只保存并随房间状态下发
+    double m_rate = 1.0;
 
     bool m_videoMismatched = false;
     long long m_shortestDuration = 0;

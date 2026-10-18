@@ -86,6 +86,7 @@ struct RoomSnapshot {
     bool hasState = false;      // 服务端是否下发了 state（未下发则不要对齐播放器）
     bool playing = false;       // state.playing
     qint64 position = 0;        // state.position
+    qreal rate = 1.0;           // state.rate（旧服务端没有该字段，默认 1.0）
     bool videoMismatched = false;
     qint64 shortestDuration = 0;
 

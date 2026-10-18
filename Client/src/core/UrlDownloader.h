@@ -139,7 +139,9 @@ public:
 
 signals:
     void stateChanged();
-    // 解析完成（直链可播、或已经决定要下载）。下载路径上这个信号先于 ready()
+    // 解析完成
+    void probed();
+    // 直链验证通过，可以交给播放器（仅直链路径；下载合并路径走 ready()）
     void resolved();
     void ready(const QString &filePath);
     void failed(const QString &message);

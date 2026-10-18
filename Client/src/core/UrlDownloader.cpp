@@ -196,6 +196,10 @@ void UrlDownloader::handleResolveFinished(int exitCode)
                               << "→" << m_selection.label
                               << (m_selection.direct ? "(直链)" : "(下载合并)");
 
+    // 直链与下载合并都要先让人知道"探测结果已就绪"：下载路径要等
+    // ready() 才发 resolved()，弹幕等到那会儿就太晚了。
+    emit probed();
+
     if (m_selection.direct) {
         // 合一格式（或直播的 m3u8）:试一下能不能直接拉 —— 能就交给播放器
         m_verifyCandidate = m_selection.url;

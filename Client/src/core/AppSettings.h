@@ -69,6 +69,37 @@ class AppSettings : public QObject {
                WRITE setHdrAllowed
                NOTIFY hdrAllowedChanged)
 
+    // ---- 弹幕显示 ----
+    // 显示区域：弹幕只占播放器顶部的这个百分比，档位 10/25/50/75/100。
+    Q_PROPERTY(int danmakuArea
+               READ danmakuArea
+               WRITE setDanmakuArea
+               NOTIFY danmakuAreaChanged)
+
+    // 不透明度：10~100（百分比）
+    Q_PROPERTY(int danmakuOpacity
+               READ danmakuOpacity
+               WRITE setDanmakuOpacity
+               NOTIFY danmakuOpacityChanged)
+
+    // 字号：50~200（百分比）
+    Q_PROPERTY(int danmakuFontSize
+               READ danmakuFontSize
+               WRITE setDanmakuFontSize
+               NOTIFY danmakuFontSizeChanged)
+
+    // 速度档位 0~4，对应 0.5x / 0.75x / 1.0x / 1.25x / 1.5x
+    Q_PROPERTY(int danmakuSpeed
+               READ danmakuSpeed
+               WRITE setDanmakuSpeed
+               NOTIFY danmakuSpeedChanged)
+
+    // 字号是否跟随播放器高度缩放（关闭后使用固定的 720p 基准字号）
+    Q_PROPERTY(bool danmakuScaleWithScreen
+               READ danmakuScaleWithScreen
+               WRITE setDanmakuScaleWithScreen
+               NOTIFY danmakuScaleWithScreenChanged)
+
     // 音频设备：麦克风（采集）与听筒（播放）。
     //
     // 存的是设备名（ADM 给出的显示名），空串 = 跟随系统默认。
@@ -121,6 +152,21 @@ public:
     bool hdrAllowed() const { return m_hdrAllowed; }
     Q_INVOKABLE void setHdrAllowed(bool allowed);
 
+    int danmakuArea() const { return m_danmakuArea; }
+    Q_INVOKABLE void setDanmakuArea(int area);
+
+    int danmakuOpacity() const { return m_danmakuOpacity; }
+    Q_INVOKABLE void setDanmakuOpacity(int opacity);
+
+    int danmakuFontSize() const { return m_danmakuFontSize; }
+    Q_INVOKABLE void setDanmakuFontSize(int percent);
+
+    int danmakuSpeed() const { return m_danmakuSpeed; }
+    Q_INVOKABLE void setDanmakuSpeed(int speed);
+
+    bool danmakuScaleWithScreen() const { return m_danmakuScaleWithScreen; }
+    Q_INVOKABLE void setDanmakuScaleWithScreen(bool enabled);
+
     QString micDevice() const { return m_micDevice; }
     Q_INVOKABLE void setMicDevice(const QString &deviceName);
 
@@ -156,6 +202,11 @@ signals:
     void cookieImportedAtChanged();
     void defaultQualityChanged();
     void hdrAllowedChanged();
+    void danmakuAreaChanged();
+    void danmakuOpacityChanged();
+    void danmakuFontSizeChanged();
+    void danmakuSpeedChanged();
+    void danmakuScaleWithScreenChanged();
     void micDeviceChanged();
     void speakerDeviceChanged();
     void logLevelChanged();
@@ -170,6 +221,11 @@ private:
     // 空 = 最高画质；数字串 = 高度上限（见文件头说明）
     QString m_defaultQuality;
     bool m_hdrAllowed = false;
+    int m_danmakuArea = 100;
+    int m_danmakuOpacity = 100;
+    int m_danmakuFontSize = 100;
+    int m_danmakuSpeed = 2; // 1.0x
+    bool m_danmakuScaleWithScreen = true;
     // 空串 = 跟随系统默认（见上述两个属性的说明）
     QString m_micDevice;
     QString m_speakerDevice;

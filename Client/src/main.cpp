@@ -19,6 +19,7 @@
 #include "core/NetworkManager.h"
 #include "core/Toolchain.h"
 #include "core/UrlDownloader.h"
+#include "danmaku/DanmakuController.h"
 #include "media/UrlInspector.h"
 #include "playback/PlaybackController.h"
 #include "playback/PlaybackSync.h"
@@ -88,8 +89,13 @@ int main(int argc, char *argv[]) {
     UrlDownloader playbackDownloader(&toolchain, &cookieManager);
     UrlInspector urlInspector(&toolchain, &cookieManager);
 
+    // 网链模式的 B 站弹幕：用 yt-dlp 的 danmaku 字幕轨下载 XML，
+    // 再按播放进度供 QML 取条目。声明在 PlaybackSync 之前。
+    DanmakuController danmakuController(&toolchain, &cookieManager);
+
     // ---- 播放同步：唯一同时持有「房间」与「播放器」的地方 ----
-    PlaybackSync playbackSync(&roomSession, &playbackController, &playbackDownloader);
+    PlaybackSync playbackSync(&roomSession, &playbackController, &playbackDownloader,
+                              &danmakuController);
 
     // ---- WebRTC 信令：房间 <-> WebRTC 状态机 ----
     SignalingChannel signalingChannel(&roomSession, &networkManager, &webrtcManager);
@@ -235,6 +241,7 @@ int main(int argc, char *argv[]) {
     engine->rootContext()->setContextProperty("roomSession", &roomSession);
     engine->rootContext()->setContextProperty("sessionController", &sessionController);
     engine->rootContext()->setContextProperty("playbackSync", &playbackSync);
+    engine->rootContext()->setContextProperty("danmakuController", &danmakuController);
     engine->rootContext()->setContextProperty("signalingChannel", &signalingChannel);
     engine->rootContext()->setContextProperty("fileTransferManager", &fileTransferManager);
     // 界面用的探测器：添加条目时解析链接（标题/时长/画质档位/流列表），只解析不下载；

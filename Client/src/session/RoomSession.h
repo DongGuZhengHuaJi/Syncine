@@ -90,7 +90,8 @@ public:
     enum class PlaybackAction {
         Play,
         Pause,
-        Seek
+        Seek,
+        Rate    // 换挡：rate 字段有效，position 用于顺带对齐
     };
     Q_ENUM(PlaybackAction)
 
@@ -170,7 +171,7 @@ public:
     Q_INVOKABLE void switchTo(const QString &itemId);
 
     // ---- 供 PlaybackSync 调用 ----
-    void sendPlayback(PlaybackAction action, qint64 position);
+    void sendPlayback(PlaybackAction action, qint64 position, qreal rate = 1.0);
     void reportVideoStatus(bool loaded, const QString &hash, qint64 duration);
 
     // 房主周期性广播自身播放位置，观众端据此绘制进度条。
@@ -196,7 +197,8 @@ signals:
     void memberLeft(const QString &nickname);
 
     void chatReceived(const QString &from, const QString &text);
-    void playbackCommandReceived(RoomSession::PlaybackAction action, qint64 position);
+    void playbackCommandReceived(RoomSession::PlaybackAction action, qint64 position,
+                                 qreal rate);
 
     // 当前条目变化（或原条目刚被指定本机文件），各端据此重新解析该条目的来源：
     // 同步模式与共享模式下的房主读取本地文件，网链模式读取 url，观众端不处理。
