@@ -17,13 +17,22 @@ jobs:
       - name: 安装构建依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build clang lld
+          # libwebrtc.a 的链接需要 X11/GL 系列开发包；GitHub 的
+          # ubuntu-24.04 镜像不保证这些都在，显式装上
+          sudo apt-get install -y \
+            ninja-build clang lld \
+            libgl1-mesa-dev \
+            libx11-dev libxcomposite-dev libxdamage-dev libxext-dev \
+            libxfixes-dev libxrandr-dev libxrender-dev libxtst-dev
 
       - name: 安装 Qt
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.10.2'
-          modules: 'qtmultimedia qtwebsockets'
+          # 除基础模块外还要显式装这些：QuickControls2 是 CMake 硬依赖，
+          # Quick.Dialogs 被 QML 的 FileDialog 使用（qt_generate_deploy_qml_app_script
+          # 在打包时也会扫描它）。
+          modules: 'qtmultimedia qtwebsockets qtquickcontrols2 qtquickdialogs2'
 
       - name: 下载随包工具
         run: ./scripts/fetch-tools.sh
@@ -106,7 +115,7 @@ jobs:
   #     - uses: jurplel/install-qt-action@v4
   #       with:
   #         version: '6.10.2'
-  #         modules: 'qtmultimedia qtwebsockets'
+  #         modules: 'qtmultimedia qtwebsockets qtquickcontrols2 qtquickdialogs2'
   #     - name: 下载随包工具
   #       shell: bash
   #       run: ./scripts/fetch-tools.sh
