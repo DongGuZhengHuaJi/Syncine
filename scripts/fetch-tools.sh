@@ -101,12 +101,13 @@ fetch_ytdlp() {
 # ---- ffmpeg / ffprobe -------------------------------------------------
 # 只要这两个。ffplay 用不上，不放。
 fetch_ffmpeg() {
-    local tag archive url tmp
+    local tag ext archive url tmp
     case "$(uname -s)" in
-        Linux) tag="linux64" ;;
-        *)     tag="win64" ;;
+        # BtbN 的 Linux 资产是 tar.xz，Windows 是 zip，扩展名不能共用
+        Linux) tag="linux64"; ext="tar.xz" ;;
+        *)     tag="win64";   ext="zip" ;;
     esac
-    archive="ffmpeg-master-latest-${tag}-lgpl.tar.xz"
+    archive="ffmpeg-master-latest-${tag}-lgpl.${ext}"
     url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${archive}"
 
     mkdir -p "${DEST}/ffmpeg"
@@ -117,7 +118,22 @@ fetch_ffmpeg() {
     fetch "${url}" "${tmp}/${archive}"
 
     # 解出来是 ffmpeg-master-latest-<tag>-lgpl/bin/{ffmpeg,ffprobe,ffplay}
-    tar -xJf "${tmp}/${archive}" -C "${tmp}"
+    if [ "${ext}" = "tar.xz" ]; then
+        tar -xJf "${tmp}/${archive}" -C "${tmp}"
+    elif command -v 7z >/dev/null 2>&1; then
+        # Windows 的 7z 是原生程序，Git Bash 下用 cygpath 转成 Windows 路径
+        if command -v cygpath >/dev/null 2>&1; then
+            7z x "$(cygpath -w "${tmp}/${archive}")" \
+                -o"$(cygpath -w "${tmp}")" >/dev/null
+        else
+            7z x "${tmp}/${archive}" -o"${tmp}" >/dev/null
+        fi
+    elif command -v unzip >/dev/null 2>&1; then
+        unzip -q "${tmp}/${archive}" -d "${tmp}"
+    else
+        powershell.exe -NoProfile -Command \
+            "Expand-Archive -LiteralPath '$(cygpath -w "${tmp}/${archive}")' -DestinationPath '$(cygpath -w "${tmp}")' -Force"
+    fi
     local bin_dir
     bin_dir="$(find "${tmp}" -type d -name bin | head -1)"
     [ -n "${bin_dir}" ] || die "压缩包里没找到 bin/ 目录"
