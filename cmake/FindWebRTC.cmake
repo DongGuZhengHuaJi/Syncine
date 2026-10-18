@@ -173,7 +173,7 @@ if(WIN32)
         set(WEBRTC_WIN_SYSTEM_LIBS
                 winmm.lib ws2_32.lib secur32.lib crypt32.lib iphlpapi.lib
                 ole32.lib oleaut32.lib advapi32.lib shlwapi.lib user32.lib gdi32.lib
-                msdmo.lib dmoguids.lib wmcodecdspuuid.lib strmiids.lib
+                msdmo.lib dmoguids.lib wmcodecdspuuid.lib strmiids.lib amstrmid.lib
                 mfuuid.lib mfplat.lib mfreadwrite.lib d3d11.lib dxgi.lib
                 shcore.lib dwmapi.lib authz.lib mscms.lib ksuser.lib bcrypt.lib)
     endif()
@@ -182,6 +182,19 @@ if(WIN32)
             Threads::Threads
             ${WEBRTC_WIN_SYSTEM_LIBS}
     )
+
+    # clang 编出来的 obj 会引用编译器内建函数，预编译产物随附了这份运行时。
+    # 目录里带 clang 版本号（如 clang/24），用 glob 找，免得写死版本。
+    file(GLOB WEBRTC_CLANG_RUNTIME
+            "${WEBRTC_ROOT}/third_party/llvm-build/Release+Asserts/lib/clang/*/lib/windows/clang_rt.builtins-x86_64.lib")
+    if(WEBRTC_CLANG_RUNTIME)
+        target_link_libraries(WebRTC::WebRTC INTERFACE ${WEBRTC_CLANG_RUNTIME})
+        message(STATUS "WebRTC clang runtime: ${WEBRTC_CLANG_RUNTIME}")
+    else()
+        message(WARNING
+                "未找到 clang_rt.builtins-x86_64.lib；"
+                "Windows 链接可能报编译器内建函数未定义。")
+    endif()
 else()
     target_link_libraries(WebRTC::WebRTC INTERFACE
             Threads::Threads

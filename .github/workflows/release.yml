@@ -98,53 +98,113 @@ jobs:
             Client/build-release/SHA256SUMS.txt
 
   # ====================================================================
-  # Windows 包 —— 尚未启用，原因见下。
+  # Windows 包。
   #
-  # 缺的不是这份 YAML，而是**Windows 版的 libwebrtc**：
-  #   Chromium 的构建系统在 Windows 上强制要求 MSVC，无法从 Linux 交叉编译，
-  #   必须在 Windows 机器上跑 scripts/build-webrtc.sh 的等价流程（数小时）。
-  # 拿到 `libwebrtc.a`（Windows 下实为 webrtc.lib）与随附的 lld 之后：
-  #   1. 把它打成 zip 作为 Release 附件，地址填进仓库变量 WEBRTC_WINDOWS_ASSET_URL；
-  #   2. 照 cmake/FindWebRTC.cmake 里 Linux 那套，补上 Windows 的宏与系统库
-  #      （WIN32 分支目前会直接 FATAL_ERROR，就是为了避免悄悄产出坏二进制）；
-  #   3. 取消下面的注释。
+  # Windows 版 libwebrtc 必须在 Windows/MSVC 上构建，无法从 Linux 交叉编译；
+  # 预编译产物放在独立的 WebRTC Release 里，地址由仓库变量
+  # WEBRTC_WINDOWS_ASSET_URL 提供（见 third_party/webrtc/README.md 第 5 节）。
   #
-  # 另外：Linux 产的 .zip 是给 Windows 用户**解压看的**，不是 Windows 程序。
+  # needs: linux —— 让 Linux job 先把 Release 建出来，避免两个 job 同时
+  # 创建 Release/上传同名资产时互相打架。
   # ====================================================================
-  #
-  # windows:
-  #   name: Windows 包
-  #   runs-on: windows-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: jurplel/install-qt-action@v4
-  #       with:
-  #         version: '6.10.2'
-  #         modules: 'qtmultimedia qtwebsockets'
-  #     - name: 下载随包工具
-  #       shell: bash
-  #       run: ./scripts/fetch-tools.sh
-  #     - name: 下载预编译 WebRTC
-  #       shell: bash
-  #       env:
-  #         WEBRTC_ASSET_URL: ${{ vars.WEBRTC_WINDOWS_ASSET_URL }}
-  #       run: |
-  #         mkdir -p webrtc
-  #         curl -fL --retry 3 -o webrtc.zip "${WEBRTC_ASSET_URL}"
-  #         7z x webrtc.zip -owebrtc
-  #     - name: 配置
-  #       run: >
-  #         cmake -S Client -B Client/build-release
-  #         -DCMAKE_BUILD_TYPE=Release
-  #         -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
-  #         -DWEBRTC_ROOT="$pwd/webrtc"
-  #     - name: 构建
-  #       run: cmake --build Client/build-release --config Release --parallel
-  #     - name: 打包
-  #       working-directory: Client/build-release
-  #       run: cpack
-  #     - name: 上传产物
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: Syncine-Windows
-  #         path: Client/build-release/Syncine-*.zip
+  windows:
+    name: Windows 包
+    needs: linux
+    # 预编译 webrtc.lib 是 Chromium clang-cl 24 + VS 2026 (MSVC 14.51) STL
+    # 编出来的；用 VS 2022 链接会缺 __std_* 符号。这里固定到 VS 2026 镜像，
+    # 生成器也必须是 Visual Studio 18 2026。Qt 的 msvc2022_64 与其 ABI 兼容
+    # （BUILD-INFO.md 已验证过）。
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.10.2'
+          # Windows 必须用与 webrtc.lib 相同的 MSVC ABI（Qt 官方 win64_msvc2022_64）
+          arch: win64_msvc2022_64
+          modules: 'qtmultimedia qtwebsockets'
+          cache: true
+
+      - name: 下载随包工具（Windows 版）
+        shell: bash
+        # ffmpeg / yt-dlp 的 Windows 哈希本仓库没有验证过，脚本只会警告；
+        # 下载失败也不该挡住出包（Client/CMakeLists.txt 用 EXISTS 包住了 tools/）
+        continue-on-error: true
+        run: ./scripts/fetch-tools.sh
+
+      - name: 下载预编译 WebRTC
+        shell: pwsh
+        env:
+          WEBRTC_ASSET_URL: ${{ vars.WEBRTC_WINDOWS_ASSET_URL }}
+        run: |
+          if (-not $env:WEBRTC_ASSET_URL) {
+            Write-Error "未配置仓库变量 WEBRTC_WINDOWS_ASSET_URL"
+            exit 1
+          }
+          New-Item -ItemType Directory -Force webrtc | Out-Null
+          curl.exe -fL --retry 3 -o webrtc.zip "$env:WEBRTC_ASSET_URL"
+          7z x webrtc.zip -owebrtc
+
+          # 压缩包顶层可能是 webrtc-windows-x64-<rev>/，也可能是平铺的。
+          # 以 out/Default/obj/webrtc.lib 所在目录为准，避免把 WEBRTC_ROOT
+          # 指到外层或某个头文件子目录。
+          $root = $null
+          if (Test-Path "webrtc\out\Default\obj\webrtc.lib") {
+            $root = (Resolve-Path webrtc).Path
+          } else {
+            $candidate = Get-ChildItem webrtc -Directory | Where-Object {
+              Test-Path (Join-Path $_.FullName "out\Default\obj\webrtc.lib")
+            } | Select-Object -First 1
+            if ($candidate) { $root = $candidate.FullName }
+          }
+          if (-not $root) {
+            Write-Error "webrtc.zip 里找不到 out/Default/obj/webrtc.lib"
+            exit 1
+          }
+          "WEBRTC_ROOT=$root" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          Write-Host "WEBRTC_ROOT=$root"
+
+      - name: 配置（MSVC + VS 生成器）
+        shell: pwsh
+        run: |
+          cmake -S Client -B Client/build-release -G "Visual Studio 18 2026" -A x64 `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
+            -DWEBRTC_ROOT="$env:WEBRTC_ROOT" `
+            -DWEBRTC_WIN_SYSTEM_LIBS="$env:WEBRTC_WIN_SYSTEM_LIBS"
+
+      - name: 构建
+        run: cmake --build Client/build-release --config Release --parallel
+
+      - name: 打包
+        working-directory: Client/build-release
+        run: cpack -C Release
+
+      - name: 生成校验和
+        shell: pwsh
+        working-directory: Client/build-release
+        run: |
+          # 文件名带 Windows 后缀，避免和 Linux job 的 SHA256SUMS.txt
+          # 在 Release 里同名冲突
+          Get-ChildItem Syncine-*.zip | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          } | Set-Content -Encoding ascii SHA256SUMS-Windows.txt
+          Get-Content SHA256SUMS-Windows.txt
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Syncine-Windows
+          path: |
+            Client/build-release/Syncine-*.zip
+            Client/build-release/SHA256SUMS-Windows.txt
+
+      - name: 附加到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Client/build-release/Syncine-*.zip
+            Client/build-release/SHA256SUMS-Windows.txt
