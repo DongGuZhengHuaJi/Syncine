@@ -4,6 +4,9 @@ name: release
 on:
   push:
     tags: ['v*']
+    # server-ci 分支用于验证服务端双端构建；客户端 job 也会一起跑，
+    # 顺便保证打包流程没有回归（tag 才会附加到 Release）。
+    branches: ['feat/server-ci']
   # 手动触发，方便在不打 tag 的情况下试跑打包流程
   workflow_dispatch:
 
@@ -258,6 +261,29 @@ jobs:
       - name: 构建
         run: cmake --build Server/build-release --parallel
 
+      - name: 冒烟测试
+        # 必须真正跑起来：只编译通过不能说明端口能绑、TURN 线程能收尾。
+        # 无密钥时 TURN 线程会打一行 WARN 后退出，不影响监听。
+        run: |
+          SYNCINE_LOG_DIR="$RUNNER_TEMP/server-logs" ./Server/build-release/Server &
+          pid=$!
+          ready=0
+          for _ in $(seq 1 20); do
+            if ss -ltn | grep -q ':8765 '; then ready=1; break; fi
+            sleep 0.5
+          done
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "::error::服务端启动后退出"
+            cat "$RUNNER_TEMP"/server-logs/* 2>/dev/null || true
+            exit 1
+          fi
+          if [ "$ready" -ne 1 ]; then
+            echo "::error::服务端未监听 8765 端口"
+            kill "$pid" 2>/dev/null || true
+            exit 1
+          fi
+          kill "$pid"
+
       - name: 打包
         run: |
           PKG="Syncine-Server-${{ steps.version.outputs.value }}-Linux-x86_64"
@@ -284,3 +310,111 @@ jobs:
           files: |
             dist/Syncine-Server-*.tar.gz
             dist/SHA256SUMS-Server.txt
+
+  # ====================================================================
+  # Windows 服务端包。
+  #
+  # 与 Linux 版同一份源码，依赖换成 vcpkg 提供（GitHub 托管的 Windows
+  # runner 自带 vcpkg，但没有 Boost/OpenSSL 头文件）。
+  #
+  # 用 x64-windows-static：服务端是单文件部署，动态 triplet 会要求把
+  # boost_*.dll / libssl 等一起打包，漏拷一个就起不来。静态链接后
+  # 只有一个 Server.exe，放进 Windows 服务或计划任务都省事。
+  # 静态 triplet 的 CRT 也是 /MT，所以必须把 CMAKE_MSVC_RUNTIME_LIBRARY
+  # 对齐，否则会混用 /MD 运行库导致链接错误。
+  # ====================================================================
+  server-windows:
+    name: Windows 服务端包
+    needs: linux
+    runs-on: windows-2022
+    env:
+      VCPKG_TRIPLET: x64-windows-static
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖（vcpkg）
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
+            boost-asio boost-beast boost-uuid boost-random `
+            openssl nlohmann-json --triplet $env:VCPKG_TRIPLET
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 确定版本号
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $v = $env:GITHUB_REF_NAME.Substring(1)
+          } else {
+            $m = Select-String -Path Server/CMakeLists.txt `
+                 -Pattern 'project\(Server VERSION ([0-9.]+)'
+            $v = if ($m) { $m.Matches[0].Groups[1].Value } else { '0.0.0' }
+          }
+          "value=$v" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
+      - name: 配置
+        shell: pwsh
+        run: |
+          cmake -S Server -B Server/build-release -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET="$env:VCPKG_TRIPLET" `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+
+      - name: 构建
+        run: cmake --build Server/build-release --config Release --parallel
+
+      - name: 冒烟测试
+        shell: pwsh
+        run: |
+          $env:SYNCINE_LOG_DIR = Join-Path $env:RUNNER_TEMP 'server-logs'
+          $process = Start-Process -FilePath 'Server\build-release\Release\Server.exe' `
+            -PassThru -NoNewWindow
+          $listening = $false
+          for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Milliseconds 500
+            if ($process.HasExited) { break }
+            if (Get-NetTCPConnection -State Listen -LocalPort 8765 `
+                -ErrorAction SilentlyContinue) {
+              $listening = $true
+              break
+            }
+          }
+          if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          if (-not $listening) {
+            Get-ChildItem $env:SYNCINE_LOG_DIR -ErrorAction SilentlyContinue |
+              ForEach-Object { Get-Content $_.FullName }
+            throw "服务端未监听 8765 端口（是否已退出: $($process.HasExited)）"
+          }
+
+      - name: 打包
+        shell: pwsh
+        run: |
+          $pkg = "Syncine-Server-${{ steps.version.outputs.value }}-Windows-x64"
+          # install 规则会把可执行文件放到 <prefix>/bin/Server.exe
+          cmake --install Server/build-release --prefix $pkg --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item LICENSE "$pkg\LICENSE"
+          Compress-Archive -Path $pkg -DestinationPath "$pkg.zip"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Move-Item "$pkg.zip" dist\
+          $hash = (Get-FileHash "dist\$pkg.zip" -Algorithm SHA256).Hash.ToLower()
+          # 与 Linux 的 SHA256SUMS-Server.txt 分开命名，避免 Release 里同名冲突
+          "$hash  $pkg.zip" | Set-Content -Encoding ascii dist\SHA256SUMS-Server-Windows.txt
+          Get-Content dist\SHA256SUMS-Server-Windows.txt
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Syncine-Server-Windows
+          path: |
+            dist/Syncine-Server-*.zip
+            dist/SHA256SUMS-Server-Windows.txt
+
+      - name: 附加到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Syncine-Server-*.zip
+            dist/SHA256SUMS-Server-Windows.txt
