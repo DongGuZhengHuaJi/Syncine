@@ -45,6 +45,12 @@ target_include_directories(Server
         src/network
         src/tools)
 
+if(WIN32)
+    # Boost.Asio 的 socket_types.hpp 会包含 <windows.h>。Windows 头默认定义
+    # min/max 宏，会把 std::min/std::max 展开成语法错误（MSVC C2589/C2059）。
+    target_compile_definitions(Server PRIVATE NOMINMAX)
+endif()
+
 target_link_libraries(Server
         PRIVATE
         Boost::boost

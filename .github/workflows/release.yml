@@ -236,7 +236,7 @@ jobs:
         run: |
           sudo apt-get update
           # C++23 需要 GCC 13+，ubuntu-24.04 自带 GCC 14，无需额外装编译器
-          sudo apt-get install -y ninja-build libboost-dev libssl-dev
+          sudo apt-get install -y ninja-build libboost-dev libssl-dev nlohmann-json3-dev
 
       - name: 确定版本号
         id: version
@@ -289,6 +289,7 @@ jobs:
           PKG="Syncine-Server-${{ steps.version.outputs.value }}-Linux-x86_64"
           # install 规则会把可执行文件放到 <prefix>/bin/Server
           cmake --install Server/build-release --prefix "$PKG"
+          cp LICENSE "$PKG/"
           tar -czf "${PKG}.tar.gz" "${PKG}"
           mkdir -p dist && mv "${PKG}.tar.gz" dist/
           # 文件名带 Server 后缀，避免和 Linux/Windows job 的
