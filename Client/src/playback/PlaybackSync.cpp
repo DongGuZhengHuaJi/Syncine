@@ -647,7 +647,7 @@ void PlaybackSync::onUrlResolved()
     // 解析这几秒里用户可能已经切走了 —— 结果作废，别把播放器抢回来
     const QString itemId = m_session->playlist()->currentItemId();
     if (itemId.isEmpty() || itemId != m_preparingItemId) {
-        LOG_DEBUG("Playback") << "解析结果已过期(条目换过了),丢弃";
+        LOG_DEBUG("Playback") << "解析结果已过期,丢弃";
         return;
     }
 
@@ -674,7 +674,7 @@ void PlaybackSync::onUrlProbed()
     // 解析这几秒里用户可能已经切走了 —— 不能把新条目的弹幕槽位写进旧结果
     const QString itemId = m_session->playlist()->currentItemId();
     if (itemId.isEmpty() || itemId != m_preparingItemId) {
-        LOG_DEBUG("Playback") << "探测结果已过期(条目换过了),丢弃弹幕";
+        LOG_DEBUG("Playback") << "探测结果已过期,丢弃弹幕";
         return;
     }
 

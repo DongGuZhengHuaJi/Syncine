@@ -1,9 +1,11 @@
 import QtQuick
 
-// 弹幕层。两个来源共用同一张轨道表：
-//   · 聊天弹幕 push(text)：收到就飘，不跟时间轴，暂停时也继续（现有行为）；
-//   · 视频弹幕：C++ 解析 B 站 XML，按 playbackSync.position 由泵逐批取出，
-//     在正确时间点出现；暂停时冻结、seek 时清屏。
+// 弹幕层。三个来源共用同一张轨道表：
+//   · 聊天弹幕 push(...)：房间消息，气泡，暂停时也继续飘；
+//   · 点播弹幕：C++ 解析 B 站 XML，按 playbackSync.position 由泵逐批取出，
+//     在正确时间点出现；暂停时冻结、seek 时清屏；
+//   · 直播弹幕：C++ 通过 WebSocket 实时推送，pushLive(...) 收到即显示，
+//     不受暂停/seek 影响（直播没有共同时间轴）。
 //
 // 轨道分配用屏幕上 sprite 的实际 x/width 判断，不靠时间估算：
 // 同一条轨道上，前一条的尾巴还没让出右边就不放新的；滚动/顶部/底部共用轨道，
@@ -54,6 +56,7 @@ Item {
     property var _timelineSprites: []
     property int _nextLane: 0
     property int _chatLane: 0
+    property int _liveLane: 0
 
     clip: true
 
@@ -65,6 +68,7 @@ Item {
     onRunningChanged: {
         if (!running) {
             clearTimeline()
+            clearLive()
         } else {
             // 关闭期间不再补发，从当前进度继续
             danmakuController.seekTo(playbackSync.position)
@@ -288,6 +292,65 @@ Item {
         _timelineSprites = []
     }
 
+    // ============================
+    // 直播弹幕（WebSocket 实时推送）
+    // ============================
+    // 和点播弹幕一样是纯文字；但 dmTimeline=false，不受暂停/seek 影响，
+    // 也不进入 _timelineSprites，所以 clearTimeline 不会误删它。
+    function pushLive(item) {
+        if (!running || width <= 1 || height <= 1)
+            return
+        if (_allSprites.length >= _maxSprites)
+            return
+
+        const text = String(item.text || "")
+        if (text === "")
+            return
+
+        const rawMode = Number(item.mode)
+        const mode = Number.isFinite(rawMode) && rawMode > 0 ? rawMode : 1
+        const rawSize = Number(item.size)
+        const pixelSize = _pixelSize(rawSize > 0 ? rawSize : 25)
+        const color = String(item.color || "#FFFFFF")
+        const direction = mode === 6 ? -1 : 1
+
+        const lane = _pickScrollLane(direction)
+        let targetLane = lane
+        if (targetLane < 0) {
+            // 直播优先保证"每条都出现"：所有轨道都占满时退回轮转轨道，
+            // 允许重叠，而不是像点播那样直接丢弃。
+            targetLane = _liveLane
+            _liveLane = (_liveLane + 1) % _laneCount
+        }
+
+        const sprite = scrollSprite.createObject(root, {
+            "dmBubble": false,
+            "dmLive": true,
+            "dmText": text,
+            "dmColor": color,
+            "dmOutline": _outlineFor(color),
+            "dmPixelSize": pixelSize,
+            "dmLane": targetLane,
+            "dmDirection": direction,
+            "dmSpeed": 110 * _speedFactor,
+            "dmTimeline": false,
+            "dmMode": mode
+        })
+        if (!sprite)
+            return
+        _register(sprite, targetLane)
+        sprite.launch()
+    }
+
+    function clearLive() {
+        const copy = _allSprites.slice()
+        for (let i = 0; i < copy.length; ++i) {
+            if (copy[i] && copy[i].dmLive)
+                copy[i].destroy()
+        }
+        _liveLane = 0
+    }
+
     // 设置变化时连聊天弹幕一起清掉：字号/轨道/速度都已经变了，
     // 让旧 sprite 按旧参数飞完反而会与新区间重叠。
     function clearAll() {
@@ -302,6 +365,7 @@ Item {
             _lanes[i] = []
         _nextLane = 0
         _chatLane = 0
+        _liveLane = 0
     }
 
     function _cleanupFixed(position) {
@@ -345,6 +409,7 @@ Item {
 
         function onSourceChanged() {
             root.clearTimeline()
+            root.clearLive()
         }
 
         function onJumped() {
@@ -354,6 +419,15 @@ Item {
         function onAvailableChanged() {
             if (!danmakuController.available)
                 root.clearTimeline()
+        }
+
+        function onLiveDanmakuBatch(items) {
+            for (let i = 0; i < items.length; ++i)
+                root.pushLive(items[i])
+        }
+
+        function onLiveStopped() {
+            root.clearLive()
         }
     }
 
@@ -412,6 +486,7 @@ Item {
             id: dm
 
             property bool dmBubble: false
+            property bool dmLive: false
             property string dmText: ""
             property string dmSender: ""
             property bool dmSelf: false

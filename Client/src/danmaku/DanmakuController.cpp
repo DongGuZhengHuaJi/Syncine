@@ -10,6 +10,7 @@
 #include "core/CookieManager.h"
 #include "core/Log.h"
 #include "core/Toolchain.h"
+#include "danmaku/LiveDanmakuSession.h"
 #include "media/FormatModel.h"
 
 namespace {
@@ -28,11 +29,27 @@ DanmakuController::DanmakuController(const Toolchain *toolchain,
     : QObject(parent),
       m_toolchain(toolchain),
       m_cookies(cookies) {
+
+    m_live = new LiveDanmakuSession(
+        m_cookies != nullptr ? m_cookies->path() : QString(), this);
+    connect(m_live, &LiveDanmakuSession::danmakuBatch,
+            this, &DanmakuController::liveDanmakuBatch);
+    connect(m_live, &LiveDanmakuSession::connectedChanged,
+            this, &DanmakuController::liveConnectedChanged);
+    connect(m_live, &LiveDanmakuSession::stopped,
+            this, &DanmakuController::liveStopped);
 }
 
 DanmakuController::~DanmakuController()
 {
+    if (m_live != nullptr)
+        m_live->stop();
     abortFetch();
+}
+
+bool DanmakuController::liveConnected() const
+{
+    return m_live != nullptr && m_live->connected();
 }
 
 // ============================
@@ -49,6 +66,8 @@ bool DanmakuController::beginItem(const QString &dir, const QString &pageUrl)
     if (dir != m_dir) {
         // 换条目：旧请求作废，旧弹幕立刻从界面消失
         ++m_generation;
+        if (m_live != nullptr)
+            m_live->stop();
         abortFetch();
         clearItems();
         m_dir = dir;
@@ -72,10 +91,14 @@ void DanmakuController::loadFor(const MediaInfo &info)
 {
     if (m_dir.isEmpty())
         return;
+
+    // 直播走完全不同的链路：WebSocket 实时推送，没有 XML/时间轴/游标
     if (info.live) {
-        LOG_DEBUG("Danmaku") << "直播源没有 XML 弹幕";
+        if (m_live != nullptr)
+            m_live->start(info.url.isEmpty() ? m_pageUrl : info.url);
         return;
     }
+
     if (m_state == State::Ready || m_state == State::Downloading)
         return;
     if (!isBilibili(info)) {
@@ -92,6 +115,13 @@ void DanmakuController::loadFromUrl()
 {
     if (m_dir.isEmpty())
         return;
+
+    if (isLiveUrl(m_pageUrl)) {
+        if (m_live != nullptr)
+            m_live->start(m_pageUrl);
+        return;
+    }
+
     if (m_state == State::Ready || m_state == State::Downloading)
         return;
     if (!isBilibiliUrl(m_pageUrl)) {
@@ -105,11 +135,14 @@ void DanmakuController::loadFromUrl()
 void DanmakuController::reset()
 {
     const bool hadState = !m_dir.isEmpty() || !m_items.isEmpty()
-                          || m_state != State::Idle || !m_process.isNull();
+                          || m_state != State::Idle || !m_process.isNull()
+                          || (m_live != nullptr && m_live->running());
     if (!hadState)
         return;
 
     ++m_generation;
+    if (m_live != nullptr)
+        m_live->stop();
     abortFetch();
     clearItems();
     m_dir.clear();
@@ -205,7 +238,7 @@ bool DanmakuController::loadCacheFile()
     if (!file.exists())
         return false;
     if (!file.open(QIODevice::ReadOnly)) {
-        LOG_WARN("Danmaku") << "弹幕缓存打不开:" << path << file.errorString();
+        LOG_WARN("Danmaku") << "弹幕缓存无法打开:" << path << file.errorString();
         return false;
     }
 
@@ -272,6 +305,11 @@ bool DanmakuController::isBilibiliUrl(const QString &url)
 {
     return url.contains(QLatin1String("bilibili.com"), Qt::CaseInsensitive)
            || url.contains(QLatin1String("b23.tv"), Qt::CaseInsensitive);
+}
+
+bool DanmakuController::isLiveUrl(const QString &url)
+{
+    return url.contains(QLatin1String("live.bilibili.com"), Qt::CaseInsensitive);
 }
 
 bool DanmakuController::isBilibili(const MediaInfo &info) const

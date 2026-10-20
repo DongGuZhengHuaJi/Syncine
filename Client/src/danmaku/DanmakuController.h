@@ -13,6 +13,9 @@
 // 缓存文件与下载的视频放在同一个条目目录（danmaku.xml），生命周期一致：
 // 切条目只停请求不删文件，退出软件时随整个 clientId 临时目录清除。
 //
+// 直播（info.live）不走 XML/游标：转给 LiveDanmakuSession 的 WebSocket 实时流，
+// 通过 liveDanmakuBatch 直接推给 QML，不进入 takeUntil。
+//
 
 #ifndef SYNCINE_DANMAKUCONTROLLER_H
 #define SYNCINE_DANMAKUCONTROLLER_H
@@ -28,6 +31,7 @@
 #include "danmaku/DanmakuXmlParser.h"
 
 class CookieManager;
+class LiveDanmakuSession;
 class Toolchain;
 struct MediaInfo;
 
@@ -42,6 +46,11 @@ class DanmakuController : public QObject {
                READ count
                NOTIFY countChanged)
 
+    // 直播弹幕的 WebSocket 是否已认证成功（点播弹幕的 available 不包含它）
+    Q_PROPERTY(bool liveConnected
+               READ liveConnected
+               NOTIFY liveConnectedChanged)
+
 public:
     // toolchain 用来定位 yt-dlp；cookies 可以为空（那就不带 --cookies）
     explicit DanmakuController(const Toolchain *toolchain,
@@ -51,15 +60,16 @@ public:
 
     bool available() const { return !m_items.isEmpty(); }
     int count() const { return static_cast<int>(m_items.size()); }
+    bool liveConnected() const;
 
     // ---- PlaybackSync 调用 ----
     // 切到某一条：换目录时立即清空；同目录的请求不会被重复打断
     //（onRoomChanged 会被成员刷新反复触发，必须幂等）。
     // 返回 true 表示已经命中 danmaku.xml，可直接显示。
     bool beginItem(const QString &dir, const QString &pageUrl);
-    // yt-dlp 探测成功后调用；非 B 站/直播会静默跳过。
+    // yt-dlp 探测成功后调用；非 B 站静默跳过，直播转给 LiveDanmakuSession。
     void loadFor(const MediaInfo &info);
-    // 媒体缓存命中但没有 MediaInfo 时：直接按页面 URL 尝试下载。
+    // 媒体缓存命中但没有 MediaInfo 时：直接按页面 URL 尝试下载 / 连接直播。
     void loadFromUrl();
     void reset();
 
@@ -76,6 +86,11 @@ signals:
     void sourceChanged();
     // takeUntil 发现位置跳变（seek、纠偏、切集）：界面清屏
     void jumped();
+    // 直播弹幕：一批一条，QML 收到后立即生成普通文字弹幕
+    void liveDanmakuBatch(const QVariantList &items);
+    void liveConnectedChanged(bool connected);
+    // 直播结束/主动停止/连接失败：QML 清掉直播弹幕
+    void liveStopped();
 
 private:
     enum class State {
@@ -93,6 +108,7 @@ private:
     void fail(const QString &message);
 
     static bool isBilibiliUrl(const QString &url);
+    static bool isLiveUrl(const QString &url);
     bool isBilibili(const MediaInfo &info) const;
 
     void startFetch(quint64 generation);
@@ -104,6 +120,7 @@ private:
     const Toolchain *m_toolchain = nullptr;
     const CookieManager *m_cookies = nullptr;
     QPointer<QProcess> m_process;
+    LiveDanmakuSession *m_live = nullptr;
 
     QString m_dir;
     QString m_pageUrl;

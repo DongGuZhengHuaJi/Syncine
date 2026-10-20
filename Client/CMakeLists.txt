@@ -85,6 +85,8 @@ set(CMAKE_AUTOUIC ON)
 # ----------------------------------------------------------------------
 
 find_package(Threads REQUIRED)
+# 直播弹幕的 WebSocket 包体是 zlib 压缩的（实测即使 protover=0 也会发 ver=2）
+find_package(ZLIB REQUIRED)
 
 find_package(Qt6 REQUIRED COMPONENTS
         Core
@@ -170,6 +172,9 @@ qt_add_executable(Syncine
         src/danmaku/DanmakuController.h
         src/danmaku/DanmakuXmlParser.cpp
         src/danmaku/DanmakuXmlParser.h
+        # 直播弹幕：WebSocket + zlib 解包 + DANMU_MSG
+        src/danmaku/LiveDanmakuSession.cpp
+        src/danmaku/LiveDanmakuSession.h
 
         # playback：本地播放器 + 播放同步策略
         src/playback/PlaybackController.cpp
@@ -305,6 +310,9 @@ target_link_libraries(Syncine
         Qt6::Multimedia
         Qt6::Network
         Qt6::WebSockets
+
+        # 直播弹幕 WebSocket 的 zlib 包体
+        ZLIB::ZLIB
 
         # WebRTC
         WebRTC::WebRTC
