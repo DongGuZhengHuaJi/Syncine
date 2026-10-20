@@ -2,7 +2,7 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [1.2.1] — 2026-10-20
+## [1.2.1] — 2026-10-21
 
 ### 新增
 
@@ -20,6 +20,12 @@
 ### 变更
 
 - 客户端构建新增 zlib 依赖（直播弹幕的压缩包体）
+
+### 发布工程
+
+- GitHub Release 增加服务端包：Linux（`Syncine-Server-<版本>-Linux-x86_64.tar.gz`）与 Windows（`Syncine-Server-<版本>-Windows-x64.zip`，静态链接的单个 `Server.exe`）
+- 服务端 CI 增加启动冒烟测试：构建后实际启动并确认 8765 端口监听
+- 服务端构建显式查找 `nlohmann_json`；Windows 构建定义 `NOMINMAX`，避免 `windows.h` 的 `min`/`max` 宏破坏标准库调用
 
 ## [1.2.0] — 2026-10-18
 
