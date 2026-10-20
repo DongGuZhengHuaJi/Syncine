@@ -10,6 +10,10 @@ find_package(Boost REQUIRED)
 # （Beast 自身为 header-only，没有可链接的库）。
 find_package(OpenSSL REQUIRED)
 
+# 协议消息用 nlohmann/json。Linux 上它在 /usr/include，不显式声明也能编；
+# Windows（vcpkg）没有默认头文件搜索路径，必须把它的 include 目录带进来。
+find_package(nlohmann_json CONFIG REQUIRED)
+
 add_executable(Server src/main.cpp
         src/server/Server.cpp
         src/server/Server.h
@@ -41,11 +45,18 @@ target_include_directories(Server
         src/network
         src/tools)
 
+if(WIN32)
+    # Boost.Asio 的 socket_types.hpp 会包含 <windows.h>。Windows 头默认定义
+    # min/max 宏，会把 std::min/std::max 展开成语法错误（MSVC C2589/C2059）。
+    target_compile_definitions(Server PRIVATE NOMINMAX)
+endif()
+
 target_link_libraries(Server
         PRIVATE
         Boost::boost
         OpenSSL::SSL
         OpenSSL::Crypto
+        nlohmann_json::nlohmann_json
 )
 
 # 部署时 `cmake --install` 会把可执行文件放到 <prefix>/bin/Server。

@@ -143,7 +143,7 @@ cmake --build build-release --parallel
 ./build-release/Server          # 监听 0.0.0.0:8765
 ```
 
-依赖 Boost（Beast 是 header-only，只要头文件）与 OpenSSL。地址和端口在 `Server/src/tools/Config.h`。
+依赖 Boost（Beast 是 header-only，只要头文件）、OpenSSL 与 nlohmann-json（Ubuntu 上为 `libboost-dev libssl-dev nlohmann-json3-dev`）。地址和端口在 `Server/src/tools/Config.h`。
 
 **TURN 凭据**：服务端用 Cloudflare 的 TURN 密钥现场兑换临时凭据（有效期 24 小时）随入房消息下发，密钥只留在服务端。密钥来源按优先级：
 
