@@ -29,7 +29,8 @@ qint64 int64Of(const QJsonValue &value)
 }
 
 // vcodec/acodec 在 yt-dlp 的 JSON 中是字符串，"none" 表示该路不存在。
-// 个别站点给 null（少见），同样按 none 处理。
+// null/缺失表示"未知"（generic 直链常见），不能当成 none —— 否则
+// TikTok CDN 这类只有 URL、没有编码信息的直链会被整个丢掉。
 bool hasCodec(const QJsonValue &value)
 {
     const QString text = value.toString();
@@ -395,17 +396,29 @@ MediaSelection tierSelection(const MediaInfo &info, int height, bool allowHdr)
             LOG_INFO("Format") << "档位 " << height << "P 在源中无对应流，退回不设限（最高画质）";
             return tierSelection(info, 0, allowHdr);
         }
-        // 走到这里说明「不设限」也挑不出画面流 —— 源里没有任何 height > 0 的
-        // 视频流。纯音频源、部分 HLS、只有 storyboard 的源都会这样，而且
-        // 用户在首次添加时选「最高画质」就会提交 spec="0"，直接命中。
-        //
-        // 这里**绝不能再递归**：pickVideoTier 对 height <= 0 的流一律 continue
-        // （那个字段没意义），所以用同样的参数重入结果必然还是空 —— 就是无限
-        // 递归，几百层后栈溢出 SIGSEGV。而且 spec 是条目级、随房间下发的，
-        // 一个人加进这样一条，全房间切到它时一起崩。
-        //
-        // 返回 invalid（valid 默认 false），由上层报「没有可下载的流」。
-        LOG_WARN("Format") << "源中没有带 height 的画面流，无法选择下载档位:"
+        // 没有带 height 的画面流：generic 直链单文件（height/vcodec 都未知）。
+        // 选一条音视频合一的直链直接交给播放器；不要再递归。
+        MediaFormat direct = bestOf(filterKind(info.formats, MediaFormat::Combined),
+                                    allowHdr);
+        if (direct.formatId.isEmpty()) {
+            direct = bestOf(filterKind(info.formats, MediaFormat::Combined),
+                            !allowHdr);
+        }
+        const QString target =
+            direct.url.isEmpty() ? direct.manifestUrl : direct.url;
+        if (!direct.formatId.isEmpty() && !target.isEmpty()
+            && direct.isDirectPlayable()) {
+            selection.valid = true;
+            selection.direct = true;
+            selection.video = direct;
+            selection.audio = direct;
+            selection.url = target;
+            selection.label = direct.displayName();
+            selection.hdr = direct.isHdr();
+            return selection;
+        }
+
+        LOG_WARN("Format") << "源中没有带 height 的画面流，且找不到可直链的合一文件:"
                            << " 候选格式数=" << info.formats.size();
         return selection;
     }
@@ -475,6 +488,9 @@ QString MediaFormat::displayName() const
             parts << QStringLiteral("含 %1 音轨").arg(audioCodecName());
         if (!formatNote.isEmpty() && !formatNote.contains(resolutionText(*this)))
             parts << formatNote;
+        // generic 直链可能连分辨率/编码都没有：至少显示容器名，别留空
+        if (parts.isEmpty())
+            parts << (ext.isEmpty() ? QStringLiteral("视频") : ext.toUpper());
     }
 
     const QString size = sizeText(bestSize());
@@ -574,10 +590,42 @@ QList<MediaFormat> parse(const QJsonArray &formats)
     for (const QJsonValue &value : formats) {
         const QJsonObject object = value.toObject();
 
-        const bool hasVideo = hasCodec(object.value(QStringLiteral("vcodec")));
-        const bool hasAudio = hasCodec(object.value(QStringLiteral("acodec")));
-        // 两者皆无表示故事板/缩略图，不是媒体
-        if (!hasVideo && !hasAudio) {
+        const QJsonValue vcodecValue = object.value(QStringLiteral("vcodec"));
+        const QJsonValue acodecValue = object.value(QStringLiteral("acodec"));
+        const bool hasVideo = hasCodec(vcodecValue);
+        const bool hasAudio = hasCodec(acodecValue);
+        const QString url = object.value(QStringLiteral("url")).toString();
+        const QString videoExt =
+            object.value(QStringLiteral("video_ext")).toString();
+        const QString audioExt =
+            object.value(QStringLiteral("audio_ext")).toString();
+        // 两者都明确是 "none" 才是故事板/缩略图；null/缺失是"未知"，不是"没有"
+        const bool bothExplicitNone =
+            vcodecValue.isString()
+            && vcodecValue.toString() == QLatin1String("none")
+            && acodecValue.isString()
+            && acodecValue.toString() == QLatin1String("none");
+
+        MediaFormat::Kind kind = MediaFormat::Unknown;
+        if (hasVideo && hasAudio) {
+            kind = MediaFormat::Combined;
+        } else if (hasVideo) {
+            kind = MediaFormat::VideoOnly;
+        } else if (hasAudio) {
+            kind = MediaFormat::AudioOnly;
+        } else if (!bothExplicitNone && !url.isEmpty()
+                   && videoExt != QLatin1String("none")) {
+            // generic 直链：codec 字段是 null/缺失，但 video_ext 表明是视频文件。
+            // **不能假设它没有音轨** —— 实测 TikTok CDN 的 MP4 就是这种 JSON
+            // （vcodec=null、acodec 缺失、audio_ext="none"），实际音视频都有。
+            kind = MediaFormat::Combined;
+        } else if (!bothExplicitNone && !url.isEmpty()
+                   && videoExt == QLatin1String("none")
+                   && audioExt != QLatin1String("none")) {
+            kind = MediaFormat::AudioOnly;
+        }
+
+        if (kind == MediaFormat::Unknown) {
             ++skipped;
             continue;
         }
@@ -604,12 +652,7 @@ QList<MediaFormat> parse(const QJsonArray &formats)
         format.quality = object.value(QStringLiteral("quality")).toInt(0);
         format.ext = object.value(QStringLiteral("ext")).toString();
 
-        if (hasVideo && hasAudio)
-            format.kind = MediaFormat::Combined;
-        else if (hasVideo)
-            format.kind = MediaFormat::VideoOnly;
-        else
-            format.kind = MediaFormat::AudioOnly;
+        format.kind = kind;
 
         result.append(format);
     }

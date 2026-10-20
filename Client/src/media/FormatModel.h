@@ -31,11 +31,13 @@ class QJsonObject;
 
 // 一条流（formats[] 中的一个元素），仅保留有意义的字段。
 //
-// kind 由 vcodec/acodec 是否为 "none" 推出 —— 这是 yt-dlp 的约定：
-//   两个都是 none  = 故事板/缩略图，不是媒体，解析时直接丢掉
+// kind 由 vcodec/acodec 推出 —— 这是 yt-dlp 的约定：
+//   两个都是 "none" = 故事板/缩略图，不是媒体，解析时直接丢掉
 //   只有 vcodec     = 纯画面（DASH 的视频轨）
 //   只有 acodec     = 纯声音
 //   两个都有        = 音视频合一（单文件格式，能直接交给播放器）
+//   **两个都是 null/缺失** = 未知（generic 直链常见，如 TikTok CDN 的 MP4）：
+//   若 video_ext 表明是视频文件，按"合一"处理；不能当 none 丢掉。
 struct MediaFormat {
     enum Kind {
         Unknown,
