@@ -30,6 +30,7 @@ jobs:
           # ubuntu-24.04 镜像不保证这些都在，显式装上
           sudo apt-get install -y \
             ninja-build clang lld \
+            zlib1g-dev \
             libgl1-mesa-dev \
             libx11-dev libxcomposite-dev libxdamage-dev libxext-dev \
             libxfixes-dev libxrandr-dev libxrender-dev libxtst-dev
@@ -169,11 +170,28 @@ jobs:
           "WEBRTC_ROOT=$root" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           Write-Host "WEBRTC_ROOT=$root"
 
+      # 客户端从 1.2.1 起依赖 zlib（直播弹幕的压缩包体）。Windows runner
+      # 没有系统 zlib：用自带的 vcpkg 装一份静态库。选 static-md 是因为
+      # Qt / WebRTC 都用动态 CRT（/MD），static 的 /MT 会链接冲突。
+      - name: 安装 zlib
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install zlib:x64-windows-static-md
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: 配置（MSVC + VS 生成器）
         shell: pwsh
         run: |
+          # 不走 vcpkg 的 CMake 工具链，只把 zlib 的头文件和库路径交给
+          # FindZLIB —— 避免 vcpkg 介入 Qt / WebRTC 的 find_package。
+          # 静态库在 Windows 上叫 libzs.lib（不是 zlib.lib），直接找而不是猜名字。
+          $zlibRoot = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md"
+          $zlibLib = Get-ChildItem "$zlibRoot\lib\*.lib" | Select-Object -First 1
+          if (-not $zlibLib) { throw "vcpkg zlib 静态库不存在: $zlibRoot\lib" }
           cmake -S Client -B Client/build-release -G "Visual Studio 18 2026" -A x64 `
             -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
+            -DZLIB_INCLUDE_DIR="$zlibRoot\include" `
+            -DZLIB_LIBRARY="$($zlibLib.FullName)" `
             -DWEBRTC_ROOT="$env:WEBRTC_ROOT" `
             -DWEBRTC_WIN_SYSTEM_LIBS="$env:WEBRTC_WIN_SYSTEM_LIBS"
 
