@@ -7,6 +7,8 @@
 // 多对端之后这一层多了两件它该管的事：
 //   1. **该和谁建连** —— 谁发起、什么时候发起（syncPeers）
 //   2. **路由** —— 每条信令归哪个对端（靠 peerId 认领）
+//   3. **断线恢复** —— ICE Disconnected/Failed 时由发起方做 ICE restart，
+//      只换网络路径，轨道、DataChannel、DTLS 都保留（见 onIceDisconnected）
 //
 // 为什么要定"谁发起":网状网里若两端同时 CreateOffer,会撞成 glare
 // (双方都在 offer 状态，收到对方的 offer 谁也不知道该回滚谁)。
@@ -16,6 +18,7 @@
 #ifndef SYNCINE_SIGNALINGCHANNEL_H
 #define SYNCINE_SIGNALINGCHANNEL_H
 
+#include <QHash>
 #include <QObject>
 #include <QSet>
 #include <QString>
@@ -156,6 +159,9 @@ private slots:
     void onPeerClosed(const QString &peerId, const QString &link);
     void onPeerError(const QString &peerId, const QString &link, const QString &message);
 
+    void onIceDisconnected(const QString &peerId, const QString &link);
+    void onIceFailed(const QString &peerId, const QString &link);
+
     void onRoomEntered();
     void onRoomLeft();
     void onMembersChanged();
@@ -170,6 +176,13 @@ private:
     bool shouldInitiate(const QString &peerId) const;
     bool send(const QString &text);
 
+    // ---- ICE 恢复 ----
+    // Disconnected 后先等宽限期，Failed 立即尝试；最多重启若干次。
+    // 只有 shouldInitiate() 一侧真正发 offer，避免双方同时 restart 撞成 glare。
+    void scheduleIceRestart(const QString &peerId, const QString &link,
+                            int delayMs, bool countAttempt);
+    void clearIceRecovery(const QString &peerId, const QString &link);
+
     RoomSession *m_session = nullptr;
     NetworkManager *m_networkManager = nullptr;
     WebrtcManager *m_webrtcManager = nullptr;
@@ -180,6 +193,14 @@ private:
     // 键是 "peerId|link":一个对端有两条连接，各自独立协商、各自可能半开，
     // 所以必须分开记，否则第二条连接会被当成"已经发过了"而永远不发起。
     QSet<QString> m_offeredLinks;
+
+    // 每条 link 已经尝试过几次 ICE restart / 因为协商忙而推迟了几次。
+    QHash<QString, int> m_iceRestartAttempts;
+    QHash<QString, int> m_iceBusyRetries;
+    // 宽限期计时器的代次：每次重新计时/连上都换一个值，旧计时器醒来时
+    // 发现代次不匹配就直接退出，不需要真的销毁 QTimer。
+    QHash<QString, quint64> m_iceGraceGeneration;
+    quint64 m_iceGenerationCounter = 0;
 
     static QString offerKey(const QString &peerId, const QString &link);
 };

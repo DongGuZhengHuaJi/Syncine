@@ -4,6 +4,8 @@
 
 #include "SignalingChannel.h"
 
+#include <QTimer>
+
 #include "core/Log.h"
 #include "core/NetworkManager.h"
 #include "session/RoomSession.h"
@@ -14,6 +16,17 @@ namespace {
 LinkKind linkKindOf(const QString &link) {
     return link == QLatin1String("media") ? LinkKind::Media : LinkKind::Voice;
 }
+
+// ICE 恢复策略：
+//   · Disconnected 先等 5 秒，期间自行恢复就取消；
+//   · Failed 或宽限期结束才真正发起 restart；
+//   · 每次重试间隔 2s → 5s → 10s，最多 3 次；
+//   · restartIce() 返回 false 说明协商正忙，2 秒后再试，不计入重试次数。
+constexpr int kIceGraceMs = 5000;
+constexpr int kMaxIceRestarts = 3;
+constexpr int kIceRestartDelaysMs[] = {2000, 5000, 10000};
+constexpr int kIceBusyRetryMs = 2000;
+constexpr int kMaxIceBusyRetries = 5;
 
 } // namespace
 
@@ -231,6 +244,10 @@ bool SignalingChannel::ensurePeer(const QString &peerId) {
                 this, &SignalingChannel::onPeerClosed);
         connect(link, &PeerLink::errorOccurred,
                 this, &SignalingChannel::onPeerError);
+        connect(link, &PeerLink::iceDisconnected,
+                this, &SignalingChannel::onIceDisconnected);
+        connect(link, &PeerLink::iceFailed,
+                this, &SignalingChannel::onIceFailed);
     }
 
     return true;
@@ -272,8 +289,11 @@ void SignalingChannel::syncPeers() {
 }
 
 void SignalingChannel::teardownPeer(const QString &peerId) {
-    m_offeredLinks.remove(offerKey(peerId, linkKindId(LinkKind::Voice)));
-    m_offeredLinks.remove(offerKey(peerId, linkKindId(LinkKind::Media)));
+    for (const QString &link : {linkKindId(LinkKind::Voice),
+                                linkKindId(LinkKind::Media)}) {
+        m_offeredLinks.remove(offerKey(peerId, link));
+        clearIceRecovery(peerId, link);
+    }
     if (m_webrtcManager != nullptr)
         m_webrtcManager->removePeer(peerId);
 }
@@ -291,6 +311,9 @@ void SignalingChannel::onMembersChanged() {
 
 void SignalingChannel::onRoomLeft() {
     m_offeredLinks.clear();
+    m_iceRestartAttempts.clear();
+    m_iceBusyRetries.clear();
+    m_iceGraceGeneration.clear();
     if (m_webrtcManager != nullptr)
         m_webrtcManager->closeAllPeers();
 }
@@ -396,6 +419,8 @@ void SignalingChannel::onMessage(const QString &text) {
 // ============================
 
 void SignalingChannel::onPeerConnected(const QString &peerId, const QString &link) {
+    // 连接后清除 ICE 恢复状态
+    clearIceRecovery(peerId, link);
     LOG_INFO("Signaling") << "与对端" << peerId << "的" << link << "连接已建立";
     emit peerConnected(peerId);
 }
@@ -403,15 +428,118 @@ void SignalingChannel::onPeerConnected(const QString &peerId, const QString &lin
 void SignalingChannel::onPeerClosed(const QString &peerId, const QString &link) {
     // 两条连接各自会发这个信号 —— 一条断了不代表对端没了，所以这里不
     // 直接对外报"对端断开",只记日志。真正判断对端是否还在，看成员表。
+    clearIceRecovery(peerId, link);
     LOG_DEBUG("Signaling") << "对端" << peerId << "的" << link << "连接已关闭";
 }
 
 void SignalingChannel::onPeerError(const QString &peerId, const QString &link,
                                    const QString &message) {
-    // 连接级错误（ICE 失败、协商失败）不弹给用户：网状网里一个人掉线
+    // 连接级错误（协商失败等）不弹给用户：网状网里一个人掉线
     // 不该打断其他人。只报给上层，由它决定怎么处理。
     LOG_ERROR("Signaling") << "对端" << peerId << "的" << link << "连接出错:" << message;
     emit errorOccurred(message);
+}
+
+// ============================
+// ICE 恢复
+// ============================
+//
+// 三条约束决定了这里的形状：
+//   1. 只有 shouldInitiate() 一侧能发 offer，否则双方同时 restart 会撞 glare；
+//   2. OnIceConnectionChange 运行在 WebRTC 信令线程，QTimer/状态操作必须
+//      回到主线程 —— 这里靠 PeerLink 的信号 + 本对象住主线程自动排队；
+//   3. Disconnected 可能自己恢复，Failed 不会，所以两者用不同的等待时间。
+
+void SignalingChannel::onIceDisconnected(const QString &peerId, const QString &link) {
+    // 应答方不重启，等发起方的新 offer。两边都重启会各发一份 offer。
+    if (!shouldInitiate(peerId))
+        return;
+
+    const QString key = offerKey(peerId, link);
+    const quint64 generation = ++m_iceGenerationCounter;
+    m_iceGraceGeneration[key] = generation;
+
+    LOG_DEBUG("Signaling") << "ICE 断开,进入" << kIceGraceMs / 1000 << "秒宽限期:"
+                           << peerId << link;
+    QTimer::singleShot(kIceGraceMs, this, [this, peerId, link, key, generation] {
+        // 宽限期内恢复成 Connected 会移除这个 key；代次不匹配说明已经恢复，
+        // 或者已经有更新的重启请求在排队。
+        if (m_iceGraceGeneration.value(key) != generation)
+            return;
+        LOG_WARN("Signaling") << "ICE 宽限期结束仍未恢复,发起 restart:" << peerId << link;
+        scheduleIceRestart(peerId, link, 0, /*countAttempt=*/true);
+    });
+}
+
+void SignalingChannel::onIceFailed(const QString &peerId, const QString &link) {
+    if (!shouldInitiate(peerId))
+        return;
+
+    LOG_WARN("Signaling") << "ICE 失败,立即尝试 restart:" << peerId << link;
+    scheduleIceRestart(peerId, link, 0, /*countAttempt=*/true);
+}
+
+void SignalingChannel::scheduleIceRestart(const QString &peerId, const QString &link,
+                                          int delayMs, bool countAttempt) {
+    if (m_session == nullptr || m_webrtcManager == nullptr)
+        return;
+    if (!shouldInitiate(peerId))
+        return;
+
+    const QString key = offerKey(peerId, link);
+
+    // 新的重启请求作废尚未到期的宽限期计时器。
+    m_iceGraceGeneration.remove(key);
+
+    const int attempt = m_iceRestartAttempts.value(key, 0);
+    if (countAttempt) {
+        if (attempt >= kMaxIceRestarts) {
+            // 连续失败放弃重连
+            LOG_ERROR("Signaling") << "ICE restart 连续失败,放弃:" << peerId << link;
+            emit errorOccurred(QStringLiteral("与 %1 的连接无法恢复").arg(peerId));
+            return;
+        }
+        m_iceRestartAttempts[key] = attempt + 1;
+    }
+
+    const int delay = delayMs > 0
+        ? delayMs
+        : kIceRestartDelaysMs[qBound(0, attempt, kMaxIceRestarts - 1)];
+
+    QTimer::singleShot(delay, this, [this, peerId, link, key] {
+        if (m_session == nullptr || !m_session->inRoom())
+            return;
+
+        PeerLink *peer = m_webrtcManager->peer(peerId, linkKindOf(link));
+        if (peer == nullptr)
+            return;
+
+        if (!peer->restartIce()) {
+            // 上一次 offer/answer 还没结束。不要把它算成一次失败的重启，
+            // 过 2 秒再试；连续撞上多次说明协商状态卡住了，别无限循环。
+            if (m_iceBusyRetries.value(key, 0) >= kMaxIceBusyRetries) {
+                LOG_ERROR("Signaling") << "协商状态卡住，ICE restart 放弃:"
+                                       << peerId << link;
+                emit errorOccurred(QStringLiteral("与 %1 的连接无法恢复").arg(peerId));
+                return;
+            }
+            ++m_iceBusyRetries[key];
+            scheduleIceRestart(peerId, link, kIceBusyRetryMs, /*countAttempt=*/false);
+            return;
+        }
+
+        m_iceBusyRetries.remove(key);
+        LOG_INFO("Signaling") << "已发起 ICE restart:" << peerId << link
+                              << "attempt=" << m_iceRestartAttempts.value(key);
+    });
+}
+
+void SignalingChannel::clearIceRecovery(const QString &peerId, const QString &link) {
+    const QString key = offerKey(peerId, link);
+    // 移除代次即可让尚未到期的宽限期计时器醒来后直接退出。
+    m_iceGraceGeneration.remove(key);
+    m_iceRestartAttempts.remove(key);
+    m_iceBusyRetries.remove(key);
 }
 
 bool SignalingChannel::send(const QString &text) {

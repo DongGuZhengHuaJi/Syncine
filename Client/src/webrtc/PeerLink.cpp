@@ -164,7 +164,7 @@ void PeerLink::close() {
 // 信令入站
 // ============================
 
-void PeerLink::createOffer() {
+void PeerLink::createOffer(bool iceRestart) {
     if (m_connection == nullptr) {
         emitError(QStringLiteral("连接未建立,无法发起协商"));
         return;
@@ -175,8 +175,31 @@ void PeerLink::createOffer() {
     }
 
     webrtc::PeerConnectionInterface::RTCOfferAnswerOptions options;
+    // ICE restart 只换网络路径（新的 ufrag/pwd + 候选），轨道、DataChannel、
+    // DTLS 都不受影响。对端按普通 offer 处理，回 answer 即可。
+    options.ice_restart = iceRestart;
+    if (iceRestart)
+        LOG_INFO("PeerLink") << m_peerId << ":" << linkId() << "发起 ICE restart";
+
     m_pendingOperation = PendingOperation::SetLocalOffer;
+    m_iceRestartOffer.store(iceRestart);
     m_connection->CreateOffer(this, options);
+}
+
+bool PeerLink::restartIce() {
+    if (m_connection == nullptr)
+        return false;
+
+    // 正在做 offer/answer 时不能插队：signaling state 不是 stable，
+    // CreateOffer 会失败。调用方（SignalingChannel）隔一会儿再试。
+    if (m_pendingOperation != PendingOperation::None) {
+        LOG_DEBUG("PeerLink") << m_peerId << ":" << linkId()
+                              << "协商进行中,ICE restart 稍后重试";
+        return false;
+    }
+
+    createOffer(true);
+    return true;
 }
 
 void PeerLink::setRemoteDescription(const QString &sdp, const QString &type) {
@@ -448,9 +471,14 @@ void PeerLink::OnRenegotiationNeeded() {
 }
 
 void PeerLink::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState state) {
+    // close() 之后仍可能有排队的回调进来，此时不应再触发恢复流程。
+    if (m_connection == nullptr)
+        return;
+
     switch (state) {
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionConnected:
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionCompleted:
+        m_everConnected = true;
         // 协商完成后必须再落一次电影音轨的发送状态：协商会重新启动发送流，
         // 只靠建连前的设置会被覆盖。OnConnectionChange 未必在所有版本都触发，
         // 两个回调都补一次是幂等的。
@@ -458,10 +486,23 @@ void PeerLink::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnect
         emit connected(m_peerId, linkId());
         break;
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionFailed:
-        emitError(QStringLiteral("ICE 连接失败(双方可能不在同一网络)"));
+        if (!m_everConnected) {
+            // 未连接成功过，不进行重连
+            emitError(QStringLiteral("ICE 连接失败"));
+            break;
+        }
+        // Failed 不会自行恢复，必须由应用发起 ICE restart。
+        LOG_WARN("PeerLink") << m_peerId << ":" << linkId()
+                             << "ICE 连接失败,等待重启";
+        emit iceFailed(m_peerId, linkId());
         break;
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionDisconnected:
-        LOG_WARN("PeerLink") << m_peerId << "ICE 断开";
+        if (!m_everConnected)
+            break;
+        // Disconnected 可能只是短暂抖动，先给一个宽限期；由 SignalingChannel
+        // 决定是等它自行恢复还是发起 restart。
+        LOG_WARN("PeerLink") << m_peerId << ":" << linkId() << "ICE 断开";
+        emit iceDisconnected(m_peerId, linkId());
         break;
     default:
         break;
@@ -629,6 +670,15 @@ void PeerLink::OnSuccess(webrtc::SessionDescriptionInterface *desc) {
 
 void PeerLink::OnFailure(webrtc::RTCError error) {
     m_pendingOperation = PendingOperation::None;
+    const bool wasIceRestart = m_iceRestartOffer.exchange(false);
+    LOG_WARN("PeerLink") << m_peerId << ":" << linkId()
+                         << "协商失败:" << error.message();
+    if (wasIceRestart) {
+        // ICE restart 的 offer/answer 自己失败了：重新交给 SignalingChannel
+        // 排队重试，而不是当成普通协商错误。
+        emit iceFailed(m_peerId, linkId());
+        return;
+    }
     emitError(QStringLiteral("协商失败: ") + QString::fromStdString(error.message()));
 }
 
@@ -666,7 +716,10 @@ void PeerLink::OnSuccess() {
         break;
 
     case PendingOperation::SetRemoteAnswer:
-        // 这是发起方：answer 已就位，协商完成，等着 ICE 打通
+        // 这是发起方：answer 已就位，协商完成，等着 ICE 打通。
+        // ICE restart 到这里才算真正完成（offer 发出去但 answer 失败的
+        // 情况由 OnFailure 重新排队）。
+        m_iceRestartOffer.store(false);
         m_remoteDescriptionSet = true;
         flushPendingCandidates();
         break;

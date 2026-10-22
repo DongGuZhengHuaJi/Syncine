@@ -69,7 +69,12 @@ public:
     }
 
     // ---- 信令入站（由 WebrtcManager 转发）----
-    void createOffer();
+    // iceRestart=true 时，生成的 offer 会换一组 ICE ufrag/pwd 并重新收集候选：
+    // 轨道、DataChannel、DTLS 都保留，只换网络路径。前提是当前没有别的协商
+    // 在进行（signaling state 必须是 stable）。
+    void createOffer(bool iceRestart = false);
+    // 请求一次 ICE restart。协商正忙时返回 false，调用方稍后重试。
+    bool restartIce();
     void setRemoteDescription(const QString &sdp, const QString &type);
     void addIceCandidate(const QString &sdp, const QString &sdpMid, int sdpMLineIndex);
 
@@ -143,6 +148,11 @@ signals:
     void connected(const QString &peerId, const QString &link);
     void closed(const QString &peerId, const QString &link);
     void errorOccurred(const QString &peerId, const QString &link, const QString &message);
+    // ICE 断开（可能自行恢复）与 ICE 失败（不会自行恢复）。
+    // 这两个回调运行在 WebRTC 信令线程，重启决策由 SignalingChannel 在
+    // 主线程做，不要在这里直接发起协商。
+    void iceDisconnected(const QString &peerId, const QString &link);
+    void iceFailed(const QString &peerId, const QString &link);
 
     // 数据通道状态与消息。信号可能从 WebRTC 信令线程发出，
     // 接收方位于主线程时由 Qt 自动排队投递
@@ -250,8 +260,19 @@ private:
     bool m_dataChannelOpenReported RTC_GUARDED_BY(m_dataChannelLock) = false;
     bool m_dataChannelClosedReported RTC_GUARDED_BY(m_dataChannelLock) = false;
 
-    // 等待执行的操作
-    PendingOperation m_pendingOperation = PendingOperation::None;
+    // 等待执行的操作。
+    // createOffer()/restartIce() 在主线程调用，OnSuccess/OnFailure 在 WebRTC
+    // 信令线程回调，所以这个标记必须是原子的。
+    std::atomic<PendingOperation> m_pendingOperation{PendingOperation::None};
+
+    // 当前本地 offer 是否带 ICE restart。CreateOffer/SetLocalDescription
+    // 失败时据此重新排队，而不是当成普通协商错误放弃。
+    std::atomic<bool> m_iceRestartOffer{false};
+
+    // 这条连接是否成功连通过。只有"连通过再断"才值得 ICE restart；
+    // 初次就连不上（没有可用候选、端口被防火墙挡住）重启也救不了，
+    // 保留原来的立即报错行为。只在 WebRTC 信令线程读写。
+    bool m_everConnected = false;
 
     // 已设好远端描述？
     bool m_remoteDescriptionSet = false;
