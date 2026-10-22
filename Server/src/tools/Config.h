@@ -5,12 +5,14 @@
 #ifndef SERVER_CONFIG_H
 #define SERVER_CONFIG_H
 
+#include "ServerOptions.h"
+
 #include <cstddef>
 #include <string>
 
 class Config {
-    // 服务器配置。后续改为从配置文件读取。
 public:
+    // 生产默认值。测试通过显式注入 ServerOptions 缩短超时、缩小队列。
     inline static const std::string SERVER_ADDRESS = "0.0.0.0";
     inline static const unsigned short SERVER_PORT = 8765;
 
@@ -36,6 +38,14 @@ public:
     // title / url，几十 KB 足够，而日志里会记 title（见 LogicSystem 的
     // 「播放列表添加」），16 MB 的 title 能把日志轮转冲垮。
     inline static const std::size_t MAX_MESSAGE_BYTES = 64 * 1024;
+
+    static ServerOptions serverOptions() {
+        ServerOptions options;
+        options.address = SERVER_ADDRESS;
+        options.port = SERVER_PORT;
+        options.maxMessageBytes = MAX_MESSAGE_BYTES;
+        return options;
+    }
 };
 
 #endif //SERVER_CONFIG_H
