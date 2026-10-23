@@ -13,6 +13,13 @@ namespace {
 // 超时（几十秒）—— 那期间界面一直"连接中…",用户只能干等
 constexpr int kConnectTimeoutMs = 8000;
 
+// 客户端心跳。连接建立后每 10 秒 ping 一次；15 秒内没收到对应 pong 就
+// 主动 abort。服务端（Beast）会自动回 pong，正常连接不会有额外负担。
+// 没有心跳时，"网络静默黑洞"只能等 TCP 重传超时，可能要几分钟才会
+// 触发 disconnected —— 那期间界面仍显示已连接，播放控制全部发不出去。
+constexpr int kPingIntervalMs = 10 * 1000;
+constexpr int kPongTimeoutMs = 15 * 1000;
+
 // 整轮失败后的重试间隔：第一次 15 秒，之后每次翻倍，60 秒封顶
 constexpr int kRetryBaseMs = 15 * 1000;
 constexpr int kRetryMaxMs = 60 * 1000;
@@ -26,6 +33,30 @@ NetworkManager::NetworkManager(AppSettings *settings, QObject *parent)
 
     m_connectTimer.setSingleShot(true);
     m_retryTimer.setSingleShot(true);
+    m_pongTimeout.setSingleShot(true);
+    m_pingTimer.setInterval(kPingIntervalMs);
+    m_pongTimeout.setInterval(kPongTimeoutMs);
+
+    // 心跳发送：payload 用递增序号，pong 回来时据此判断是不是这一轮的。
+    // 上一个 pong 还没回来时不重复发——m_pongTimeout 正在计时，超时就会断开。
+    connect(&m_pingTimer, &QTimer::timeout, this, [this]() {
+        if (!m_connected || m_pongTimeout.isActive())
+            return;
+
+        m_pingPayload = QByteArray::number(++m_pingCounter);
+        LOG_TRACE("Network") << "发送心跳 ping" << m_pingPayload;
+        m_webSocket->ping(m_pingPayload);
+        m_pongTimeout.start();
+    });
+
+    connect(&m_pongTimeout, &QTimer::timeout, this, [this]() {
+        if (!m_connected)
+            return;
+
+        LOG_WARN("Network") << "心跳超时，主动断开:" << m_currentUrl.toString();
+        m_pingTimer.stop();
+        abortSocket();
+    });
 
     connect(&m_connectTimer, &QTimer::timeout, this, [this]() {
         if (m_connected)
@@ -52,6 +83,8 @@ NetworkManager::NetworkManager(AppSettings *settings, QObject *parent)
             m_failedRounds = 0;
             LOG_INFO("Network") << "已连接:" << m_currentUrl.toString()
                                 << (m_usingFallback ? "(内置地址)" : "(用户设置地址)");
+            // 连上之后才开始心跳；连接尝试阶段不 ping。
+            m_pingTimer.start();
             emit connected();
             emit isConnectedChanged();
             emit stateChanged();
@@ -84,6 +117,16 @@ NetworkManager::NetworkManager(AppSettings *settings, QObject *parent)
         this,
         [this](const QString &message) {
             emit messageReceived(message);
+        }
+    );
+
+    // 只认当前这一轮 ping 的 payload：旧 ping 的 pong 晚到不能抵消新的超时。
+    connect(m_webSocket.get(), &QWebSocket::pong, this,
+        [this](quint64 elapsedTime, const QByteArray &payload) {
+            LOG_TRACE("Network") << "收到心跳 pong:" << payload
+                                 << "往返" << elapsedTime << "ms";
+            if (payload == m_pingPayload)
+                m_pongTimeout.stop();
         }
     );
 
@@ -259,6 +302,8 @@ void NetworkManager::scheduleRetry() {
 void NetworkManager::stopTimers() {
     m_connectTimer.stop();
     m_retryTimer.stop();
+    m_pingTimer.stop();
+    m_pongTimeout.stop();
 }
 
 void NetworkManager::abortSocket() {

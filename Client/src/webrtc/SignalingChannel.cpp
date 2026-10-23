@@ -56,6 +56,14 @@ SignalingChannel::SignalingChannel(RoomSession *session,
     connect(m_session, &RoomSession::membersChanged,
             this, &SignalingChannel::onMembersChanged);
 
+    connect(m_session, &RoomSession::memberOnline,
+            this, &SignalingChannel::onMemberOnline);
+
+    // clientId 变化意味着对端看到的已经是另一个成员：旧 id 的 PeerConnection
+    // 在对端那边已经被拆掉，本地也必须一起拆，等 entered 按新 id 重建。
+    connect(m_session, &RoomSession::clientIdChanged,
+            this, &SignalingChannel::onClientIdChanged);
+
     // 转发 WebrtcManager 的状态信号给 QML,不要自己存状态。
     connect(m_webrtcManager, &WebrtcManager::audioEnabledChanged,
             this, &SignalingChannel::audioEnabledChanged);
@@ -268,10 +276,21 @@ void SignalingChannel::syncPeers() {
 
     // 建立新连接
     for (const QString &peerId : want) {
+        const bool online = m_session->isMemberOnline(peerId);
+        const bool hasConnection =
+            m_webrtcManager->peer(peerId, LinkKind::Voice) != nullptr;
+
+        // 对方断线等待重连：已有连接先留着（P2P 可能还活着），
+        // 但不要新建，也不要往一个离线成员发 offer。
+        if (!online && !hasConnection) {
+            LOG_DEBUG("Signaling") << "成员离线等待重连,暂不建连:" << peerId;
+            continue;
+        }
+
         if (!ensurePeer(peerId))
             continue;
 
-        if (!shouldInitiate(peerId))
+        if (!online || !shouldInitiate(peerId))
             continue;
 
         // 两条连接各自独立发起 —— 它们是两次完全独立的 SDP 协商，
@@ -300,6 +319,8 @@ void SignalingChannel::teardownPeer(const QString &peerId) {
 
 void SignalingChannel::onRoomEntered() {
     syncPeers();
+    // 信令断线期间 ICE restart 的 offer 发不出去；resume 成功后重新排一次。
+    rearmIceRecovery();
 }
 
 void SignalingChannel::onMembersChanged() {
@@ -309,13 +330,29 @@ void SignalingChannel::onMembersChanged() {
     syncPeers();
 }
 
+void SignalingChannel::onMemberOnline(const QString &clientId) {
+    LOG_INFO("Signaling") << "成员恢复在线,重新对齐连接:" << clientId;
+    syncPeers();
+    // 对端离线期间，ICE restart 的 offer 会被服务端判成 member_not_found；
+    // 现在它回来了，重新给满重试次数。
+    rearmIceRecovery();
+}
+
 void SignalingChannel::onRoomLeft() {
     m_offeredLinks.clear();
     m_iceRestartAttempts.clear();
     m_iceBusyRetries.clear();
     m_iceGraceGeneration.clear();
+    m_iceFailedLinks.clear();
     if (m_webrtcManager != nullptr)
         m_webrtcManager->closeAllPeers();
+}
+
+void SignalingChannel::onClientIdChanged() {
+    // 首次进房时没有连接可拆；断线重连/换房时这里必须清空，
+    // 否则会继续用旧 id 的 PeerConnection 跟同一个对端通信。
+    LOG_DEBUG("Signaling") << "本端 clientId 变化，重置所有对端连接";
+    onRoomLeft();
 }
 
 // ============================
@@ -475,6 +512,9 @@ void SignalingChannel::onIceFailed(const QString &peerId, const QString &link) {
     if (!shouldInitiate(peerId))
         return;
 
+    // 记下来：如果此时信令也断了，restart offer 发不出去；
+    // room resumed 后 rearmIceRecovery() 会重新尝试。
+    m_iceFailedLinks.insert(offerKey(peerId, link));
     LOG_WARN("Signaling") << "ICE 失败,立即尝试 restart:" << peerId << link;
     scheduleIceRestart(peerId, link, 0, /*countAttempt=*/true);
 }
@@ -492,27 +532,37 @@ void SignalingChannel::scheduleIceRestart(const QString &peerId, const QString &
     m_iceGraceGeneration.remove(key);
 
     const int attempt = m_iceRestartAttempts.value(key, 0);
-    if (countAttempt) {
-        if (attempt >= kMaxIceRestarts) {
-            // 连续失败放弃重连
-            LOG_ERROR("Signaling") << "ICE restart 连续失败,放弃:" << peerId << link;
-            emit errorOccurred(QStringLiteral("与 %1 的连接无法恢复").arg(peerId));
-            return;
-        }
-        m_iceRestartAttempts[key] = attempt + 1;
+    if (countAttempt && attempt >= kMaxIceRestarts) {
+        LOG_ERROR("Signaling") << "ICE restart 连续失败,放弃:" << peerId << link;
+        emit errorOccurred(QStringLiteral("与 %1 的连接无法恢复").arg(peerId));
+        return;
     }
 
     const int delay = delayMs > 0
         ? delayMs
         : kIceRestartDelaysMs[qBound(0, attempt, kMaxIceRestarts - 1)];
 
-    QTimer::singleShot(delay, this, [this, peerId, link, key] {
+    QTimer::singleShot(delay, this, [this, peerId, link, key, countAttempt] {
         if (m_session == nullptr || !m_session->inRoom())
             return;
+
+        // 信令还没恢复：offer 发不出去。不要消耗重试次数，
+        // 保留失败标记，等 room resumed 后的 rearm 再来。
+        if (m_networkManager == nullptr || !m_networkManager->isConnected()) {
+            m_iceFailedLinks.insert(key);
+            return;
+        }
 
         PeerLink *peer = m_webrtcManager->peer(peerId, linkKindOf(link));
         if (peer == nullptr)
             return;
+
+        const int current = m_iceRestartAttempts.value(key, 0);
+        if (countAttempt && current >= kMaxIceRestarts) {
+            LOG_ERROR("Signaling") << "ICE restart 连续失败,放弃:" << peerId << link;
+            emit errorOccurred(QStringLiteral("与 %1 的连接无法恢复").arg(peerId));
+            return;
+        }
 
         if (!peer->restartIce()) {
             // 上一次 offer/answer 还没结束。不要把它算成一次失败的重启，
@@ -528,10 +578,34 @@ void SignalingChannel::scheduleIceRestart(const QString &peerId, const QString &
             return;
         }
 
+        if (countAttempt)
+            m_iceRestartAttempts[key] = current + 1;
         m_iceBusyRetries.remove(key);
         LOG_INFO("Signaling") << "已发起 ICE restart:" << peerId << link
                               << "attempt=" << m_iceRestartAttempts.value(key);
     });
+}
+
+void SignalingChannel::rearmIceRecovery() {
+    if (m_session == nullptr || m_webrtcManager == nullptr)
+        return;
+
+    const QList<QString> failed = m_iceFailedLinks.values();
+    for (const QString &key : failed) {
+        const int separator = key.indexOf(QLatin1Char('|'));
+        if (separator <= 0)
+            continue;
+        const QString peerId = key.left(separator);
+        const QString link = key.mid(separator + 1);
+        if (m_webrtcManager->peer(peerId, linkKindOf(link)) == nullptr)
+            continue;
+
+        // 断线期间那些重启尝试根本没有发出去，重新给满次数。
+        m_iceRestartAttempts.remove(key);
+        m_iceBusyRetries.remove(key);
+        LOG_INFO("Signaling") << "信令已恢复,重新尝试 ICE restart:" << peerId << link;
+        scheduleIceRestart(peerId, link, 0, /*countAttempt=*/true);
+    }
 }
 
 void SignalingChannel::clearIceRecovery(const QString &peerId, const QString &link) {
@@ -540,6 +614,7 @@ void SignalingChannel::clearIceRecovery(const QString &peerId, const QString &li
     m_iceGraceGeneration.remove(key);
     m_iceRestartAttempts.remove(key);
     m_iceBusyRetries.remove(key);
+    m_iceFailedLinks.remove(key);
 }
 
 bool SignalingChannel::send(const QString &text) {

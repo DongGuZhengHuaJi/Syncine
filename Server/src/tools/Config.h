@@ -36,6 +36,11 @@ public:
     // title / url，几十 KB 足够，而日志里会记 title（见 LogicSystem 的
     // 「播放列表添加」），16 MB 的 title 能把日志轮转冲垮。
     inline static const std::size_t MAX_MESSAGE_BYTES = 64 * 1024;
+
+    // 成员断线后保留其会话的时长（秒）。客户端在这段时间内可以用
+    // resume token 恢复原 clientId，其他人看不到 member_left/joined。
+    // 必须大于客户端的重连宽限期（90 秒）。
+    inline static const int MEMBER_OFFLINE_GRACE_SECONDS = 120;
 };
 
 #endif //SERVER_CONFIG_H

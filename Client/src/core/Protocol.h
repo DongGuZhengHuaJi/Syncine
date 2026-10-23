@@ -24,6 +24,9 @@ enum class MessageType {
     // 房间内
     MemberJoined,
     MemberLeft,
+    // 断线重连的成员恢复在线（clientId 不变，成员表里本来就有他）。
+    // 不能复用 member_joined：那会让界面显示"加入了房间"并触发重复插入。
+    MemberOnline,
     Chat,
     Playback,
     PlaybackPosition,   // 房主周期性广播的播放位置（观众据此绘制进度条）
@@ -48,7 +51,9 @@ enum class MessageType {
 struct Message {
     MessageType type = MessageType::Unknown;
 
-    // welcome
+    // welcome / room_created / room_joined
+    // welcome 里是连接 id；room_created/room_joined 里是**稳定成员 id**——
+    // 断线重连（resume）后仍与重连前相同。
     QString clientId;
 
     // room_created / room_joined
@@ -58,6 +63,10 @@ struct Message {
     QList<Member> members;
     bool videoMismatched = false;
     qint64 shortestDuration = 0;
+    // 断线重连凭据。只保存在内存里，不落盘、不写日志。
+    QString resumeToken;
+    // 这次 room_joined 是 resume 的结果（房间页已经存在，不应重新 push）
+    bool resumed = false;
 
     // playlist_changed / playlist_switched / state.playlist
     QList<PlaylistEntry> playlist;
@@ -115,6 +124,12 @@ QString encodeCreateRoom(const QString &roomId,
 QString encodeJoinRoom(const QString &roomId,
                        const QString &nickname,
                        const QString &password);
+
+// 断线重连：用 roomId + 稳定 clientId + resumeToken 恢复原成员身份。
+// 服务端成功时回一条 resumed=true 的 room_joined（clientId 不变）。
+QString encodeResume(const QString &roomId,
+                     const QString &clientId,
+                     const QString &resumeToken);
 
 QString encodeLeaveRoom();
 

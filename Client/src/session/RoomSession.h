@@ -105,6 +105,8 @@ public:
     QString clientId() const;
     RoomMode roomMode() const;
     bool isHost() const;
+    // 某成员当前是否在线（断线等待重连期间为 false）
+    bool isMemberOnline(const QString &clientId) const;
     MemberModel *members() const;
     PlaylistModel *playlist() const;
     bool videoMismatched() const;
@@ -195,6 +197,8 @@ signals:
 
     void memberJoined(const QString &nickname);
     void memberLeft(const QString &nickname);
+    // 断线重连的成员恢复在线（clientId 不变）
+    void memberOnline(const QString &clientId);
 
     void chatReceived(const QString &from, const QString &text);
     void playbackCommandReceived(RoomSession::PlaybackAction action, qint64 position,
@@ -216,6 +220,7 @@ private slots:
 private:
     void handleMemberJoined(const Protocol::Message &message);
     void handleMemberLeft(const Protocol::Message &message);
+    void handleMemberOnline(const Protocol::Message &message);
     void handlePlayback(const Protocol::Message &message);
     void handleVideoStatus(const Protocol::Message &message);
     void handleVideoMismatch(const Protocol::Message &message);

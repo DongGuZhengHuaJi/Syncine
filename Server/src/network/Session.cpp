@@ -8,6 +8,9 @@
 #include "RandomGen.h"
 #include "LogicSystem.h"
 
+#include <chrono>
+#include <exception>
+
 #include <nlohmann/json.hpp>
 
 Session::Session(asio::ip::tcp::socket &&socket)
@@ -27,6 +30,16 @@ void Session::start() {
     // （最大字段是 title / url）；超限的消息会被当成协议错误断连，不必先
     // 把它整个读进内存再解析。
     m_ws->read_message_max(Config::MAX_MESSAGE_BYTES);
+
+
+    try {
+        m_ws->set_option(websocket::stream_base::timeout{
+            std::chrono::seconds(10),  // handshake_timeout
+            std::chrono::seconds(20),  // idle_timeout
+            true});                    // keep_alive_pings
+    } catch (const std::exception &e) {
+        LOG_WARN("Session") << "设置 WebSocket 超时选项失败: " << e.what();
+    }
 
     // 先完成 WebSocket 握手，再发 welcome 并开始收消息
     m_ws->async_accept([this, self = shared_from_this()](beast::error_code ec) {
@@ -54,6 +67,17 @@ void Session::stop() {
         LOG_DEBUG("Session") << "关闭连接返回错误（通常为对端已断开）: clientId=" << m_id
                              << " " << ec.message();
     }
+}
+
+void Session::stopLater() {
+    auto self = shared_from_this();
+    asio::post(m_ws->get_executor(), [self]() {
+        // 直接关底层 TCP，不做 WebSocket closing handshake：旧连接可能
+        // 已经半开，beast 的同步 close 会阻塞 io_context。挂起的 async_read
+        // 会以错误完成，照常触发 onDisconnected/onClose。
+        beast::error_code ec;
+        self->m_ws->next_layer().close(ec);
+    });
 }
 
 std::string Session::id() const {

@@ -19,6 +19,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QTimer>
 
 #include <qqmlintegration.h>
 
@@ -42,6 +43,12 @@ class SessionController : public QObject {
                READ nickname
                NOTIFY nicknameChanged)
 
+    // 信令断开后保留房间、等待自动回房。QML 用它显示重连提示，
+    // 不要在这期间把房间页弹回首页。
+    Q_PROPERTY(bool reconnecting
+               READ reconnecting
+               NOTIFY reconnectingChanged)
+
 public:
     SessionController(NetworkManager *networkManager,
                       RoomSession *roomSession,
@@ -50,6 +57,7 @@ public:
 
     bool busy() const;
     QString nickname() const;
+    bool reconnecting() const { return m_reconnecting; }
 
     Q_INVOKABLE void createRoom(const QString &roomName,
                                 const QString &nickname,
@@ -62,9 +70,11 @@ public:
 signals:
     void busyChanged();
     void nicknameChanged();
+    void reconnectingChanged();
 
     void roomCreated();
     void roomJoined();
+    void roomResumed();
 
     void errorOccurred(const QString &errorString);
 
@@ -86,10 +96,18 @@ private:
     void setAwaitingReply(bool awaiting);
     RoomSnapshot snapshotFrom(const Protocol::Message &message) const;
 
+    // ---- 断线重连 ----
+    void startReconnect();
+    void stopReconnect();
+    void sendRejoinRequest();
+    void abortReconnectAndLeave(const QString &reason);
+    void clearRoomCredentials();
+
     NetworkManager *m_networkManager = nullptr;
     RoomSession *m_roomSession = nullptr;
 
-    QString m_clientId;     // welcome 握手得到的身份
+    QString m_clientId;     // 当前连接的 id（welcome 下发；resume 后会被稳定 id 覆盖）
+    QString m_roomClientId; // 房间成员表里的稳定 id，重连后不变
     QString m_nickname;
 
     PendingRequest m_pending = PendingRequest::None;
@@ -99,6 +117,16 @@ private:
     QString m_pendingPassword;
 
     bool m_awaitingReply = false;
+
+    // 最近一次成功进入的房间。只放内存，不落盘、不写日志。
+    QString m_roomId;
+    // 断线重连凭据：稳定成员 id + resume token
+    QString m_resumeToken;
+
+    bool m_reconnecting = false;
+    bool m_rejoinInFlight = false;
+    int m_rejoinAttempts = 0;       // 仅用于日志
+    QTimer m_reconnectDeadline;     // 宽限期：超时后彻底退房
 };
 
 #endif //SYNCINE_SESSIONCONTROLLER_H

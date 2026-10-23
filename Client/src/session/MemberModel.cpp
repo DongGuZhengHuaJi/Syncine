@@ -105,6 +105,22 @@ std::optional<Member> MemberModel::remove(const QString &clientId) {
     return std::nullopt;
 }
 
+bool MemberModel::setOnline(const QString &clientId, bool online) {
+    for (Member &member : m_members) {
+        if (member.clientId != clientId)
+            continue;
+        if (member.online == online)
+            return true;
+
+        member.online = online;
+        LOG_DEBUG("Member") << "成员在线状态更新: " << member.nickname
+                            << " online=" << (online ? 1 : 0);
+        notifyChanged();
+        return true;
+    }
+    return false;
+}
+
 bool MemberModel::setVideoStatus(const QString &clientId, bool loaded, qint64 duration) {
     for (int i = 0; i < m_members.size(); ++i) {
         Member &member = m_members[i];
@@ -184,6 +200,14 @@ bool MemberModel::contains(const QString &clientId) const {
     for (const Member &member : m_members) {
         if (member.clientId == clientId)
             return true;
+    }
+    return false;
+}
+
+bool MemberModel::isOnline(const QString &clientId) const {
+    for (const Member &member : m_members) {
+        if (member.clientId == clientId)
+            return member.online;
     }
     return false;
 }

@@ -5,6 +5,7 @@
 #ifndef SERVER_ROOM_H
 #define SERVER_ROOM_H
 
+#include <chrono>
 #include <map>
 #include <memory>
 #include <string>
@@ -66,14 +67,36 @@ public:
     void addMember(std::shared_ptr<Session> session, std::string nickname, bool isHost);
     // 返回是否真的移除了成员
     bool removeMember(const std::shared_ptr<Session> &session);
+    // 按稳定 clientId 移除（离线成员过期时用）
+    bool removeMemberByClientId(const std::string &clientId, std::string *nickname,
+                                bool *wasHost);
     bool isHost(const std::shared_ptr<Session> &session) const;
     bool hasNickname(const std::string &nickname) const;
     std::string nicknameOf(const std::shared_ptr<Session> &session) const;
+    // 会话对应的稳定成员 id（重连后不变）。不在成员表中返回空串。
+    std::string clientIdOf(const std::shared_ptr<Session> &session) const;
+    // 在线成员数 / 全部成员数（含离线等待重连的）
+    std::size_t onlineCount() const;
+    std::size_t memberCount() const;
     std::vector<std::shared_ptr<Session>> sessions() const;
-    // 按 clientId 查找成员（用于 WebRTC 信令等定向转发）
+    // 按 clientId 查找**在线**成员（用于 WebRTC 信令等定向转发）
     std::shared_ptr<Session> findSession(const std::string &clientId) const;
-    // 房主的会话（房间里没有房主时返回 nullptr）
+    // 房主的会话（房主离线时返回 nullptr）
     std::shared_ptr<Session> hostSession() const;
+
+    // ---- 断线重连（2A）----
+    // 标记成员离线，保留其成员记录/MemberFile/播放列表上报；返回是否找到
+    bool markMemberOffline(const std::shared_ptr<Session> &session,
+                           std::chrono::steady_clock::time_point now);
+    // 用 token 恢复成员：换上新连接、保留原 clientId/昵称/房主身份/上报状态。
+    // 成功返回旧会话（调用方负责关闭并清理映射），失败返回 nullptr。
+    std::shared_ptr<Session> resumeMember(const std::string &clientId,
+                                          const std::string &token,
+                                          const std::shared_ptr<Session> &newSession);
+    std::string resumeTokenFor(const std::shared_ptr<Session> &session) const;
+    // 离线成员列表：clientId + 离线时刻
+    std::vector<std::pair<std::string, std::chrono::steady_clock::time_point>>
+    offlineMembers() const;
 
     // 成员视频信息（加载状态/内容哈希/时长）
     void setMemberVideo(const std::shared_ptr<Session> &session, bool loaded,
@@ -124,9 +147,17 @@ public:
 
 private:
     struct Member {
+        // 稳定成员 id：首次进房时由 session->id() 生成，重连后不变。
+        // 对端、播放列表、文件上报全部用它，而不是连接本身的 id。
+        std::string clientId;
         std::shared_ptr<Session> session;
         std::string nickname;
         bool isHost;
+        // 断线等待重连期间 member 仍在表里，但不参与广播、不能收信令。
+        bool online = true;
+        std::chrono::steady_clock::time_point offlineAt;
+        // 重连凭据。不下发给其他成员，也不写日志。
+        std::string resumeToken;
         bool loaded = false;
         std::string hash;
         long long duration = 0;
@@ -139,7 +170,6 @@ private:
 
     bool m_playing = false;
     long long m_position = 0;
-    // 播放速度倍率。服务端不解释语义，只保存并随房间状态下发
     double m_rate = 1.0;
 
     bool m_videoMismatched = false;

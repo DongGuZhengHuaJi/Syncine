@@ -17,6 +17,7 @@
 #ifndef SYNCINE_NETWORKMANAGER_H
 #define SYNCINE_NETWORKMANAGER_H
 
+#include <QByteArray>
 #include <QObject>
 #include <QStringList>
 #include <QTimer>
@@ -101,6 +102,15 @@ private:
 
     QTimer m_connectTimer;   // 单次连接的超时
     QTimer m_retryTimer;     // 整轮失败后的等待
+
+    // 客户端心跳：连接建立后每 10 秒发一次 ping，15 秒内收不到对应
+    // 的 pong 就主动断开（随后走正常的 disconnected → 自动重连链路）。
+    // 解决的是"网络静默黑洞"——对方不再发包但也不发 RST，只靠 TCP
+    // 重传超时可能要等几分钟。
+    QTimer m_pingTimer;
+    QTimer m_pongTimeout;
+    QByteArray m_pingPayload;
+    quint64 m_pingCounter = 0;
 
     QStringList m_attempts;  // 本轮要依次试的地址
     int m_attemptIndex = 0;

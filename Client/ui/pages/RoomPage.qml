@@ -196,6 +196,10 @@ Item {
             messageDialog.message = message
             messageDialog.open()
         }
+
+        function onRoomResumed() {
+            root.pushSystem("连接已恢复")
+        }
     }
 
     Connections {
@@ -413,6 +417,27 @@ Item {
         visible: false
     }
 
+    // 信令断连时的重连提示。此时 P2P 媒体可能还在跑，不能直接退回首页。
+    // 宽限期结束后 SessionController 会真正 leaveRoom，RoomPage 才 pop。
+    Rectangle {
+        id: reconnectBanner
+
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: topBar.visible ? topBar.bottom : parent.top
+        height: visible ? 34 : 0
+        visible: sessionController.reconnecting
+        color: Style.accentSoft
+        z: 20
+
+        Text {
+            anchors.centerIn: parent
+            text: "与服务器的连接中断，正在重连…"
+            font.pixelSize: 12
+            color: Style.accent
+        }
+    }
+
     // ══ 2 + 3. 播放器 与 功能框 ═══════════════════════════
     Item {
         id: body
@@ -421,7 +446,8 @@ Item {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.top: parent.top
-        anchors.topMargin: topBar.visible ? Style.topBarHeight : 0
+        anchors.topMargin: (topBar.visible ? Style.topBarHeight : 0)
+                            + reconnectBanner.height
         anchors.leftMargin: root.fullscreenStyle ? 0 : 12
         anchors.rightMargin: root.fullscreenStyle ? 0 : 12
         anchors.bottomMargin: root.fullscreenStyle ? 0 : 12

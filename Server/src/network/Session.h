@@ -25,6 +25,9 @@ public:
 
     void start();
     void stop();
+    // 投递到 io_context 再关底层 TCP。用于持有 m_roomsMutex 时关闭旧连接：
+    // 不做 blocking close，避免在锁内等 closing handshake。
+    void stopLater();
 
     // 线程安全：worker 线程也可以直接调用
     void send(const std::string &message);

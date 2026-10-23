@@ -24,6 +24,7 @@ MessageType typeFromString(const QString &type) {
         {"room_left", MessageType::RoomLeft},
         {"member_joined", MessageType::MemberJoined},
         {"member_left", MessageType::MemberLeft},
+        {"member_online", MessageType::MemberOnline},
         {"chat", MessageType::Chat},
         {"playback", MessageType::Playback},
         {"playback_position", MessageType::PlaybackPosition},
@@ -51,6 +52,7 @@ Member memberFromJson(const QJsonObject &object) {
     member.clientId = object.value("clientId").toString();
     member.nickname = object.value("nickname").toString();
     member.isHost = object.value("isHost").toBool(false);
+    member.online = object.value("online").toBool();
     member.loaded = object.value("loaded").toBool(false);
     member.duration = int64Of(object, "duration");
     return member;
@@ -144,6 +146,9 @@ std::optional<Message> decode(const QString &text) {
     case MessageType::RoomCreated:
     case MessageType::RoomJoined: {
         message.roomId = object.value("roomId").toString();
+        message.clientId = object.value("clientId").toString();
+        message.resumeToken = object.value("resumeToken").toString();
+        message.resumed = object.value("resumed").toBool(false);
         message.roomName = object.value("roomName").toString();
         message.mode = object.value("mode").toString();
         message.videoMismatched = object.value("videoMismatched").toBool(false);
@@ -158,7 +163,6 @@ std::optional<Message> decode(const QString &text) {
         message.hasState = !state.isEmpty();
         message.playing = state.value("playing").toBool();
         message.position = int64Of(state, "position");
-        // 旧服务端没有 rate 字段：默认 1.0，等价于旧行为
         message.rate = state.value("rate").toDouble(1.0);
         message.playlist = playlistFromJson(state.value("playlist"));
         message.currentIndex = state.contains("currentIndex")
@@ -175,6 +179,7 @@ std::optional<Message> decode(const QString &text) {
 
     case MessageType::MemberJoined:
     case MessageType::MemberLeft:
+    case MessageType::MemberOnline:
         message.clientId = object.value("clientId").toString();
         message.nickname = object.value("nickname").toString();
         message.isHost = object.value("isHost").toBool(false);
@@ -281,6 +286,17 @@ QString encodeJoinRoom(const QString &roomId,
     return serialize(message);
 }
 
+QString encodeResume(const QString &roomId,
+                     const QString &clientId,
+                     const QString &resumeToken) {
+    QJsonObject message;
+    message["type"] = "resume";
+    message["roomId"] = roomId;
+    message["clientId"] = clientId;
+    message["token"] = resumeToken;
+    return serialize(message);
+}
+
 QString encodeLeaveRoom() {
     QJsonObject message;
     message["type"] = "leave_room";
@@ -309,7 +325,7 @@ QString encodePlayback(const QString &action, qint64 position, qreal rate) {
     // 此时不带该字段，接收方只换挡、不对齐位置，避免把别人拖到片头。
     if (position >= 0)
         message["position"] = position;
-    // 只有换挡动作需要 rate；其它动作不带，旧服务端/旧客户端都按 1.0 处理
+    // 只有换挡动作需要 rate；其它动作不带，按 1.0 处理
     if (action == QLatin1String("rate"))
         message["rate"] = rate;
     return serialize(message);

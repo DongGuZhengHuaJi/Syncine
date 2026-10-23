@@ -165,6 +165,10 @@ private slots:
     void onRoomEntered();
     void onRoomLeft();
     void onMembersChanged();
+    // 断线重连的成员恢复在线：重新对齐连接并重排断线期间失败的 ICE restart
+    void onMemberOnline(const QString &clientId);
+    // 本端 clientId 变化（首次进房/重连/换房）：旧 id 的 PeerConnection 必须作废
+    void onClientIdChanged();
 
 private:
     // 房间成员表变化后，对齐连接：该建的建、该删的删
@@ -182,6 +186,8 @@ private:
     void scheduleIceRestart(const QString &peerId, const QString &link,
                             int delayMs, bool countAttempt);
     void clearIceRecovery(const QString &peerId, const QString &link);
+    // 信令恢复后，把断线期间没能发出去的 ICE restart 重新排一次
+    void rearmIceRecovery();
 
     RoomSession *m_session = nullptr;
     NetworkManager *m_networkManager = nullptr;
@@ -201,6 +207,9 @@ private:
     // 发现代次不匹配就直接退出，不需要真的销毁 QTimer。
     QHash<QString, quint64> m_iceGraceGeneration;
     quint64 m_iceGenerationCounter = 0;
+    // 已经报告过 ICE Failed、还没恢复的 link（键是 "peerId|link"）。
+    // 信令断线期间 restart offer 发不出去，等 resume 后用这个集合重排。
+    QSet<QString> m_iceFailedLinks;
 
     static QString offerKey(const QString &peerId, const QString &link);
 };

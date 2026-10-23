@@ -56,6 +56,10 @@ bool RoomSession::isHost() const {
     return m_members->isHost(m_clientId);
 }
 
+bool RoomSession::isMemberOnline(const QString &clientId) const {
+    return m_members != nullptr && m_members->isOnline(clientId);
+}
+
 MemberModel *RoomSession::members() const {
     return m_members;
 }
@@ -102,6 +106,17 @@ bool RoomSession::allOthersLoaded() const {
 // ============================
 
 void RoomSession::enterRoom(const RoomSnapshot &snapshot) {
+    // 断线重连会再次走到这里。若房间、模式和当前条目都没变，说明本地播放器
+    // 一直在跑，不能再套用服务端快照里的位置 —— Sync 模式没有周期位置广播，
+    const bool sameRoom = m_inRoom && m_roomId == snapshot.roomId;
+    const QString previousItem =
+        m_playlist != nullptr ? m_playlist->currentItemId() : QString();
+    const RoomMode previousMode = m_roomMode;
+
+    // resume 后 clientId 不变，不能发 clientIdChanged：SignalingChannel 会因此
+    // 拆掉所有 PeerConnection。只有普通 join / 换房才需要重建。
+    const bool clientIdDidChange = (m_clientId != snapshot.clientId);
+
     m_roomId = snapshot.roomId;
     m_roomName = snapshot.roomName;
     m_clientId = snapshot.clientId;
@@ -147,7 +162,8 @@ void RoomSession::enterRoom(const RoomSnapshot &snapshot) {
 
     emit roomIdChanged();
     emit roomNameChanged();
-    emit clientIdChanged();
+    if (clientIdDidChange)
+        emit clientIdChanged();
     if (modeChanged)
         emit roomModeChanged();
     if (mismatchChanged)
@@ -161,8 +177,14 @@ void RoomSession::enterRoom(const RoomSnapshot &snapshot) {
     // 先发 entered，使 PlaybackSync 有机会上报自身的视频状态
     emit entered();
 
-    // 服务端附带房间当前播放状态，新成员据此对齐：先换挡，再 seek，最后 play/pause
-    if (snapshot.hasState) {
+    // 服务端附带房间当前播放状态，新成员据此对齐：先换挡，再 seek，最后 play/pause。
+    // 同一房间的断线重连（模式、当前条目都没变）跳过：本地播放器还在跑，
+    // 快照里的位置可能是旧的。URL/共享模式随后会有房主的位置广播来纠偏。
+    const QString currentItem = m_playlist->currentItemId();
+    const bool samePlaybackContext =
+        sameRoom && previousItem == currentItem && previousMode == m_roomMode;
+
+    if (snapshot.hasState && !samePlaybackContext) {
         emit playbackCommandReceived(PlaybackAction::Rate,
                                      snapshot.position, snapshot.rate);
         emit playbackCommandReceived(PlaybackAction::Seek, snapshot.position,
@@ -170,12 +192,14 @@ void RoomSession::enterRoom(const RoomSnapshot &snapshot) {
         emit playbackCommandReceived(
             snapshot.playing ? PlaybackAction::Play : PlaybackAction::Pause,
             snapshot.position, snapshot.rate);
+    } else if (samePlaybackContext) {
+        LOG_DEBUG("Room") << "断线重连且当前条目未变,保留本地播放状态";
     }
 
     // 入房时房间可能已在播放某一条，通知下游解析并加载
-    // （本地模式下即为「请选择本机对应的文件」）
-    const QString currentItem = m_playlist->currentItemId();
-    if (!currentItem.isEmpty())
+    // （本地模式下即为「请选择本机对应的文件」）。
+    // 重连时条目没变就不再触发 load，避免把正在播放的媒体重新加载一遍。
+    if (!currentItem.isEmpty() && !samePlaybackContext)
         emit playlistSwitched(currentItem);
 
     LOG_INFO("Room") << "进入房间完成: roomId=" << m_roomId
@@ -409,6 +433,10 @@ void RoomSession::onMessage(const QString &text) {
         handleMemberLeft(*message);
         break;
 
+    case Protocol::MessageType::MemberOnline:
+        handleMemberOnline(*message);
+        break;
+
     case Protocol::MessageType::Chat:
         emit chatReceived(message->from, message->text);
         break;
@@ -488,6 +516,17 @@ void RoomSession::handleMemberLeft(const Protocol::Message &message) {
     emit memberLeft(removed->nickname);
 }
 
+void RoomSession::handleMemberOnline(const Protocol::Message &message) {
+    if (!m_members->setOnline(message.clientId, true)) {
+        LOG_DEBUG("Room") << "成员恢复在线通知对应的成员不存在: clientId="
+                          << message.clientId;
+        return;
+    }
+
+    LOG_INFO("Room") << "成员恢复在线: clientId=" << message.clientId;
+    emit memberOnline(message.clientId);
+}
+
 void RoomSession::handlePlayback(const Protocol::Message &message) {
     emit playbackCommandReceived(actionFromWire(message.action), message.position,
                                  message.rate);
@@ -558,6 +597,12 @@ void RoomSession::refreshDerivedState() {
 bool RoomSession::send(const QString &text) {
     if (m_networkManager == nullptr) {
         LOG_WARN("Room") << "网络模块不可用，消息未发送";
+        return false;
+    }
+
+
+    if (!m_networkManager->isConnected()) {
+        LOG_DEBUG("Room") << "网络未连接，消息未发送";
         return false;
     }
 

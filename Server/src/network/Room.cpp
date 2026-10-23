@@ -4,6 +4,7 @@
 
 #include "Room.h"
 #include "Log.h"
+#include "RandomGen.h"
 #include "Session.h"
 
 #include <algorithm>
@@ -43,23 +44,58 @@ bool Room::isEmpty() const {
     return m_members.empty();
 }
 
+std::size_t Room::onlineCount() const {
+    return static_cast<std::size_t>(
+        std::count_if(m_members.begin(), m_members.end(),
+                      [](const Member &member) { return member.online; }));
+}
+
+std::size_t Room::memberCount() const {
+    return m_members.size();
+}
+
 void Room::addMember(std::shared_ptr<Session> session,
                      std::string nickname,
                      bool isHost) {
     LOG_DEBUG("Room") << "成员登记: " << nickname << " clientId=" << session->id()
                       << (isHost ? " 房主" : " 观众");
-    m_members.push_back({std::move(session), std::move(nickname), isHost, false, "", 0});
+    Member member;
+    member.clientId = session->id();
+    member.session = std::move(session);
+    member.nickname = std::move(nickname);
+    member.isHost = isHost;
+    // 重连凭据：随机 UUID，只下发给本人，不写日志
+    member.resumeToken = RandomGen::generateUUID();
+    m_members.push_back(std::move(member));
 }
 
 bool Room::removeMember(const std::shared_ptr<Session> &session) {
     for (auto it = m_members.begin(); it != m_members.end(); ++it) {
         if (it->session == session) {
-            LOG_DEBUG("Room") << "成员移除: " << it->nickname << " clientId=" << it->session->id();
+            LOG_DEBUG("Room") << "成员移除: " << it->nickname
+                              << " clientId=" << it->clientId;
             m_members.erase(it);
             return true;
         }
     }
     LOG_DEBUG("Room") << "成员移除失败，不在成员表中: clientId=" << session->id();
+    return false;
+}
+
+bool Room::removeMemberByClientId(const std::string &clientId, std::string *nickname,
+                                  bool *wasHost) {
+    for (auto it = m_members.begin(); it != m_members.end(); ++it) {
+        if (it->clientId != clientId)
+            continue;
+        if (nickname != nullptr)
+            *nickname = it->nickname;
+        if (wasHost != nullptr)
+            *wasHost = it->isHost;
+        LOG_DEBUG("Room") << "成员移除(按 clientId): " << it->nickname
+                          << " clientId=" << it->clientId;
+        m_members.erase(it);
+        return true;
+    }
     return false;
 }
 
@@ -87,17 +123,27 @@ std::string Room::nicknameOf(const std::shared_ptr<Session> &session) const {
     return std::string();
 }
 
+std::string Room::clientIdOf(const std::shared_ptr<Session> &session) const {
+    for (const Member &member : m_members) {
+        if (member.session == session)
+            return member.clientId;
+    }
+    return std::string();
+}
+
 std::vector<std::shared_ptr<Session>> Room::sessions() const {
     std::vector<std::shared_ptr<Session>> result;
     result.reserve(m_members.size());
-    for (const Member &member : m_members)
-        result.push_back(member.session);
+    for (const Member &member : m_members) {
+        if (member.online)
+            result.push_back(member.session);
+    }
     return result;
 }
 
 std::shared_ptr<Session> Room::findSession(const std::string &clientId) const {
     for (const Member &member : m_members) {
-        if (member.session->id() == clientId)
+        if (member.online && member.clientId == clientId)
             return member.session;
     }
     return nullptr;
@@ -105,10 +151,62 @@ std::shared_ptr<Session> Room::findSession(const std::string &clientId) const {
 
 std::shared_ptr<Session> Room::hostSession() const {
     for (const Member &member : m_members) {
-        if (member.isHost)
+        if (member.isHost && member.online)
             return member.session;
     }
     return nullptr;
+}
+
+bool Room::markMemberOffline(const std::shared_ptr<Session> &session,
+                             std::chrono::steady_clock::time_point now) {
+    for (Member &member : m_members) {
+        if (member.session != session)
+            continue;
+        if (!member.online)
+            return false;
+        member.online = false;
+        member.offlineAt = now;
+        LOG_INFO("Room") << "成员离线(保留会话): " << member.nickname
+                         << " clientId=" << member.clientId;
+        return true;
+    }
+    return false;
+}
+
+std::shared_ptr<Session> Room::resumeMember(
+    const std::string &clientId, const std::string &token,
+    const std::shared_ptr<Session> &newSession) {
+    for (Member &member : m_members) {
+        if (member.clientId != clientId || member.resumeToken != token)
+            continue;
+
+        auto oldSession = member.session;
+        member.session = newSession;
+        member.online = true;
+        member.offlineAt = {};
+        LOG_INFO("Room") << "成员恢复: " << member.nickname
+                         << " clientId=" << member.clientId;
+        return oldSession;
+    }
+    return nullptr;
+}
+
+std::string Room::resumeTokenFor(const std::shared_ptr<Session> &session) const {
+    for (const Member &member : m_members) {
+        if (member.session == session)
+            return member.resumeToken;
+    }
+    return std::string();
+}
+
+std::vector<std::pair<std::string, std::chrono::steady_clock::time_point>>
+Room::offlineMembers() const {
+    std::vector<std::pair<std::string, std::chrono::steady_clock::time_point>> result;
+    for (const Member &member : m_members) {
+        if (!member.online)
+            result.emplace_back(member.clientId, member.offlineAt);
+    }
+    return result;
 }
 
 void Room::setMemberVideo(const std::shared_ptr<Session> &session, bool loaded,
@@ -216,9 +314,10 @@ json Room::membersArray() const {
     json array = json::array();
     for (const Member &member : m_members) {
         array.push_back({
-            {"clientId", member.session->id()},
+            {"clientId", member.clientId},
             {"nickname", member.nickname},
             {"isHost", member.isHost},
+            {"online", member.online},
             {"loaded", member.loaded},
             {"duration", member.duration},
         });
@@ -356,9 +455,10 @@ std::string Room::itemStatus(const std::string &itemId) const {
     bool haveHash = false;
     std::string commonHash;
 
-    // 逐个成员检查：任一人没有文件即为未匹配；全员都有再比对内容哈希
+    // 逐个成员检查：任一人没有文件即为未匹配；全员都有再比对内容哈希。
+    // 离线等待重连的成员沿用其离开前的上报，避免房间门禁在短暂断线时抖动。
     for (const Member &member : m_members) {
-        const std::string clientId = member.session->id();
+        const std::string clientId = member.clientId;
 
         bool hasFile = false;
         std::string hash;
@@ -405,9 +505,11 @@ json Room::playlistJson() const {
 }
 
 void Room::broadcast(const json &message, const std::shared_ptr<Session> &except) {
+    const std::string payload = message.dump();
     for (const Member &member : m_members) {
-        if (member.session == except)
+        // 离线成员的 Session 已经关闭，不能继续往写队列里塞消息
+        if (!member.online || member.session == except)
             continue;
-        member.session->send(message.dump());
+        member.session->send(payload);
     }
 }

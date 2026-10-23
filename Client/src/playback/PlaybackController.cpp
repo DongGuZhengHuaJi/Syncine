@@ -422,6 +422,13 @@ void PlaybackController::load(const QUrl &source)
     if (!source.isValid())
         return;
 
+    if (m_player->source() == source
+        && m_player->mediaStatus() != QMediaPlayer::NoMedia
+        && m_player->mediaStatus() != QMediaPlayer::InvalidMedia) {
+        LOG_DEBUG("Playback") << "媒体源未变,忽略重复加载:" << source;
+        return;
+    }
+
     LOG_INFO("Playback") << "加载媒体:" << source;
 
     m_player->setSource(source);

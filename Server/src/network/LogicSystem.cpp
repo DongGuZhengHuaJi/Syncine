@@ -10,6 +10,7 @@
 #include "TurnCredentials.h"
 
 #include <algorithm>
+#include <chrono>
 
 LogicSystem::LogicSystem() {
     const int numThreads = std::max(1u, std::thread::hardware_concurrency());
@@ -36,6 +37,21 @@ LogicSystem::LogicSystem() {
             }
         });
     }
+
+    // 离线成员回收线程：每秒扫一次，超过宽限期的成员才真正移除。
+    // 放在独立线程而不是 worker 里，是因为即使房间没有新消息，
+    // 过期成员也必须被清理，否则房间/成员表会一直占着。
+    m_reaperThread = std::thread([this]() {
+        std::unique_lock<std::mutex> lock(m_reaperMutex);
+        while (!m_reaperStop) {
+            m_reaperCv.wait_for(lock, std::chrono::seconds(1));
+            if (m_reaperStop)
+                return;
+            lock.unlock();
+            expireOfflineMembers();
+            lock.lock();
+        }
+    });
 }
 
 LogicSystem::~LogicSystem() {
@@ -51,8 +67,34 @@ void LogicSystem::enqueueMessage(std::shared_ptr<Session> session,
 
 void LogicSystem::handleDisconnect(std::shared_ptr<Session> session) {
     LOG_DEBUG("Logic") << "连接断开: clientId=" << session->id();
+
     std::lock_guard<std::mutex> lock(m_roomsMutex);
-    removeMemberFromRoomLocked(session);
+    auto roomIt = m_sessionRooms.find(session);
+    if (roomIt == m_sessionRooms.end()) {
+        // 可能是已经被 resume 替换掉的旧连接，或从未进过房间
+        return;
+    }
+
+    const std::string roomId = roomIt->second;
+    auto it = m_rooms.find(roomId);
+    if (it == m_rooms.end()) {
+        m_sessionRooms.erase(roomIt);
+        return;
+    }
+
+    const auto room = it->second;
+    // 保留成员记录和稳定 clientId，等客户端用 resume token 回来。
+    // 这期间不广播 member_left，其他人不会看到"退出又加入"。
+    if (room->markMemberOffline(session, std::chrono::steady_clock::now())) {
+        m_sessionRooms.erase(roomIt);
+        LOG_INFO("Logic") << "成员进入离线等待: roomId=" << roomId
+                          << " clientId=" << room->clientIdOf(session)
+                          << " grace=" << Config::MEMBER_OFFLINE_GRACE_SECONDS << "s";
+        return;
+    }
+
+    // 不是成员（例如旧连接被替换后才关闭）：只清映射
+    m_sessionRooms.erase(roomIt);
 }
 
 void LogicSystem::stop() {
@@ -65,6 +107,15 @@ void LogicSystem::stop() {
     m_cv.notify_all();
     for (std::thread &thread : m_workerThreads)
         thread.join();
+
+    // 回收线程也必须在清空房间表之前停掉
+    {
+        std::lock_guard<std::mutex> lock(m_reaperMutex);
+        m_reaperStop = true;
+    }
+    m_reaperCv.notify_all();
+    if (m_reaperThread.joinable())
+        m_reaperThread.join();
 
     // 线程已 join，此时清空房间表是安全的。这一步必须在 io_context 还活着
     // 的时候做：Session 的析构会去碰 socket/executor，而 LogicSystem 是
@@ -159,6 +210,11 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
         json reply;
         reply["type"] = "room_created";
         reply["roomId"] = newRoomId;
+        // 稳定成员 id：和 welcome 里的连接 id 相同（首次进房），
+        // 重连时 resume 会用原 id 覆盖客户端手里的值。
+        reply["clientId"] = session->id();
+        // 断线重连凭据：只发给本人，其他成员看不到
+        reply["resumeToken"] = room->resumeTokenFor(session);
         reply["roomName"] = room->roomName();
         reply["mode"] = room->mode();
         reply["members"] = room->membersArray();
@@ -206,8 +262,9 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
             return;
         }
         const auto targetRoom = it->second;
-        // 先判人数再入房：addMember 无上限时，一个客户端循环 join 即可塞满
-        if (targetRoom->sessions().size() >= Config::MAX_MEMBERS_PER_ROOM) {
+        // 先判人数再入房：addMember 无上限时，一个客户端循环 join 即可塞满。
+        // 离线等待重连的成员也占名额，否则他们回来时会超过上限。
+        if (targetRoom->memberCount() >= Config::MAX_MEMBERS_PER_ROOM) {
             replyError(session, "room_full", "房间已满");
             return;
         }
@@ -217,6 +274,8 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
         json reply;
         reply["type"] = "room_joined";
         reply["roomId"] = targetRoomId;
+        reply["clientId"] = session->id();
+        reply["resumeToken"] = targetRoom->resumeTokenFor(session);
         reply["roomName"] = targetRoom->roomName();
         reply["mode"] = targetRoom->mode();
         reply["members"] = targetRoom->membersArray();
@@ -231,7 +290,7 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
 
         json notice;
         notice["type"] = "member_joined";
-        notice["clientId"] = session->id();
+        notice["clientId"] = targetRoom->clientIdOf(session);
         notice["nickname"] = nickname;
         notice["isHost"] = false;
         notice["loaded"] = false;
@@ -245,6 +304,69 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
         LOG_INFO("Logic") << "成员加入 " << targetRoomId << ": " << nickname
                           << " clientId=" << session->id()
                           << " 房间人数=" << targetRoom->sessions().size();
+        return;
+    }
+
+    if (type == "resume") {
+        // 断线重连：用 token 换回原来的成员记录和稳定 clientId。
+        // 成功时不广播 member_joined —— 其他成员的成员表没有变化。
+        const std::string roomId = message.value("roomId", "");
+        const std::string token = message.value("token", "");
+        const std::string clientId = message.value("clientId", "");
+        if (roomId.empty() || token.empty() || clientId.empty()) {
+            replyError(session, "resume_failed", "缺少恢复凭据");
+            return;
+        }
+
+        auto it = m_rooms.find(roomId);
+        if (it == m_rooms.end()) {
+            replyError(session, "room_not_found", "房间不存在");
+            return;
+        }
+        const auto room = it->second;
+
+        const auto oldSession = room->resumeMember(clientId, token, session);
+        if (oldSession == nullptr) {
+            replyError(session, "resume_failed", "会话已过期");
+            return;
+        }
+
+        // 旧连接可能还半开着（服务端还没发现它断了）。解除映射并异步关闭，
+        // 不能在这里同步 close：onClose → handleDisconnect 会再抢 m_roomsMutex。
+        if (oldSession != session) {
+            m_sessionRooms.erase(oldSession);
+            oldSession->stopLater();
+        }
+        m_sessionRooms[session] = roomId;
+
+        json reply;
+        reply["type"] = "room_joined";
+        reply["resumed"] = true;
+        reply["roomId"] = roomId;
+        reply["clientId"] = clientId;
+        reply["resumeToken"] = room->resumeTokenFor(session);
+        reply["roomName"] = room->roomName();
+        reply["mode"] = room->mode();
+        reply["members"] = room->membersArray();
+        reply["state"] = room->stateJson(room->mode() != "share"
+                                         || room->isHost(session));
+        reply["videoMismatched"] = room->videoMismatched();
+        reply["shortestDuration"] = room->shortestDuration();
+        reply["iceServers"] = TurnCredentials::getInstance().iceServers();
+        session->send(reply.dump());
+
+        // 告诉其他在线成员他回来了：对端在离线期间发出的 ICE restart 会
+        // 收到 member_not_found，收到这条后可以重新尝试。
+        json online;
+        online["type"] = "member_online";
+        online["clientId"] = clientId;
+        online["nickname"] = room->nicknameOf(session);
+        online["isHost"] = room->isHost(session);
+        room->broadcast(online, session);
+
+        LOG_INFO("Logic") << "成员恢复会话 " << roomId
+                          << ": clientId=" << clientId
+                          << " 在线人数=" << room->onlineCount();
         return;
     }
 
@@ -356,7 +478,7 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
                 return;
             }
 
-            room->setMemberFile(session->id(), itemId,
+            room->setMemberFile(room->clientIdOf(session), itemId,
                                 message.value("hasFile", false),
                                 message.value("hash", ""));
             broadcastPlaylistStatus(room);
@@ -386,7 +508,7 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
         // 中继给其他人（不含哈希，哈希只留在服务端做比对）
         json relay;
         relay["type"] = "video_status";
-        relay["clientId"] = session->id();
+        relay["clientId"] = room->clientIdOf(session);
         relay["loaded"] = loaded;
         relay["duration"] = duration;
         room->broadcast(relay, session);
@@ -424,7 +546,7 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
         }
 
         json relay = message;
-        relay["from"] = session->id();
+        relay["from"] = room->clientIdOf(session);
         target->send(relay.dump());
         return;
     }
@@ -461,7 +583,7 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
             entry.duration = message.value("duration", 0LL);
             entry.live = message.value("live", false);
             entry.spec = message.value("spec", "");
-            entry.addedBy = session->id();
+            entry.addedBy = room->clientIdOf(session);
 
             if (entry.itemId.empty() || entry.title.empty()) {
                 replyError(session, "bad_request", "播放列表条目缺少 itemId 或标题");
@@ -665,30 +787,41 @@ bool LogicSystem::removeMemberFromRoomLocked(const std::shared_ptr<Session> &ses
         return false;
 
     const auto room = it->second; // 拷贝 shared_ptr，erase 后对象仍存活
-    const bool wasHost = room->isHost(session);
-    const std::string nickname = room->nicknameOf(session);
-    room->removeMember(session);
+    const std::string clientId = room->clientIdOf(session);
+    if (clientId.empty())
+        return false;
+
+    return removeMemberByClientIdLocked(room, roomId, clientId);
+}
+
+bool LogicSystem::removeMemberByClientIdLocked(const std::shared_ptr<Room> &room,
+                                               const std::string &roomId,
+                                               const std::string &clientId) {
+    std::string nickname;
+    bool wasHost = false;
+    if (!room->removeMemberByClientId(clientId, &nickname, &wasHost))
+        return false;
 
     // 同时清理离开者对播放列表的上报，否则「全员都已加载」会把已离开的成员
     // 也算进去，状态永远不正确
-    room->dropMemberFiles(session->id());
+    room->dropMemberFiles(clientId);
 
     if (room->isEmpty() || wasHost) {
-        // 房主离开：解散房间，通知剩余成员
+        // 房主离开：解散房间，通知剩余在线成员
         json notice;
         notice["type"] = "room_left";
         for (const auto &memberSession : room->sessions()) {
             memberSession->send(notice.dump());
             m_sessionRooms.erase(memberSession);
         }
-        m_rooms.erase(it);
+        m_rooms.erase(roomId);
         LOG_INFO("Logic") << "房间解散: " << roomId
                           << (wasHost ? "（房主离开）" : "（无剩余成员）")
                           << " 触发者=" << nickname;
     } else {
         json notice;
         notice["type"] = "member_left";
-        notice["clientId"] = session->id();
+        notice["clientId"] = clientId;
         notice["nickname"] = nickname;
         room->broadcast(notice); // 离开者已移除，自动只发给剩余成员
 
@@ -708,4 +841,29 @@ bool LogicSystem::removeMemberFromRoomLocked(const std::shared_ptr<Session> &ses
         }
     }
     return true;
+}
+
+void LogicSystem::expireOfflineMembers() {
+    std::lock_guard<std::mutex> lock(m_roomsMutex);
+    const auto now = std::chrono::steady_clock::now();
+    const auto grace = std::chrono::seconds(Config::MEMBER_OFFLINE_GRACE_SECONDS);
+
+    // 先收集再删除：删除可能解散房间，直接遍历 m_rooms 会让迭代器失效
+    std::vector<std::pair<std::string, std::string>> expired;
+    for (const auto &[roomId, room] : m_rooms) {
+        for (const auto &[clientId, offlineAt] : room->offlineMembers()) {
+            if (now - offlineAt >= grace)
+                expired.emplace_back(roomId, clientId);
+        }
+    }
+
+    for (const auto &[roomId, clientId] : expired) {
+        auto it = m_rooms.find(roomId);
+        if (it == m_rooms.end())
+            continue; // 房间已经因为其他成员过期而解散
+        if (removeMemberByClientIdLocked(it->second, roomId, clientId)) {
+            LOG_INFO("Logic") << "离线成员过期移除: roomId=" << roomId
+                              << " clientId=" << clientId;
+        }
+    }
 }

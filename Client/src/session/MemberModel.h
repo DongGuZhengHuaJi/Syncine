@@ -60,6 +60,8 @@ public:
     std::optional<Member> remove(const QString &clientId);
     // 更新某成员的视频加载状态；返回是否命中
     bool setVideoStatus(const QString &clientId, bool loaded, qint64 duration);
+    // 更新在线状态（断线重连恢复时用）
+    bool setOnline(const QString &clientId, bool online);
     // 更新「待接收文件数」。文件传输与成员数据分属两层，由 FileTransferManager 写入
     bool setPendingFiles(const QString &clientId, int count);
     void clear();
@@ -68,6 +70,8 @@ public:
     int count() const;
     const QList<Member> &members() const;
     bool contains(const QString &clientId) const;
+    // 成员是否在线；成员不存在返回 false
+    bool isOnline(const QString &clientId) const;
 
     // ---- 派生查询 ----
     // 成员数很少（个位数）,线性扫描足够，不值得为它维护索引

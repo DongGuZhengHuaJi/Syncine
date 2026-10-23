@@ -55,9 +55,21 @@ private:
     void broadcastPlaylistStatus(const std::shared_ptr<Room> &room);
     // 要求调用方持有 m_roomsMutex
     bool removeMemberFromRoomLocked(const std::shared_ptr<Session> &session);
+    // 按稳定 clientId 移除成员并处理广播/解散。要求持有 m_roomsMutex。
+    bool removeMemberByClientIdLocked(const std::shared_ptr<Room> &room,
+                                      const std::string &roomId,
+                                      const std::string &clientId);
+    // 过期离线成员回收（独立线程每秒扫一次）
+    void expireOfflineMembers();
 
     std::queue<std::pair<std::shared_ptr<Session>, std::string>> m_messageQueue;
     std::vector<std::thread> m_workerThreads;
+
+    // 离线成员回收线程
+    std::thread m_reaperThread;
+    std::condition_variable m_reaperCv;
+    std::mutex m_reaperMutex;
+    bool m_reaperStop = false;
 
     std::mutex m_mutex; // 保护消息队列
     std::condition_variable m_cv;

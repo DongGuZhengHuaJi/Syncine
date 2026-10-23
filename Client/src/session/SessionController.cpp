@@ -14,6 +14,11 @@ namespace {
 
 constexpr int kRoomIdMax = 1000000; // 房间号范围:0 ~ 999999
 
+// 信令断开后保留房间、等待自动回房的总时长。
+// NetworkManager 的重试节奏是 15s → 30s → 60s；服务端的 ping 检测半开连接
+// 也需要几十秒，所以留 90 秒，覆盖"先重连、再等服务端释放旧成员"这两段。
+constexpr int kReconnectGraceMs = 90000;
+
 QString generateRoomId() {
     return QString::number(QRandomGenerator::global()->bounded(kRoomIdMax))
         .rightJustified(6, '0');
@@ -51,6 +56,15 @@ SessionController::SessionController(NetworkManager *networkManager,
                     failPending(QStringLiteral("无法连接到服务器"));
                 }
             });
+
+    // 宽限期结束还没回房：彻底退出，避免房间页永远停在"重连中"。
+    m_reconnectDeadline.setSingleShot(true);
+    connect(&m_reconnectDeadline, &QTimer::timeout, this, [this] {
+        if (!m_reconnecting)
+            return;
+        LOG_WARN("Session") << "重连宽限期结束,退出房间:" << m_roomId;
+        abortReconnectAndLeave(QStringLiteral("与服务器的连接已断开"));
+    });
 }
 
 bool SessionController::busy() const {
@@ -71,6 +85,12 @@ void SessionController::createRoom(const QString &roomName,
     if (m_roomSession != nullptr && m_roomSession->inRoom()) {
         LOG_WARN("Session") << "创建房间被拒：已在房间中";
         emit errorOccurred("已在房间中");
+        return;
+    }
+
+    if (m_reconnecting) {
+        LOG_WARN("Session") << "创建房间被拒：正在重连房间";
+        emit errorOccurred("正在重连房间，请稍候");
         return;
     }
 
@@ -104,6 +124,12 @@ void SessionController::joinRoom(const QString &roomId,
         return;
     }
 
+    if (m_reconnecting) {
+        LOG_WARN("Session") << "加入房间被拒：正在重连房间";
+        emit errorOccurred("正在重连房间，请稍候");
+        return;
+    }
+
     if (busy()) {
         LOG_WARN("Session") << "加入房间被拒：已有请求正在处理";
         emit errorOccurred("正在连接服务器，请稍候");
@@ -124,15 +150,22 @@ void SessionController::joinRoom(const QString &roomId,
 }
 
 void SessionController::leaveRoom() {
-    if (m_roomSession == nullptr || !m_roomSession->inRoom())
+    // 用户主动离开：宽限期/重试都作废，不管当前是否还在房间。
+    stopReconnect();
+
+    if (m_roomSession == nullptr || !m_roomSession->inRoom()) {
+        clearRoomCredentials();
         return;
+    }
 
     LOG_INFO("Session") << "主动离开房间: roomId=" << m_roomSession->roomId();
 
+    // 断线重连期间用户主动离开：网络可能还没恢复，发不出去就不发。
     if (m_networkManager != nullptr && m_networkManager->isConnected())
         m_networkManager->sendMessage(Protocol::encodeLeaveRoom());
 
     m_roomSession->leaveRoom();
+    clearRoomCredentials();
 }
 
 void SessionController::sendPendingRequest() {
@@ -192,11 +225,21 @@ void SessionController::setAwaitingReply(bool awaiting) {
 
 void SessionController::onConnected() {
     LOG_DEBUG("Session") << "已连接服务器";
+
+    // 重连中的优先级最高：先回房，不再处理普通的入场请求。
+    if (m_reconnecting) {
+        sendRejoinRequest();
+        return;
+    }
+
     sendPendingRequest();
 }
 
 void SessionController::onDisconnected() {
     LOG_INFO("Session") << "与服务器的连接断开";
+
+    // 断线时正在途中的回房请求一定不会有结果了；等下一次 connected 再发。
+    m_rejoinInFlight = false;
 
     if (m_pending != PendingRequest::None)
         failPending("无法连接到服务器");
@@ -204,11 +247,14 @@ void SessionController::onDisconnected() {
         setAwaitingReply(false);
 
     if (m_roomSession != nullptr && m_roomSession->inRoom()) {
-        LOG_WARN("Session") << "连接断开时仍在房间内，强制退房: roomId="
-                            << m_roomSession->roomId();
-        m_roomSession->leaveRoom();
-        emit errorOccurred("与服务器的连接已断开");
+        // 与信令服务器断开，如果在房间内尝试重新连接
+        if (!m_reconnecting)
+            startReconnect();
+        return;
     }
+
+    // 不在房间，直接断开连接
+    stopReconnect();
 }
 
 // ============================
@@ -225,8 +271,14 @@ void SessionController::onMessage(const QString &text) {
 
     switch (decoded->type) {
     case Protocol::MessageType::Welcome:
-        m_clientId = decoded->clientId;
-        LOG_INFO("Session") << "收到 welcome: clientId=" << m_clientId;
+        // 重连期间 welcome 里是新连接的临时 id；稳定的成员 id 由随后
+        // 的 room_joined(resumed=true) 给出。这里不要覆盖重连前的值。
+        if (!m_reconnecting) {
+            m_clientId = decoded->clientId;
+            LOG_INFO("Session") << "收到 welcome: clientId=" << m_clientId;
+        } else {
+            LOG_DEBUG("Session") << "重连 welcome: connectionId=" << decoded->clientId;
+        }
         break;
 
     case Protocol::MessageType::RoomCreated:
@@ -236,8 +288,13 @@ void SessionController::onMessage(const QString &text) {
 
     case Protocol::MessageType::RoomLeft:
         LOG_INFO("Session") << "服务端通知房间已关闭";
+        if (m_reconnecting) {
+            abortReconnectAndLeave(QStringLiteral("房间已解散"));
+            return;
+        }
         if (m_roomSession != nullptr)
             m_roomSession->leaveRoom();
+        clearRoomCredentials();
         break;
 
     case Protocol::MessageType::Error:
@@ -245,6 +302,21 @@ void SessionController::onMessage(const QString &text) {
                             << " message=" << decoded->errorMessage;
         if (m_awaitingReply)
             setAwaitingReply(false);
+
+        if (m_reconnecting && m_rejoinInFlight) {
+            m_rejoinInFlight = false;
+
+            if (decoded->code == QLatin1String("resume_failed")) {
+                abortReconnectAndLeave(QStringLiteral("会话已过期，请重新进入房间"));
+                return;
+            }
+
+            // room_not_found / wrong_password 等都没法靠重试恢复
+            abortReconnectAndLeave(decoded->errorMessage.isEmpty()
+                                       ? decoded->code
+                                       : decoded->errorMessage);
+            return;
+        }
 
         emit errorOccurred(decoded->errorMessage.isEmpty() ? decoded->code
                                                            : decoded->errorMessage);
@@ -258,27 +330,130 @@ void SessionController::onMessage(const QString &text) {
 }
 
 void SessionController::handleRoomEntered(const Protocol::Message &message) {
+    const bool wasReconnecting = m_reconnecting;
+
+    // 服务端下发稳定成员 id 和 resume token；resume 后 clientId 仍是断线前的值。
+    m_clientId = message.clientId;
+    m_roomClientId = message.clientId;
+    m_resumeToken = message.resumeToken;
+
     const RoomSnapshot snapshot = snapshotFrom(message);
 
     m_pending = PendingRequest::None;
     setAwaitingReply(false);
+    m_rejoinInFlight = false;
 
-    // 顺序有要求：先推起房间页（QML 在 Connections 中接收房间信号），
-    // 再灌入房间状态。顺序颠倒会导致首次的 videoMismatch 等信号在页面
-    // 尚不存在时发出而被静默丢弃。
-    if (message.type == Protocol::MessageType::RoomCreated)
-        emit roomCreated();
-    else
-        emit roomJoined();
+    if (wasReconnecting) {
+        // 重连成功：房间页已经存在，不能再发 roomJoined 让它 push 一次。
+        stopReconnect();
+        m_rejoinAttempts = 0;
+        LOG_INFO("Session") << "重连成功，恢复房间:" << message.roomId
+                            << " clientId=" << m_roomClientId
+                            << (message.resumed ? " (resume)" : " (join)");
+    } else {
+        // 记录本次入房凭据，供断线重连使用（口令不保存）。
+        m_roomId = message.roomId;
+        m_rejoinAttempts = 0;
+
+        // 顺序有要求：先推起房间页（QML 在 Connections 中接收房间信号），
+        // 再灌入房间状态。顺序颠倒会导致首次的 videoMismatch 等信号在页面
+        // 尚不存在时发出而被静默丢弃。
+        if (message.type == Protocol::MessageType::RoomCreated)
+            emit roomCreated();
+        else
+            emit roomJoined();
+    }
 
     LOG_INFO("Session") << "已进入房间: roomId=" << snapshot.roomId
                         << " name=" << snapshot.roomName
                         << " mode=" << snapshot.mode
                         << " 成员数=" << snapshot.members.size()
-                        << " 播放列表=" << snapshot.playlist.size();
+                        << " 播放列表=" << snapshot.playlist.size()
+                        << (wasReconnecting ? " (重连)" : "");
 
     if (m_roomSession != nullptr)
         m_roomSession->enterRoom(snapshot);
+
+    if (wasReconnecting)
+        emit roomResumed();
+}
+
+// ============================
+// 断线重连
+// ============================
+
+void SessionController::startReconnect() {
+    if (m_reconnecting)
+        return;
+
+    m_reconnecting = true;
+    m_rejoinInFlight = false;
+    m_rejoinAttempts = 0;
+    m_reconnectDeadline.start(kReconnectGraceMs);
+
+    if (m_roomId.isEmpty() && m_roomSession != nullptr)
+        m_roomId = m_roomSession->roomId();
+
+    LOG_WARN("Session") << "信令断开，保留房间并等待重连:" << m_roomId;
+    emit reconnectingChanged();
+}
+
+void SessionController::stopReconnect() {
+    m_reconnectDeadline.stop();
+
+    if (!m_reconnecting)
+        return;
+
+    m_reconnecting = false;
+    m_rejoinInFlight = false;
+    emit reconnectingChanged();
+}
+
+void SessionController::sendRejoinRequest() {
+    if (!m_reconnecting || m_rejoinInFlight || m_roomId.isEmpty())
+        return;
+    if (m_networkManager == nullptr || !m_networkManager->isConnected())
+        return;
+
+    // 只走 resume：没有 token 说明入房时服务端没下发，属于协议异常，
+    if (m_resumeToken.isEmpty() || m_roomClientId.isEmpty()) {
+        abortReconnectAndLeave(QStringLiteral("缺少会话恢复凭据"));
+        return;
+    }
+
+    const QString text =
+        Protocol::encodeResume(m_roomId, m_roomClientId, m_resumeToken);
+    if (!m_networkManager->sendMessage(text)) {
+        // 连接又发生中断
+        LOG_WARN("Session") << "重连请求发送失败，等待下一次连接";
+        return;
+    }
+
+    m_rejoinInFlight = true;
+    ++m_rejoinAttempts;
+    LOG_INFO("Session") << "重连：恢复会话" << m_roomId
+                        << " clientId=" << m_roomClientId
+                        << " (第" << m_rejoinAttempts << "次)";
+}
+
+void SessionController::abortReconnectAndLeave(const QString &reason) {
+    LOG_WARN("Session") << "重连失败，退出房间:" << reason;
+
+    stopReconnect();
+    m_rejoinInFlight = false;
+
+    if (m_roomSession != nullptr && m_roomSession->inRoom())
+        m_roomSession->leaveRoom();
+
+    clearRoomCredentials();
+    emit errorOccurred(reason);
+}
+
+void SessionController::clearRoomCredentials() {
+    m_roomId.clear();
+    m_roomClientId.clear();
+    m_resumeToken.clear();
+    m_rejoinAttempts = 0;
 }
 
 RoomSnapshot SessionController::snapshotFrom(const Protocol::Message &message) const {
