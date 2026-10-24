@@ -10,66 +10,64 @@
 #include "TurnCredentials.h"
 
 #include <algorithm>
+#include <thread>
+#include <utility>
 
-LogicSystem::LogicSystem() {
-    const int numThreads = std::max(1u, std::thread::hardware_concurrency());
-    for (int i = 0; i < numThreads; ++i) {
-        m_workerThreads.emplace_back([this]() {
-            while (true) {
-                std::shared_ptr<Session> session;
-                std::string message;
-                {
-                    std::unique_lock<std::mutex> lock(m_mutex);
-                    m_cv.wait(lock, [this]() {
-                        return m_stop || !m_messageQueue.empty();
-                    });
-                    if (m_stop && m_messageQueue.empty())
-                        return;
-
-                    auto item = std::move(m_messageQueue.front());
-                    m_messageQueue.pop();
-                    session = std::move(item.first);
-                    message = std::move(item.second);
-                }
-
-                handleMessage(session, message);
-            }
-        });
-    }
+LogicSystem::LogicSystem(InboundQueueLimits limits, std::size_t workerCount)
+    : m_serialQueue(
+          workerCount == 0
+              ? std::max(1u, std::thread::hardware_concurrency())
+              : workerCount,
+          {
+              .maxSessionTasks = limits.maxSessionTasks,
+              .maxSessionBytes = limits.maxSessionBytes,
+              .maxGlobalTasks = limits.maxGlobalTasks,
+              .maxGlobalBytes = limits.maxGlobalBytes,
+          }) {
 }
 
 LogicSystem::~LogicSystem() {
     stop();
 }
 
-void LogicSystem::enqueueMessage(std::shared_ptr<Session> session,
-                                 const std::string &message) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_messageQueue.push({std::move(session), message});
-    m_cv.notify_one();
+LogicSystem::EnqueueResult LogicSystem::enqueueMessage(
+    std::shared_ptr<Session> session, std::uint64_t generation,
+    std::string message) {
+    const std::size_t bytes = message.size();
+    const std::string key = session->id();
+    auto result = m_serialQueue.enqueue(
+        key, bytes,
+        [this, session = std::move(session), generation,
+         message = std::move(message)]() {
+            if (!session->isActiveGeneration(generation))
+                return;
+            handleMessage(session, message);
+        });
+
+    switch (result) {
+    case SerialTaskQueue::EnqueueResult::Accepted:
+        return EnqueueResult::Accepted;
+    case SerialTaskQueue::EnqueueResult::Stopped:
+        return EnqueueResult::Stopped;
+    default:
+        return EnqueueResult::QueueFull;
+    }
 }
 
-void LogicSystem::handleDisconnect(std::shared_ptr<Session> session) {
-    LOG_DEBUG("Logic") << "连接断开: clientId=" << session->id();
-    std::lock_guard<std::mutex> lock(m_roomsMutex);
-    removeMemberFromRoomLocked(session);
+void LogicSystem::enqueueDisconnect(std::shared_ptr<Session> session,
+                                    CloseReason reason) {
+    const std::string key = session->id();
+    m_serialQueue.enqueueTerminal(
+        key, [this, session = std::move(session), reason]() {
+            handleDisconnect(session, reason);
+        });
 }
 
 void LogicSystem::stop() {
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_stop)
-            return;
-        m_stop = true;
-    }
-    m_cv.notify_all();
-    for (std::thread &thread : m_workerThreads)
-        thread.join();
+    m_serialQueue.stop();
 
-    // 线程已 join，此时清空房间表是安全的。这一步必须在 io_context 还活着
-    // 的时候做：Session 的析构会去碰 socket/executor，而 LogicSystem 是
-    // 函数内静态对象，它的析构发生在 main 返回之后 —— 那时 io_context 早已
-    // 销毁了。stop() 由 WebSocketServer::stop() 调用，时机正好。
+    // 线程已 join，此时清空房间表是安全的。stop() 由 WebSocketServer::stop()
+    // 在 io_context 仍存活时调用，避免 Session 析构晚于其 executor。
     {
         std::lock_guard<std::mutex> lock(m_roomsMutex);
         m_sessionRooms.clear();
@@ -77,6 +75,13 @@ void LogicSystem::stop() {
     }
 }
 
+void LogicSystem::handleDisconnect(const std::shared_ptr<Session> &session,
+                                   CloseReason reason) {
+    LOG_DEBUG("Logic") << "连接断开: clientId=" << session->id()
+                       << " reason=" << closeReasonName(reason);
+    std::lock_guard<std::mutex> lock(m_roomsMutex);
+    removeMemberFromRoomLocked(session);
+}
 
 // ============================
 // 消息处理（协议见 docs/protocol.md）

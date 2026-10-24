@@ -16,7 +16,7 @@ int main() {
     int exitCode = 0;
     {
         asio::io_context ioc;
-        Server server(ioc, Config::SERVER_ADDRESS, Config::SERVER_PORT);
+        Server server(ioc, Config::serverOptions());
         if (!server.start()) {
             // 监听没建立起来（多半是端口被占）。**必须退出**：旧代码在这里
             // 继续跑 accept 循环，结果是在没绑上的套接字上自旋，单核 100%。

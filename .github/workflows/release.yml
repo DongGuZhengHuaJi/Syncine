@@ -279,6 +279,9 @@ jobs:
       - name: 构建
         run: cmake --build Server/build-release --parallel
 
+      - name: 健壮性测试
+        run: ctest --test-dir Server/build-release --output-on-failure
+
       - name: 冒烟测试
         # 必须真正跑起来：只编译通过不能说明端口能绑、TURN 线程能收尾。
         # 无密钥时 TURN 线程会打一行 WARN 后退出，不影响监听。
@@ -382,6 +385,10 @@ jobs:
 
       - name: 构建
         run: cmake --build Server/build-release --config Release --parallel
+
+      - name: 健壮性测试
+        shell: pwsh
+        run: ctest --test-dir Server/build-release -C Release --output-on-failure
 
       - name: 冒烟测试
         shell: pwsh

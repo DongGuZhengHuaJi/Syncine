@@ -140,6 +140,7 @@ Qt 与 WebRTC 的位置都从**命令行参数/环境变量**读取，不写死�
 cd Server
 cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build-release --parallel
+ctest --test-dir build-release --output-on-failure
 ./build-release/Server          # 监听 0.0.0.0:8765
 ```
 

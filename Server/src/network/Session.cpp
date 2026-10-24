@@ -1,143 +1,325 @@
-//
-// Created by donggu on 2026/9/8.
-//
-
 #include "Session.h"
-#include "Config.h"
+
 #include "Log.h"
-#include "RandomGen.h"
 #include "LogicSystem.h"
+#include "RandomGen.h"
 
 #include <nlohmann/json.hpp>
 
-Session::Session(asio::ip::tcp::socket &&socket)
-    : m_id(RandomGen::generateUUID()) {
-    m_ws = std::make_unique<websocket::stream<asio::ip::tcp::socket>>(std::move(socket));
+#include <utility>
+
+Session::Session(asio::ip::tcp::socket &&socket, const ServerOptions &options,
+                 LogicSystem &logic)
+    : m_options(options),
+      m_logic(logic),
+      m_ws(std::make_unique<websocket::stream<asio::ip::tcp::socket>>(
+          std::move(socket))),
+      m_handshakeTimer(m_ws->get_executor()),
+      m_heartbeatTimer(m_ws->get_executor()),
+      m_pongTimer(m_ws->get_executor()),
+      m_id(RandomGen::generateUUID()) {
 }
 
 Session::~Session() {
-    stop();
+    cancelTimers();
+    beast::error_code ec;
+    m_ws->next_layer().close(ec);
 }
 
 void Session::start() {
-    // 每条连接都会记录，故用 Debug；房间级进出由 LogicSystem 以 Info 记录
-    LOG_DEBUG("Session") << "会话开始: clientId=" << m_id;
+    LOG_DEBUG("Session") << "会话开始: clientId=" << m_id
+                         << " generation=" << generation();
 
-    // 限制单条消息大小。Beast 默认 16 MB，而本协议任何合法消息都远小于此
-    // （最大字段是 title / url）；超限的消息会被当成协议错误断连，不必先
-    // 把它整个读进内存再解析。
-    m_ws->read_message_max(Config::MAX_MESSAGE_BYTES);
+    m_ws->read_message_max(m_options.maxMessageBytes);
+    m_ws->control_callback(
+        [this](websocket::frame_type kind, beast::string_view) {
+            if (kind == websocket::frame_type::pong)
+                onPong();
+        });
 
-    // 先完成 WebSocket 握手，再发 welcome 并开始收消息
+    startHandshakeTimer();
     m_ws->async_accept([this, self = shared_from_this()](beast::error_code ec) {
         if (ec) {
-            LOG_WARN("Session") << "WebSocket 握手失败: clientId=" << m_id
-                                << " " << ec.message();
-            onDisconnected();
+            if (!m_closed.load(std::memory_order_acquire)) {
+                LOG_WARN("Session") << "WebSocket 握手失败: clientId=" << m_id
+                                    << " " << ec.message();
+            }
+            finishDisconnect(CloseReason::NetworkError);
             return;
         }
+
+        m_handshakeTimer.cancel();
 
         nlohmann::json welcome;
         welcome["type"] = "welcome";
         welcome["clientId"] = m_id;
         send(welcome.dump());
 
-        do_read();
+        startHeartbeat();
+        doRead();
     });
 }
 
-void Session::stop() {
-    // 关闭连接；挂起的 async_read 会以错误码完成，在那里触发 onDisconnected
-    beast::error_code ec;
-    m_ws->close(websocket::close_code::normal, ec);
-    if (ec) {
-        LOG_DEBUG("Session") << "关闭连接返回错误（通常为对端已断开）: clientId=" << m_id
-                             << " " << ec.message();
-    }
+void Session::stop(CloseReason reason) {
+    requestClose(reason);
 }
 
-std::string Session::id() const {
+bool Session::send(const std::string &message) {
+    return queueFrame({OutboundQueue::FrameKind::Text, message});
+}
+
+const std::string &Session::id() const {
     return m_id;
 }
 
-void Session::setOnClose(std::function<void(std::shared_ptr<Session>)> callback) {
+std::uint64_t Session::generation() const {
+    return m_generation.load(std::memory_order_acquire);
+}
+
+bool Session::isActiveGeneration(std::uint64_t generation) const {
+    return !m_closed.load(std::memory_order_acquire)
+        && m_generation.load(std::memory_order_acquire) == generation;
+}
+
+void Session::setOnClose(
+    std::function<void(std::shared_ptr<Session>, CloseReason)> callback) {
     m_onClose = std::move(callback);
 }
 
-void Session::send(const std::string &message) {
-    // 写入必须串行；全部投递到 io_context 线程执行，
-    // 这样 worker 线程调用 send 也不会与 async_write 并发
-    auto self = shared_from_this();
-    asio::post(m_ws->get_executor(), [this, self, message]() {
-        m_writeQueue.push_back(message);
-        if (m_writing)
-            return;
-        m_writing = true;
-        do_next_write();
-    });
+bool Session::queueFrame(OutboundQueue::Frame frame) {
+    if (m_closed.load(std::memory_order_acquire)
+        || m_closeRequested.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    const OutboundQueue::Limits limits{
+        .maxMessages = m_options.maxWriteQueueMessages,
+        .maxBytes = m_options.maxWriteQueueBytes,
+    };
+
+    bool scheduleWriter = false;
+    {
+        std::lock_guard lock(m_outboundMutex);
+        if (m_closed.load(std::memory_order_relaxed))
+            return false;
+
+        const bool accepted =
+            frame.kind == OutboundQueue::FrameKind::Ping
+                ? m_outbound.pushPing(limits)
+                : m_outbound.pushText(std::move(frame.payload), limits);
+        if (!accepted) {
+            requestClose(CloseReason::OutboundQueueFull);
+            return false;
+        }
+
+        if (!m_writerScheduled) {
+            m_writerScheduled = true;
+            scheduleWriter = true;
+        }
+    }
+
+    if (scheduleWriter) {
+        asio::post(m_ws->get_executor(),
+                   [self = shared_from_this()]() { self->doNextWrite(); });
+    }
+    return true;
 }
 
-void Session::do_next_write() {
-    if (m_writeQueue.empty()) {
-        m_writing = false;
+bool Session::queuePing() {
+    return queueFrame({OutboundQueue::FrameKind::Ping, {}});
+}
+
+void Session::doNextWrite() {
+    if (m_closed.load(std::memory_order_acquire))
+        return;
+
+    OutboundQueue::Frame frame;
+    {
+        std::lock_guard lock(m_outboundMutex);
+        auto next = m_outbound.pop();
+        if (!next) {
+            m_writerScheduled = false;
+            return;
+        }
+        frame = std::move(*next);
+    }
+
+    auto payload =
+        std::make_shared<OutboundQueue::Frame>(std::move(frame));
+    auto self = shared_from_this();
+
+    if (payload->kind == OutboundQueue::FrameKind::Ping) {
+        m_ws->async_ping(websocket::ping_data(payload->payload),
+                         [this, self, payload](beast::error_code ec) {
+            completeWrite();
+            if (ec) {
+                LOG_WARN("Session") << "心跳发送失败: clientId=" << m_id
+                                    << " " << ec.message();
+                finishDisconnect(CloseReason::NetworkError);
+                return;
+            }
+            doNextWrite();
+        });
         return;
     }
 
-    // async_write 不拷贝载荷：它把调用方的缓冲区直接交给底层 sendmsg，
-    // 所以缓冲区必须活到完成回调为止。对端读得慢（发送缓冲写满）时写操作会
-    // 挂起、函数早已返回 —— 若缓冲区是这里的局部变量，那一刻它已经析构，
-    // 内核恢复写入时读的就是已释放的堆内存（ASan 实测 heap-use-after-free；
-    // 不开 ASan 则表现为把堆上残留数据写给对端，即内存信息泄漏）。
-    //
-    // 所以先把数据移进 shared_ptr，再由该 shared_ptr 建 buffer、并捕获进
-    // lambda。注意不能写成把 message 移进 lambda 再 asio::buffer(message) ——
-    // 那样 buffer 指向的是已被移空的 string。
-    auto payload = std::make_shared<std::string>(std::move(m_writeQueue.front()));
-    m_writeQueue.pop_front();
-
-    auto self = shared_from_this();
-    m_ws->async_write(asio::buffer(*payload),
-                      [this, self, payload](beast::error_code ec, std::size_t) {
-        if (ec) {
-            LOG_WARN("Session") << "写入失败: clientId=" << m_id << " " << ec.message();
-            onDisconnected();
-            return;
-        }
-        do_next_write();
-    });
+    m_ws->async_write(
+        asio::buffer(payload->payload),
+        [this, self, payload](beast::error_code ec, std::size_t) {
+            completeWrite();
+            if (ec) {
+                LOG_WARN("Session") << "写入失败: clientId=" << m_id
+                                    << " " << ec.message();
+                finishDisconnect(CloseReason::NetworkError);
+                return;
+            }
+            doNextWrite();
+        });
 }
 
-void Session::do_read() {
+void Session::completeWrite() {
+    std::lock_guard lock(m_outboundMutex);
+    m_outbound.complete();
+}
+
+void Session::doRead() {
+    if (m_closed.load(std::memory_order_acquire))
+        return;
+
     auto self = shared_from_this();
     m_ws->async_read(m_buffer,
                      [this, self](beast::error_code ec, std::size_t bytes) {
         if (ec) {
-            // 对端正常关闭、EOF、主动取消都不算异常
-            if (ec != websocket::error::closed
-                && ec != asio::error::eof
-                && ec != asio::error::operation_aborted) {
-                LOG_WARN("Session") << "读取失败: clientId=" << m_id << " " << ec.message();
+            const bool peerClosed = ec == websocket::error::closed
+                                 || ec == asio::error::eof
+                                 || ec == asio::error::connection_reset
+                                 || ec == asio::error::connection_aborted;
+            if (!peerClosed && ec != asio::error::operation_aborted) {
+                LOG_WARN("Session") << "读取失败: clientId=" << m_id
+                                    << " " << ec.message();
             }
-            onDisconnected();
+            finishDisconnect(peerClosed ? CloseReason::PeerClosed
+                                        : CloseReason::NetworkError);
             return;
         }
 
-        // 交给逻辑线程处理
-        LogicSystem::getInstance().enqueueMessage(
-            self, beast::buffers_to_string(m_buffer.data()));
+        if (m_ws->got_binary()) {
+            finishDisconnect(CloseReason::ProtocolError);
+            return;
+        }
 
-        // 清空缓冲区，继续读下一条
+        const auto currentGeneration = generation();
+        std::string message = beast::buffers_to_string(m_buffer.data());
         m_buffer.consume(bytes);
-        do_read();
+
+        const auto result = m_logic.enqueueMessage(
+            self, currentGeneration, std::move(message));
+        if (result == LogicSystem::EnqueueResult::Accepted) {
+            doRead();
+            return;
+        }
+
+        const CloseReason reason =
+            result == LogicSystem::EnqueueResult::QueueFull
+                ? CloseReason::InboundQueueFull
+                : CloseReason::ServerStopping;
+        finishDisconnect(reason);
     });
 }
 
-void Session::onDisconnected() {
-    if (m_closed)
+void Session::startHandshakeTimer() {
+    m_handshakeTimer.expires_after(m_options.handshakeTimeout);
+    m_handshakeTimer.async_wait(
+        [self = shared_from_this()](beast::error_code ec) {
+            if (ec || self->m_closed.load(std::memory_order_acquire))
+                return;
+            LOG_WARN("Session") << "WebSocket 握手超时: clientId=" << self->m_id;
+            self->finishDisconnect(CloseReason::HandshakeTimeout);
+        });
+}
+
+void Session::startHeartbeat() {
+    if (m_options.heartbeatInterval.count() <= 0)
         return;
-    m_closed = true;
+
+    m_heartbeatTimer.expires_after(m_options.heartbeatInterval);
+    m_heartbeatTimer.async_wait(
+        [self = shared_from_this()](beast::error_code ec) {
+            if (ec || self->m_closed.load(std::memory_order_acquire)
+                || self->m_closeRequested.load(std::memory_order_acquire)) {
+                return;
+            }
+
+            if (!self->m_pingOutstanding) {
+                if (!self->queuePing())
+                    return;
+                self->m_pingOutstanding = true;
+                self->m_pongTimer.expires_after(
+                    self->m_options.heartbeatTimeout);
+                self->m_pongTimer.async_wait(
+                    [self](beast::error_code timerError) {
+                        if (timerError
+                            || self->m_closed.load(std::memory_order_acquire)
+                            || !self->m_pingOutstanding) {
+                            return;
+                        }
+                        LOG_WARN("Session")
+                            << "心跳超时: clientId=" << self->m_id;
+                        self->finishDisconnect(
+                            CloseReason::HeartbeatTimeout);
+                    });
+            }
+            self->startHeartbeat();
+        });
+}
+
+void Session::onPong() {
+    if (!m_pingOutstanding)
+        return;
+    m_pingOutstanding = false;
+    m_pongTimer.cancel();
+}
+
+void Session::requestClose(CloseReason reason) {
+    if (m_closeRequested.exchange(true, std::memory_order_acq_rel))
+        return;
+
+    asio::post(m_ws->get_executor(),
+               [self = shared_from_this(), reason]() {
+        self->finishDisconnect(reason);
+    });
+}
+
+void Session::finishDisconnect(CloseReason reason) {
+    bool expected = false;
+    if (!m_closed.compare_exchange_strong(expected, true,
+                                          std::memory_order_acq_rel))
+        return;
+
+    m_generation.fetch_add(1, std::memory_order_acq_rel);
+    cancelTimers();
+
+    beast::error_code ec;
+    m_ws->next_layer().cancel(ec);
+    ec.clear();
+    m_ws->next_layer().close(ec);
+
+    {
+        std::lock_guard lock(m_outboundMutex);
+        m_outbound.clearQueued();
+        m_writerScheduled = false;
+    }
+
     LOG_DEBUG("Session") << "会话结束: clientId=" << m_id
-                         << " 未发送消息=" << m_writeQueue.size();
-    if (m_onClose)
-        m_onClose(shared_from_this());
+                         << " reason=" << closeReasonName(reason);
+    if (m_onClose) {
+        auto callback = m_onClose;
+        callback(shared_from_this(), reason);
+    }
+}
+
+void Session::cancelTimers() {
+    m_handshakeTimer.cancel();
+    m_heartbeatTimer.cancel();
+    m_pongTimer.cancel();
 }

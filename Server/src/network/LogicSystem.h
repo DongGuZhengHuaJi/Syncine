@@ -5,14 +5,15 @@
 #ifndef SERVER_LOGICSYSTEM_H
 #define SERVER_LOGICSYSTEM_H
 
-#include <condition_variable>
+#include "CloseReason.h"
+#include "SerialTaskQueue.h"
+#include "ServerOptions.h"
+
+#include <cstdint>
 #include <memory>
 #include <mutex>
-#include <queue>
 #include <string>
-#include <thread>
 #include <unordered_map>
-#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -21,27 +22,34 @@ class Session;
 
 class LogicSystem {
 public:
-    static LogicSystem &getInstance() {
-        static LogicSystem instance;
-        return instance;
-    }
+    enum class EnqueueResult {
+        Accepted,
+        QueueFull,
+        Stopped,
+    };
 
-    // Session 收到消息后调用，投递到逻辑线程
-    void enqueueMessage(std::shared_ptr<Session> session, const std::string &message);
+    LogicSystem(InboundQueueLimits limits, std::size_t workerCount);
+    ~LogicSystem();
 
-    // 连接断开时调用，让成员退出所在房间
-    void handleDisconnect(std::shared_ptr<Session> session);
+    LogicSystem(const LogicSystem &) = delete;
+    LogicSystem &operator=(const LogicSystem &) = delete;
 
-    // 停止所有工作线程（幂等）
+    // 同一 Session 的消息按入队顺序串行执行，不同 Session 可并行。
+    EnqueueResult enqueueMessage(std::shared_ptr<Session> session,
+                                 std::uint64_t generation,
+                                 std::string message);
+
+    // 终止任务会丢弃该 Session 尚未开始的消息，但仍排在正在执行的任务后。
+    void enqueueDisconnect(std::shared_ptr<Session> session, CloseReason reason);
+
     void stop();
 
 private:
-    LogicSystem();
-    ~LogicSystem();
-
     // 异常兜底包装：见 .cpp 里的说明
     void handleMessage(std::shared_ptr<Session> session, const std::string &message);
     void dispatchMessage(const std::shared_ptr<Session> &session, const std::string &message);
+    void handleDisconnect(const std::shared_ptr<Session> &session,
+                          CloseReason reason);
 
     void replyError(const std::shared_ptr<Session> &session,
                     const std::string &code, const std::string &message);
@@ -56,12 +64,7 @@ private:
     // 要求调用方持有 m_roomsMutex
     bool removeMemberFromRoomLocked(const std::shared_ptr<Session> &session);
 
-    std::queue<std::pair<std::shared_ptr<Session>, std::string>> m_messageQueue;
-    std::vector<std::thread> m_workerThreads;
-
-    std::mutex m_mutex; // 保护消息队列
-    std::condition_variable m_cv;
-    bool m_stop = false;
+    SerialTaskQueue m_serialQueue;
 
     std::unordered_map<std::string, std::shared_ptr<Room>> m_rooms; // roomId → 房间
     std::unordered_map<std::shared_ptr<Session>, std::string> m_sessionRooms; // 会话 → 所在房间
