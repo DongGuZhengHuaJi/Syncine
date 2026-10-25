@@ -26,11 +26,11 @@
 
 ### 直接下载运行（Linux x86-64）
 
-从 [Releases](https://github.com/DongGuZhengHuaJi/Syncine/releases) 下载 `Syncine-1.0.0-Linux.tar.gz`，解压后直接跑：
+从 [Releases](https://github.com/DongGuZhengHuaJi/Syncine/releases) 下载 `Syncine-1.3.0-Linux.tar.gz`，解压后直接跑：
 
 ```bash
-tar xzf Syncine-1.0.0-Linux.tar.gz
-cd Syncine-1.0.0-Linux
+tar xzf Syncine-1.3.0-Linux.tar.gz
+cd Syncine-1.3.0-Linux
 ./bin/Syncine
 ```
 
@@ -51,10 +51,10 @@ sudo apt install libgl1 libegl1 libglx0 libopengl0 libxkbcommon0 libxkbcommon-x1
 
 ### 直接下载运行（Windows x86-64）
 
-从 [Releases](https://github.com/DongGuZhengHuaJi/Syncine/releases) 下载 `Syncine-1.0.0-Windows.zip`，解压后直接跑：
+从 [Releases](https://github.com/DongGuZhengHuaJi/Syncine/releases) 下载 `Syncine-1.3.0-Windows.zip`，解压后直接跑：
 
 ```bat
-Syncine-1.0.0-Windows\bin\Syncine.exe
+Syncine-1.3.0-Windows\bin\Syncine.exe
 ```
 
 包里已经带了 Qt 运行库、平台插件、QML 模块、`tools/` 下的 ffmpeg/ffprobe 与 yt-dlp，以及 **MSVC 运行库**——**不需要另外安装 Qt，也不需要装 Visual Studio 或 VC++ Redistributable**。
@@ -100,7 +100,7 @@ cmake --preset release          # 在 Client/ 目录下执行
 cmake --build --preset release
 
 # 4. 打包
-cd build-release && cpack       # 出 Syncine-1.0.0-Linux.tar.gz 与 .zip
+cd build-release && cpack       # 出 Syncine-1.3.0-Linux.tar.gz 与 .zip
 ```
 
 **Windows**
@@ -122,7 +122,7 @@ cmake -S Client -B Client\build-release -G Ninja -DCMAKE_BUILD_TYPE=Release ^
   "-DWEBRTC_WIN_SYSTEM_LIBS=<见 third_party\webrtc\README.md 第 7 节>"
 cmake --build Client\build-release --parallel
 
-:: 4) 打包（出 Syncine-1.0.0-Windows.zip）
+:: 4) 打包（出 Syncine-1.3.0-Windows.zip）
 cd Client\build-release
 cpack
 ```
