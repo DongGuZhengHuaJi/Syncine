@@ -437,6 +437,10 @@ void RoomSession::onMessage(const QString &text) {
         handleMemberOnline(*message);
         break;
 
+    case Protocol::MessageType::MemberOffline:
+        handleMemberOffline(*message);
+        break;
+
     case Protocol::MessageType::Chat:
         emit chatReceived(message->from, message->text);
         break;
@@ -525,6 +529,16 @@ void RoomSession::handleMemberOnline(const Protocol::Message &message) {
 
     LOG_INFO("Room") << "成员恢复在线: clientId=" << message.clientId;
     emit memberOnline(message.clientId);
+}
+
+void RoomSession::handleMemberOffline(const Protocol::Message &message) {
+    if (!m_members->setOnline(message.clientId, false)) {
+        LOG_DEBUG("Room") << "成员离线通知对应的成员不存在: clientId="
+                          << message.clientId;
+        return;
+    }
+
+    LOG_INFO("Room") << "成员离线等待重连: clientId=" << message.clientId;
 }
 
 void RoomSession::handlePlayback(const Protocol::Message &message) {

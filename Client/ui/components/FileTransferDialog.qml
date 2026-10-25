@@ -215,11 +215,14 @@ Popup {
             }
 
             Text {
-                text: root.activeCount > 0
-                      ? root.activeCount + " 个传输进行中"
-                      : (root.channelOpen ? "可发送文件" : "连接就绪后才能发送")
+                text: !root.channelOpen && root.activeCount > 0
+                      ? "连接中断，正在等待恢复…"
+                      : (root.activeCount > 0
+                         ? root.activeCount + " 个传输进行中"
+                         : (root.channelOpen ? "可发送文件" : "连接就绪后才能发送"))
                 font.pixelSize: 11
-                color: Style.textFaint
+                color: !root.channelOpen && root.activeCount > 0
+                       ? Style.brand : Style.textFaint
             }
 
             Item { Layout.fillWidth: true }
@@ -319,8 +322,9 @@ Popup {
                                         font.pixelSize: 10
                                         color: transferState === "failed" ? Style.danger
                                              : (transferState === "completed" ? Style.success
-                                             : (transferState === "waiting" ? Style.brand
-                                                                            : Style.textSecondary))
+                                             : (transferState === "waiting"
+                                                || transferState === "interrupted"
+                                                ? Style.brand : Style.textSecondary))
                                     }
                                 }
 
@@ -358,6 +362,7 @@ Popup {
                                 Layout.fillWidth: true
                                 Layout.topMargin: 2
                                 visible: transferState === "transferring"
+                                         || transferState === "interrupted"
                                 spacing: 8
 
                                 Rectangle {
@@ -390,6 +395,7 @@ Popup {
 
                             Text {
                                 visible: transferState === "transferring"
+                                         || transferState === "interrupted"
                                 text: transferredText + " / " + sizeText
                                 font.pixelSize: 10
                                 color: Style.textFaint

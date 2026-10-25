@@ -221,6 +221,7 @@ private:
     void handleMemberJoined(const Protocol::Message &message);
     void handleMemberLeft(const Protocol::Message &message);
     void handleMemberOnline(const Protocol::Message &message);
+    void handleMemberOffline(const Protocol::Message &message);
     void handlePlayback(const Protocol::Message &message);
     void handleVideoStatus(const Protocol::Message &message);
     void handleVideoMismatch(const Protocol::Message &message);

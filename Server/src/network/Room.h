@@ -81,6 +81,8 @@ public:
     std::vector<std::shared_ptr<Session>> sessions() const;
     // 按 clientId 查找**在线**成员（用于 WebRTC 信令等定向转发）
     std::shared_ptr<Session> findSession(const std::string &clientId) const;
+    // 成员是否存在（包括断线等待重连的离线成员）
+    bool hasMember(const std::string &clientId) const;
     // 房主的会话（房主离线时返回 nullptr）
     std::shared_ptr<Session> hostSession() const;
 

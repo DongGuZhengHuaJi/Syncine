@@ -95,6 +95,8 @@ public:
     // ---- 数据通道（文件传输）----
     // 通道挂在 voice 连接上（该连接在所有模式下都会建立）
     bool isDataChannelOpen(const QString &peerId) const;
+    // 数据通道里尚未发出的字节数，供文件传输做发送节流
+    quint64 dataChannelBufferedAmount(const QString &peerId) const;
     bool sendDataChannelMessage(const QString &peerId, const QByteArray &data, bool binary);
 
     // 关闭并销毁某对端的两条连接。对端离开房间时调用。

@@ -81,6 +81,9 @@ NetworkManager::NetworkManager(AppSettings *settings, QObject *parent)
             m_connected = true;
             m_retrying = false;
             m_failedRounds = 0;
+            // 记住这台服务器：之后掉线重连只回这里，不再尝试兜底地址
+            m_hasPinnedUrl = true;
+            m_pinnedUrl = m_currentUrl;
             LOG_INFO("Network") << "已连接:" << m_currentUrl.toString()
                                 << (m_usingFallback ? "(内置地址)" : "(用户设置地址)");
             // 连上之后才开始心跳；连接尝试阶段不 ping。
@@ -196,13 +199,30 @@ void NetworkManager::disconnectFromServer() {
     stopTimers();
     m_retrying = false;
     m_connected = false;
+    m_hasPinnedUrl = false;
     abortSocket();
     emit isConnectedChanged();
     emit stateChanged();
 }
 
+void NetworkManager::clearServerPin() {
+    m_hasPinnedUrl = false;
+    m_pinnedUrl = QUrl();
+}
+
 void NetworkManager::startRound() {
     m_attempts.clear();
+
+    // 已经成功连过一台服务器：掉线重连必须回到同一台。
+    // 房间、clientId、resume token 都只属于那台服务器；切到兜底地址
+    // 只会得到 bad_message / room_not_found。
+    if (m_hasPinnedUrl && !m_pinnedUrl.isEmpty()) {
+        LOG_INFO("Network") << "重连固定服务器:" << m_pinnedUrl.toString();
+        m_attempts << m_pinnedUrl.toString();
+        m_attemptIndex = 0;
+        tryNextUrl();
+        return;
+    }
 
     const QString userUrl = m_settings != nullptr ? m_settings->serverUrl() : QString();
     const QString fallbackUrl = m_settings != nullptr ? m_settings->fallbackServerUrl()

@@ -25,6 +25,7 @@ MessageType typeFromString(const QString &type) {
         {"member_joined", MessageType::MemberJoined},
         {"member_left", MessageType::MemberLeft},
         {"member_online", MessageType::MemberOnline},
+        {"member_offline", MessageType::MemberOffline},
         {"chat", MessageType::Chat},
         {"playback", MessageType::Playback},
         {"playback_position", MessageType::PlaybackPosition},
@@ -180,6 +181,7 @@ std::optional<Message> decode(const QString &text) {
     case MessageType::MemberJoined:
     case MessageType::MemberLeft:
     case MessageType::MemberOnline:
+    case MessageType::MemberOffline:
         message.clientId = object.value("clientId").toString();
         message.nickname = object.value("nickname").toString();
         message.isHost = object.value("isHost").toBool(false);

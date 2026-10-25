@@ -65,6 +65,44 @@ Item {
 
         Item { width: 1; height: 20 }
 
+        // 自动重连宽限期结束后，服务端可能还保留着上次的会话。
+        // 直接 resume 可以恢复原 clientId（包括房主身份），避免出现幽灵成员。
+        Card {
+            width: parent.width
+            visible: sessionController.canResumeLastSession
+
+            Column {
+                width: parent.width
+                spacing: 10
+
+                Label {
+                    text: "上次会话未结束"
+                    font.pixelSize: 16
+                    font.bold: true
+                    color: Style.textPrimary
+                }
+
+                Label {
+                    width: parent.width
+                    text: "房间 " + sessionController.resumeRoomId
+                          + " 的记录可能还在服务端保留，可以恢复原来的身份（包括房主身份）。"
+                    font.pixelSize: 12
+                    color: Style.textSecondary
+                    wrapMode: Text.Wrap
+                }
+
+                PrimaryButton {
+                    width: parent.width
+                    enabled: !sessionController.busy
+                    text: sessionController.busy ? "恢复中…" : "恢复上次会话"
+                    onClicked: {
+                        serverError = ""
+                        sessionController.resumeLastSession()
+                    }
+                }
+            }
+        }
+
         Card {
             width: parent.width
 

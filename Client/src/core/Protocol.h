@@ -27,6 +27,8 @@ enum class MessageType {
     // 断线重连的成员恢复在线（clientId 不变，成员表里本来就有他）。
     // 不能复用 member_joined：那会让界面显示"加入了房间"并触发重复插入。
     MemberOnline,
+    // 成员断线，进入重连宽限（成员表里仍保留，online=false）
+    MemberOffline,
     Chat,
     Playback,
     PlaybackPosition,   // 房主周期性广播的播放位置（观众据此绘制进度条）

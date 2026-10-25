@@ -605,6 +605,11 @@ bool WebrtcManager::isDataChannelOpen(const QString &peerId) const {
     return link != nullptr && link->isDataChannelOpen();
 }
 
+quint64 WebrtcManager::dataChannelBufferedAmount(const QString &peerId) const {
+    PeerLink *link = peer(peerId, LinkKind::Voice);
+    return link != nullptr ? link->dataChannelBufferedAmount() : 0;
+}
+
 bool WebrtcManager::sendDataChannelMessage(const QString &peerId,
                                            const QByteArray &data, bool binary) {
     PeerLink *link = peer(peerId, LinkKind::Voice);

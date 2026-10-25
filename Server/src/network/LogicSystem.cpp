@@ -85,10 +85,19 @@ void LogicSystem::handleDisconnect(std::shared_ptr<Session> session) {
     const auto room = it->second;
     // 保留成员记录和稳定 clientId，等客户端用 resume token 回来。
     // 这期间不广播 member_left，其他人不会看到"退出又加入"。
+    const std::string clientId = room->clientIdOf(session);
+    const std::string nickname = room->nicknameOf(session);
     if (room->markMemberOffline(session, std::chrono::steady_clock::now())) {
+        // 只广播状态变化，不广播 member_left：成员表不变，UI 显示"重连中"
+        json offline;
+        offline["type"] = "member_offline";
+        offline["clientId"] = clientId;
+        offline["nickname"] = nickname;
+        room->broadcast(offline);
+
         m_sessionRooms.erase(roomIt);
         LOG_INFO("Logic") << "成员进入离线等待: roomId=" << roomId
-                          << " clientId=" << room->clientIdOf(session)
+                          << " clientId=" << clientId
                           << " grace=" << Config::MEMBER_OFFLINE_GRACE_SECONDS << "s";
         return;
     }
@@ -541,6 +550,10 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
         const std::string targetId = message.value("to", "");
         const auto target = room->findSession(targetId);
         if (!target) {
+            // 目标正在离线等待重连：静默丢弃。此时对端本来也收不到，
+            // 回 member_not_found 只会让 ICE 候选/重试在客户端刷出一堆弹窗。
+            if (room->hasMember(targetId))
+                return;
             replyError(session, "member_not_found", "目标成员不存在");
             return;
         }

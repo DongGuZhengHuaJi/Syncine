@@ -38,6 +38,8 @@ QVariant MemberModel::data(const QModelIndex &index, int role) const {
         return member.duration;
     case PendingFilesRole:
         return m_pendingFiles.value(member.clientId, 0);
+    case OnlineRole:
+        return member.online;
     default:
         return {};
     }
@@ -51,6 +53,7 @@ QHash<int, QByteArray> MemberModel::roleNames() const {
         {LoadedRole, "loaded"},
         {DurationRole, "duration"},
         {PendingFilesRole, "pendingFiles"},
+        {OnlineRole, "online"},
     };
 }
 
@@ -106,7 +109,8 @@ std::optional<Member> MemberModel::remove(const QString &clientId) {
 }
 
 bool MemberModel::setOnline(const QString &clientId, bool online) {
-    for (Member &member : m_members) {
+    for (int i = 0; i < m_members.size(); ++i) {
+        Member &member = m_members[i];
         if (member.clientId != clientId)
             continue;
         if (member.online == online)
@@ -115,6 +119,11 @@ bool MemberModel::setOnline(const QString &clientId, bool online) {
         member.online = online;
         LOG_DEBUG("Member") << "成员在线状态更新: " << member.nickname
                             << " online=" << (online ? 1 : 0);
+
+        // 必须发 dataChanged，ListView delegate 里绑定的 online 角色才会刷新；
+        // notifyChanged 只更新 onlineCount 这类 Q_PROPERTY。
+        const QModelIndex changedIndex = index(i);
+        emit dataChanged(changedIndex, changedIndex, {OnlineRole});
         notifyChanged();
         return true;
     }
@@ -190,6 +199,15 @@ void MemberModel::notifyChanged() {
 
 int MemberModel::count() const {
     return static_cast<int>(m_members.size());
+}
+
+int MemberModel::onlineCount() const {
+    int count = 0;
+    for (const Member &member : m_members) {
+        if (member.online)
+            ++count;
+    }
+    return count;
 }
 
 const QList<Member> &MemberModel::members() const {

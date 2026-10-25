@@ -30,11 +30,21 @@ enum class TransferState {
     WaitingAccept,  // 发送方等对方点「接收」
     Transferring,   // 正在传
     Verifying,      // 数据发完，双方核对 SHA-256
+    Interrupted,    // 连接中断，等待续传（文件/哈希保留）
     Completed,
     Rejected,
     Cancelled,
     Failed,
 };
+
+// 还在进行中（或等待恢复）的传输。终态不在此列。
+inline bool isActiveTransferState(TransferState state)
+{
+    return state == TransferState::WaitingAccept
+           || state == TransferState::Transferring
+           || state == TransferState::Verifying
+           || state == TransferState::Interrupted;
+}
 
 struct TransferRecord {
     quint32 id = 0;                  // 发送方分配，二进制块靠它路由
@@ -65,6 +75,17 @@ struct TransferRecord {
     // 速度采样
     qint64 lastSampleBytes = 0;
     qint64 lastSampleMs = 0;
+
+    // ---- 断线续传 ----
+    // 进入 Interrupted 前的状态，恢复时据此决定重发 offer / resume / complete
+    TransferState interruptedFrom = TransferState::Failed;
+    qint64 interruptedAtMs = 0;
+    // 发送端续传时正在重算前缀哈希的剩余字节
+    qint64 hashReplayRemaining = 0;
+    // 已发出 resume，等待 resume_ack
+    bool resumeRequested = false;
+    // 发送完成时的 SHA-256，用于断线后重发 complete
+    QString finalHash;
 };
 
 using TransferRecordPtr = std::shared_ptr<TransferRecord>;

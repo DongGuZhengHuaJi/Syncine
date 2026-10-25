@@ -8,9 +8,7 @@ constexpr int kMaxRecords = 200; // 单个对端保留的历史条数
 
 bool isActiveState(TransferState state)
 {
-    return state == TransferState::WaitingAccept
-           || state == TransferState::Transferring
-           || state == TransferState::Verifying;
+    return isActiveTransferState(state);
 }
 
 QString stateId(TransferState state)
@@ -22,6 +20,8 @@ QString stateId(TransferState state)
         return QStringLiteral("transferring");
     case TransferState::Verifying:
         return QStringLiteral("verifying");
+    case TransferState::Interrupted:
+        return QStringLiteral("interrupted");
     case TransferState::Completed:
         return QStringLiteral("completed");
     case TransferState::Rejected:
@@ -47,6 +47,8 @@ QString stateText(const TransferRecord &record)
                    : QStringLiteral("发送中");
     case TransferState::Verifying:
         return QStringLiteral("校验中…");
+    case TransferState::Interrupted:
+        return QStringLiteral("连接中断，等待恢复…");
     case TransferState::Completed:
         return record.verified ? QStringLiteral("已完成 · 校验通过")
                                : QStringLiteral("已完成");
@@ -106,6 +108,10 @@ QVariant FileTransferModel::data(const QModelIndex &index, int role) const {
     const TransferRecord &record = *m_records.at(index.row());
     const bool active = isActiveState(record.state);
     const bool receiving = record.direction == TransferDirection::Receive;
+    const bool awaitingAccept =
+        record.state == TransferState::WaitingAccept
+        || (record.state == TransferState::Interrupted
+            && record.interruptedFrom == TransferState::WaitingAccept);
 
     switch (role) {
     case IdRole:
@@ -151,11 +157,11 @@ QVariant FileTransferModel::data(const QModelIndex &index, int role) const {
     case ActiveRole:
         return active;
     case AwaitingAcceptRole:
-        return record.state == TransferState::WaitingAccept;
+        return awaitingAccept;
     case CanAcceptRole:
-        return receiving && record.state == TransferState::WaitingAccept;
+        return receiving && awaitingAccept;
     case CanRejectRole:
-        return receiving && record.state == TransferState::WaitingAccept;
+        return receiving && awaitingAccept;
     case CanCancelRole:
         if (!active)
             return false;
@@ -263,8 +269,11 @@ int FileTransferModel::activeCount() const {
 int FileTransferModel::pendingIncoming() const {
     int count = 0;
     for (const TransferRecordPtr &record : m_records) {
-        if (record->direction == TransferDirection::Receive
-            && record->state == TransferState::WaitingAccept) {
+        if (record->direction != TransferDirection::Receive)
+            continue;
+        if (record->state == TransferState::WaitingAccept
+            || (record->state == TransferState::Interrupted
+                && record->interruptedFrom == TransferState::WaitingAccept)) {
             ++count;
         }
     }

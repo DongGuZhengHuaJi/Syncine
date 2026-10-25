@@ -663,6 +663,7 @@ Rectangle {
                             height: 34
                             radius: 17
                             color: isHost ? Style.accent : Style.accentSoft
+                            opacity: online ? 1.0 : 0.55
 
                             Text {
                                 anchors.centerIn: parent
@@ -687,6 +688,16 @@ Rectangle {
                                     text: nickname
                                     font.pixelSize: 13
                                     color: Style.textPrimary
+                                }
+
+                                // 在线状态点：断线等待重连时变灰
+                                Rectangle {
+                                    visible: clientId !== roomSession.clientId
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: 6
+                                    height: 6
+                                    radius: 3
+                                    color: online ? Style.success : Style.textFaint
                                 }
 
                                 // 房主用品牌粉，和主色区分开
@@ -726,7 +737,8 @@ Rectangle {
                                 }
 
                                 Rectangle {
-                                    visible: !loaded && roomSession.roomMode === RoomSession.Sync
+                                    visible: online && !loaded
+                                             && roomSession.roomMode === RoomSession.Sync
                                     anchors.verticalCenter: parent.verticalCenter
                                     width: warnText.implicitWidth + 8
                                     height: 15
@@ -744,10 +756,12 @@ Rectangle {
                             }
 
                             Text {
-                                text: !loaded && roomSession.roomMode === RoomSession.Sync
-                                      ? "等待加载视频…" : "已加载视频"
+                                text: !online
+                                      ? "连接中断，等待重连…"
+                                      : (!loaded && roomSession.roomMode === RoomSession.Sync
+                                         ? "等待加载视频…" : "已加载视频")
                                 font.pixelSize: 11
-                                color: Style.textFaint
+                                color: online ? Style.textFaint : Style.brand
                             }
                         }
 

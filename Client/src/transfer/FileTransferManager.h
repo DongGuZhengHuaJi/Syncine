@@ -88,6 +88,9 @@ private:
     void handleCancel(const QString &peerId, const QJsonObject &message);
     void handleComplete(const QString &peerId, const QJsonObject &message);
     void handleResult(const QString &peerId, const QJsonObject &message);
+    // 断线续传：发送端请求从某个偏移继续；接收端回报已有字节数
+    void handleResume(const QString &peerId, const QJsonObject &message);
+    void handleResumeAck(const QString &peerId, const QJsonObject &message);
 
     // ---- 传输推进 ----
     void startPumping();
@@ -101,6 +104,10 @@ private:
 
     void updatePending(const QString &peerId);
     QString nicknameFor(const QString &peerId) const;
+    // 对端是否仍在成员表里（离线等待重连也算在）
+    bool peerStillInRoom(const QString &peerId) const;
+    // 数据通道恢复后，按断点前的状态重发 offer / resume / complete
+    void reissueAfterReconnect(const QString &peerId);
     static QString downloadDirectory();
     static QString sanitizeFileName(const QString &name);
     static QString uniquePath(const QString &directory, const QString &name);
@@ -111,6 +118,8 @@ private:
     // peerId → 记录。模型归本类所有，析构时随之释放
     QHash<QString, FileTransferModel *> m_models;
     QSet<QString> m_openChannels;
+    // 数据通道发送缓冲达到高水位后暂停该对端的发送，低于低水位再恢复
+    QHash<QString, bool> m_sendPaused;
     // 发送队列满时暂存的控制消息，由发送节拍重试（取消/校验消息不能丢）
     QHash<QString, QVector<QByteArray>> m_pendingControl;
 

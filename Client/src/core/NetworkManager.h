@@ -71,6 +71,8 @@ public:
     Q_INVOKABLE void retryNow();
     // 用户主动断开：断开之后**不再自动重连**(否则刚断开就自己连回来)
     Q_INVOKABLE void disconnectFromServer();
+    // 设置页改了服务器地址时调用：清掉“固定服务器”，允许重新走地址回退
+    Q_INVOKABLE void clearServerPin();
 
     // 发送失败（未连接 / 空消息）返回 false 且不发信号，
     // 由调用方决定怎么向上报告 —— 传输层不该猜业务的错误文案
@@ -122,6 +124,12 @@ private:
     int m_failedRounds = 0;
     bool m_userDisconnected = false;
     bool m_switching = false;      // 自己 abort 中,下一次 error 不是真失败
+
+    // 成功连上过哪台服务器。掉线重连时固定用它，不再尝试兜底地址——
+    // 房间里的 clientId/token/播放列表都属于那台服务器，换一台服务器
+    // 即使连上了也恢复不了房间，只会把“重连”变成“连到别的服务器然后失败”。
+    bool m_hasPinnedUrl = false;
+    QUrl m_pinnedUrl;
 };
 
 

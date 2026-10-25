@@ -963,6 +963,15 @@ bool PeerLink::isDataChannelOpen() const {
            && channel->state() == webrtc::DataChannelInterface::kOpen;
 }
 
+quint64 PeerLink::dataChannelBufferedAmount() const {
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel;
+    {
+        webrtc::MutexLock lock(&m_dataChannelLock);
+        channel = m_dataChannel;
+    }
+    return channel != nullptr ? channel->buffered_amount() : 0;
+}
+
 bool PeerLink::sendDataChannelMessage(const QByteArray &data, bool binary) {
     webrtc::scoped_refptr<webrtc::DataChannelInterface> channel;
     {

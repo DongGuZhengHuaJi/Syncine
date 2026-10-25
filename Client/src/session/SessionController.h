@@ -49,6 +49,15 @@ class SessionController : public QObject {
                READ reconnecting
                NOTIFY reconnectingChanged)
 
+    // 自动重连宽限期结束后，是否还能用 resume 恢复上次会话。
+    // 条件：不在房间、不在重连中，且手里还有 roomId + 稳定 clientId + token。
+    Q_PROPERTY(bool canResumeLastSession
+               READ canResumeLastSession
+               NOTIFY canResumeLastSessionChanged)
+    Q_PROPERTY(QString resumeRoomId
+               READ resumeRoomId
+               NOTIFY canResumeLastSessionChanged)
+
 public:
     SessionController(NetworkManager *networkManager,
                       RoomSession *roomSession,
@@ -58,6 +67,8 @@ public:
     bool busy() const;
     QString nickname() const;
     bool reconnecting() const { return m_reconnecting; }
+    bool canResumeLastSession() const;
+    QString resumeRoomId() const;
 
     Q_INVOKABLE void createRoom(const QString &roomName,
                                 const QString &nickname,
@@ -66,11 +77,14 @@ public:
                               const QString &nickname,
                               const QString &password);
     Q_INVOKABLE void leaveRoom();
+    // 用保存的 clientId + token 恢复上次会话（房主身份也会恢复）
+    Q_INVOKABLE void resumeLastSession();
 
 signals:
     void busyChanged();
     void nicknameChanged();
     void reconnectingChanged();
+    void canResumeLastSessionChanged();
 
     void roomCreated();
     void roomJoined();
@@ -87,7 +101,8 @@ private:
     enum class PendingRequest {
         None,
         CreateRoom,
-        JoinRoom
+        JoinRoom,
+        ResumeLastRoom
     };
 
     void handleRoomEntered(const Protocol::Message &message);
@@ -100,7 +115,8 @@ private:
     void startReconnect();
     void stopReconnect();
     void sendRejoinRequest();
-    void abortReconnectAndLeave(const QString &reason);
+    void abortReconnectAndLeave(const QString &reason,
+                                bool keepResumeCredentials = false);
     void clearRoomCredentials();
 
     NetworkManager *m_networkManager = nullptr;
@@ -120,11 +136,15 @@ private:
 
     // 最近一次成功进入的房间。只放内存，不落盘、不写日志。
     QString m_roomId;
+    // 这个房间属于哪台服务器。resume 前校验，避免连到兜底服务器后发 resume。
+    QString m_roomServerUrl;
     // 断线重连凭据：稳定成员 id + resume token
     QString m_resumeToken;
 
     bool m_reconnecting = false;
     bool m_rejoinInFlight = false;
+    // 手动“恢复上次会话”请求已发出，等待 room_joined
+    bool m_manualResumeInFlight = false;
     int m_rejoinAttempts = 0;       // 仅用于日志
     QTimer m_reconnectDeadline;     // 宽限期：超时后彻底退房
 };

@@ -98,6 +98,7 @@ Item {
             win.visibility = root.visibilityBeforeFullscreen
 
         fileTransferDialog.close()
+        messageDialog.close()
 
         // 先把麦克风关掉再走。否则人已经离开房间了，麦克风还在采集 ——
         // 系统托盘上的录音指示灯会一直亮着，是用户最先注意到的异常。
@@ -229,6 +230,7 @@ Item {
             addVideoDialog.close()      // 房间都没了,开着的加条目窗口不该留着
             audioSettingsDialog.close() // 同理
             fileTransferDialog.close()
+            messageDialog.close()
             if (leaving)
                 return
             const win = root.Window.window
@@ -362,7 +364,7 @@ Item {
                 Text {
                     id: onlineText
                     anchors.centerIn: parent
-                    text: roomSession.members.count + " 人在线"
+                    text: roomSession.members.onlineCount + " 人在线"
                     font.pixelSize: 11
                     color: Style.accent
                 }

@@ -31,6 +31,9 @@ class MemberModel : public QAbstractListModel {
     Q_PROPERTY(int count
                READ count
                NOTIFY countChanged)
+    Q_PROPERTY(int onlineCount
+               READ onlineCount
+               NOTIFY changed)
 
 public:
     enum Role {
@@ -41,6 +44,8 @@ public:
         DurationRole,
         // 该成员发来、尚待本端接收的文件数（界面上的红点）
         PendingFilesRole,
+        // 断线重连宽限期内为 false
+        OnlineRole,
     };
     Q_ENUM(Role)
 
@@ -68,6 +73,7 @@ public:
 
     // ---- 只读访问 ----
     int count() const;
+    int onlineCount() const;
     const QList<Member> &members() const;
     bool contains(const QString &clientId) const;
     // 成员是否在线；成员不存在返回 false

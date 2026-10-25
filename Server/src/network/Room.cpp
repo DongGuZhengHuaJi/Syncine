@@ -149,6 +149,14 @@ std::shared_ptr<Session> Room::findSession(const std::string &clientId) const {
     return nullptr;
 }
 
+bool Room::hasMember(const std::string &clientId) const {
+    for (const Member &member : m_members) {
+        if (member.clientId == clientId)
+            return true;
+    }
+    return false;
+}
+
 std::shared_ptr<Session> Room::hostSession() const {
     for (const Member &member : m_members) {
         if (member.isHost && member.online)

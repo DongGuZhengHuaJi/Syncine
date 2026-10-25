@@ -127,6 +127,8 @@ public:
     // 只在 offer 方创建，answer 方通过 OnDataChannel 拿到同一条通道。
     // 消息分文本（控制 JSON）与二进制（文件块）两种，通道本身可靠且保序。
     bool isDataChannelOpen() const;
+    // 数据通道里还没发出去的字节数（SCTP 发送缓冲）。文件传输据此节流。
+    quint64 dataChannelBufferedAmount() const;
     // 发送一条消息。通道未打开或队列已满时返回 false
     bool sendDataChannelMessage(const QByteArray &data, bool binary);
 

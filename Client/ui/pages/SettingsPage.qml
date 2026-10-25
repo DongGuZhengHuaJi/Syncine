@@ -74,6 +74,8 @@ Item {
     // 不做"边打字边连":那会在输入的每个字符上重连一次
     function applyServerUrl() {
         appSettings.setServerUrl(serverField.text.trim())
+        // 地址变了，解除“固定服务器”，允许重新走用户地址 → 兜底
+        networkManager.clearServerPin()
         networkManager.connectToServer()
     }
 
