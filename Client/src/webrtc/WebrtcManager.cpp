@@ -996,7 +996,7 @@ void WebrtcManager::refreshAudioDevices() {
         const QString desired = recording ? m_desiredRecordingName : m_desiredPlayoutName;
         if (desired.isEmpty())
             continue;
-        if (indexOfDeviceName(desired, deviceList(recording)) != 0)
+        if (indexOfDeviceName(desired, deviceList(recording)) != kDefaultDevice)
             continue;
 
         LOG_WARN("WebRTC") << (recording ? "麦克风" : "听筒") << "设备\"" << desired
