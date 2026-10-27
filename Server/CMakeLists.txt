@@ -62,3 +62,8 @@ target_link_libraries(Server
 # 部署时 `cmake --install` 会把可执行文件放到 <prefix>/bin/Server。
 include(GNUInstallDirs)
 install(TARGETS Server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# Linux 服务端包同时带 coturn 部署脚本；Windows 服务端不使用 coturn。
+if(UNIX)
+    install(DIRECTORY deploy/coturn DESTINATION deploy USE_SOURCE_PERMISSIONS)
+endif()

@@ -4,6 +4,13 @@
 
 ## [未发布]
 
+### TURN
+
+- **自建 coturn 优先**：服务端配置 `SYNCINE_COTURN_URLS` / `SYNCINE_COTURN_SECRET` 后，用 coturn 的 `use-auth-secret` 本地生成 HMAC-SHA1 临时凭据；不再启动 Cloudflare 兑换线程。
+- **Cloudflare 回退**：未配置 coturn 时继续使用原来的 Cloudflare TURN 换取流程，配置和密钥保持不变。
+- **部署脚本**：新增 `Server/deploy/coturn/install-coturn.sh`，安装并配置 coturn、写入 `/opt/syncine/env`、保留 Cloudflare 配置；Linux 服务端包会带上该脚本。
+- 启动日志会明确输出“使用自建 coturn”或“未启用自建 coturn，使用 Cloudflare TURN”；不会记录 secret 或 credential。
+
 ### 文件传输
 
 - **控制与数据分离**：控制 JSON 走 `syncine-file-ctl`（reliable + unordered），文件块走 `syncine-file-data`（reliable + ordered）。取消、校验和心跳不再排在大文件块的重传队列后面。

@@ -8,9 +8,16 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
+#include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
+
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 
 // Windows 上没有 <sys/socket.h>：看门狗要把 asio 的 native_handle（Windows 下
 // 是 SOCKET，不是 int）交给 ::shutdown。SD_BOTH 就是 POSIX 的 SHUT_RDWR。
@@ -60,6 +67,77 @@ constexpr int kRetryMaxSeconds = 900; // 15 分钟
 constexpr int kRequestTimeoutSeconds = 15;
 constexpr const char *kApiHost = "rtc.live.cloudflare.com";
 constexpr const char *kApiPort = "443";
+
+std::string trim(std::string value) {
+    auto notSpace = [](unsigned char ch) { return !std::isspace(ch); };
+    value.erase(value.begin(),
+                std::find_if(value.begin(), value.end(), notSpace));
+    value.erase(std::find_if(value.rbegin(), value.rend(), notSpace).base(),
+                value.end());
+    return value;
+}
+
+std::vector<std::string> splitList(const char *value) {
+    std::vector<std::string> result;
+    if (value == nullptr)
+        return result;
+
+    std::string text(value);
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t comma = text.find(',', start);
+        const std::string item = trim(text.substr(
+            start, comma == std::string::npos ? std::string::npos : comma - start));
+        if (!item.empty())
+            result.push_back(item);
+        if (comma == std::string::npos)
+            break;
+        start = comma + 1;
+    }
+    return result;
+}
+
+bool startsWith(const std::string &text, std::string_view prefix) {
+    return text.size() >= prefix.size()
+           && text.compare(0, prefix.size(), prefix.data(), prefix.size()) == 0;
+}
+
+// 从 turn:host:port?transport=... 推导出 stun:host:port。
+// turns:（TLS）不推导：STUN 不走 TLS。
+std::string deriveStunUrl(const std::string &turnUrl) {
+    std::string rest;
+    if (startsWith(turnUrl, "turn:"))
+        rest = turnUrl.substr(std::string_view("turn:").size());
+    else
+        return {};
+
+    const size_t query = rest.find('?');
+    if (query != std::string::npos)
+        rest.resize(query);
+    rest = trim(rest);
+    if (rest.empty())
+        return {};
+
+    // 没有端口时补默认 3478；IPv6 的 [addr] 形式也按这个规则处理。
+    if (rest.find(':') == std::string::npos || rest.back() == ']')
+        rest += ":3478";
+    return "stun:" + rest;
+}
+
+long parseCoturnTtl() {
+    const char *value = std::getenv("SYNCINE_COTURN_TTL");
+    if (value == nullptr || *value == '\0')
+        return 86400;
+
+    char *end = nullptr;
+    const long ttl = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0' || ttl < 600 || ttl > 86400) {
+        LOG_WARN("Turn") << "SYNCINE_COTURN_TTL 非法（" << value
+                         << "），使用默认 86400 秒";
+        return 86400;
+    }
+    return ttl;
+}
 
 // 同步网络操作的兜底超时。
 //
@@ -217,6 +295,118 @@ TurnCredentials::ApiConfig TurnCredentials::loadApiConfig() {
     return cfg;
 }
 
+std::optional<TurnCredentials::CoturnConfig> TurnCredentials::loadCoturnConfig() {
+    const char *urls = std::getenv("SYNCINE_COTURN_URLS");
+    if (urls == nullptr || *urls == '\0')
+        return std::nullopt; // 未配置 coturn：走 Cloudflare
+
+    CoturnConfig cfg;
+    cfg.turnUrls = splitList(urls);
+    if (cfg.turnUrls.empty()) {
+        LOG_ERROR("Turn") << "SYNCINE_COTURN_URLS 为空，回退 Cloudflare TURN";
+        return std::nullopt;
+    }
+
+    for (const std::string &url : cfg.turnUrls) {
+        if (!startsWith(url, "turn:") && !startsWith(url, "turns:")) {
+            LOG_ERROR("Turn") << "SYNCINE_COTURN_URLS 含非 TURN URL（" << url
+                              << "），回退 Cloudflare TURN";
+            return std::nullopt;
+        }
+    }
+
+    const char *secret = std::getenv("SYNCINE_COTURN_SECRET");
+    if (secret == nullptr || *secret == '\0') {
+        LOG_ERROR("Turn") << "配置了 SYNCINE_COTURN_URLS 但缺少 "
+                             "SYNCINE_COTURN_SECRET，回退 Cloudflare TURN";
+        return std::nullopt;
+    }
+    cfg.secret = secret;
+
+    cfg.stunUrls = splitList(std::getenv("SYNCINE_COTURN_STUN_URLS"));
+    if (!cfg.stunUrls.empty()) {
+        for (const std::string &url : cfg.stunUrls) {
+            if (!startsWith(url, "stun:") || url.find('?') != std::string::npos) {
+                LOG_WARN("Turn") << "忽略非法的 STUN URL（" << url
+                                 << "），将从 TURN URL 推导";
+                cfg.stunUrls.clear();
+                break;
+            }
+        }
+    }
+    if (cfg.stunUrls.empty()) {
+        for (const std::string &url : cfg.turnUrls) {
+            const std::string stun = deriveStunUrl(url);
+            if (stun.empty())
+                continue;
+            if (std::find(cfg.stunUrls.begin(), cfg.stunUrls.end(), stun)
+                == cfg.stunUrls.end()) {
+                cfg.stunUrls.push_back(stun);
+            }
+        }
+    }
+
+    cfg.ttlSeconds = parseCoturnTtl();
+    return cfg;
+}
+
+std::string TurnCredentials::coturnCredential(const std::string &secret,
+                                              const std::string &username) {
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digestLength = 0;
+    if (HMAC(EVP_sha1(), secret.data(), static_cast<int>(secret.size()),
+             reinterpret_cast<const unsigned char *>(username.data()),
+             username.size(), digest, &digestLength)
+        == nullptr) {
+        LOG_ERROR("Turn") << "coturn HMAC-SHA1 计算失败";
+        return {};
+    }
+
+    const int encodedLength = 4 * ((static_cast<int>(digestLength) + 2) / 3);
+    // EVP_EncodeBlock 会在末尾写一个 NUL，容量要多留 1 字节。
+    std::string encoded(static_cast<size_t>(encodedLength) + 1, '\0');
+    const int written = EVP_EncodeBlock(
+        reinterpret_cast<unsigned char *>(encoded.data()), digest,
+        static_cast<int>(digestLength));
+    if (written <= 0) {
+        LOG_ERROR("Turn") << "coturn 凭据 base64 编码失败";
+        return {};
+    }
+    encoded.resize(static_cast<size_t>(written));
+    return encoded;
+}
+
+nlohmann::json TurnCredentials::buildCoturnIceServers(const CoturnConfig &config) {
+    const auto now = std::chrono::system_clock::now();
+    const auto expiry = std::chrono::duration_cast<std::chrono::seconds>(
+                            now.time_since_epoch())
+                            .count()
+                        + config.ttlSeconds;
+    const std::string username = std::to_string(expiry) + ":syncine";
+    const std::string credential = coturnCredential(config.secret, username);
+    if (credential.empty())
+        return {};
+
+    json servers = json::array();
+    if (!config.stunUrls.empty()) {
+        json stun;
+        stun["urls"] = config.stunUrls;
+        servers.push_back(std::move(stun));
+    }
+
+    json turn;
+    turn["urls"] = config.turnUrls;
+    turn["username"] = username;
+    turn["credential"] = credential;
+    servers.push_back(std::move(turn));
+
+    if (!validateIceServers(servers)) {
+        LOG_ERROR("Turn") << "自建 coturn 生成的 ICE 配置校验失败，回退 STUN";
+        return {};
+    }
+    return servers;
+}
+
 // ============================
 // 起停
 // ============================
@@ -226,8 +416,28 @@ void TurnCredentials::start() {
     if (m_started)
         return;
 
+    {
+        std::lock_guard<std::mutex> dataLock(m_mutex);
+        m_coturn.reset();
+    }
+
+    const std::optional<CoturnConfig> coturn = loadCoturnConfig();
+    if (coturn.has_value()) {
+        {
+            std::lock_guard<std::mutex> dataLock(m_mutex);
+            m_coturn = *coturn;
+        }
+        m_started = true;
+        m_stop = false;
+        LOG_INFO("Turn") << "使用自建 coturn：" << coturn->turnUrls.size()
+                         << " 个 TURN URL / " << coturn->stunUrls.size()
+                         << " 个 STUN URL，TTL " << coturn->ttlSeconds << "s";
+        return;
+    }
+
     m_started = true;
     m_stop = false;
+    LOG_INFO("Turn") << "未启用自建 coturn，使用 Cloudflare TURN";
     m_thread = std::thread([this] { run(); });
     LOG_INFO("Turn") << "TURN 凭据服务已启动";
 }
@@ -430,6 +640,14 @@ bool TurnCredentials::fetch(const ApiConfig &cfg) {
 
 json TurnCredentials::iceServers() const {
     std::lock_guard<std::mutex> lock(m_mutex);
+
+    // 自建 coturn 优先。凭据是本地 HMAC，不依赖后台线程。
+    if (m_coturn.has_value()) {
+        const json coturn = buildCoturnIceServers(*m_coturn);
+        if (!coturn.is_null())
+            return coturn;
+        // 生成失败时继续走下面的 Cloudflare 缓存/STUN 兜底。
+    }
 
     if (!m_iceServers.is_null() && std::chrono::steady_clock::now() < m_validUntil)
         return m_iceServers;

@@ -288,12 +288,14 @@ cmake --build Server\build-release --config Release --parallel
 
 服务端依赖 Boost（Asio/Beast、UUID/Random 均为 header-only）、OpenSSL 与 nlohmann-json；CMake ≥ 3.28，C++23。地址、端口和配额在 `Server/src/tools/Config.h`。
 
-**TURN 凭据**：服务端用 Cloudflare 的 TURN 密钥现场兑换临时凭据（有效期 24 小时），随入房消息下发，密钥只留在服务端。来源优先级：
+**TURN 凭据**：服务端优先使用自建 coturn，未配置 coturn 时回退 Cloudflare；两者都不可用时只下发公共 STUN（直连仍可用，NAT 穿透能力下降）。凭据随入房消息下发，密钥只留在服务端。
 
-1. 环境变量 `SYNCINE_TURN_KEY_ID` / `SYNCINE_TURN_API_TOKEN`
-2. `Server/src/tools/Secrets.h`（**不入仓库**，见 `.gitignore`）
+- **自建 coturn（推荐）**：配置 `SYNCINE_COTURN_URLS` / `SYNCINE_COTURN_SECRET` / `SYNCINE_COTURN_STUN_URLS`（可选）/ `SYNCINE_COTURN_TTL`（可选）。coturn 使用 `use-auth-secret`，服务端本地用 HMAC-SHA1 生成短期 username/credential，不依赖外部 API。
+- **Cloudflare（回退）**：只有在没有配置 coturn 时才使用。密钥来源：
+  1. 环境变量 `SYNCINE_TURN_KEY_ID` / `SYNCINE_TURN_API_TOKEN`
+  2. `Server/src/tools/Secrets.h`（**不入仓库**，见 `.gitignore`）
 
-两者都没有时不下发 TURN，只给公共 STUN——直连仍可用，NAT 穿透能力下降。
+服务端自带的 `deploy/coturn/install-coturn.sh` 会安装并配置 coturn、写入 `/opt/syncine/env`，并保留原有的 Cloudflare 配置。删掉 `SYNCINE_COTURN_*` 几行并重启即可回到 Cloudflare。
 
 ---
 
@@ -312,11 +314,14 @@ sudo install -m755 Server/build-release/Server /opt/syncine/Server
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin syncine || true
 sudo chown -R syncine:syncine /opt/syncine
 
-# 3. TURN 密钥放环境文件，不要写进 unit
+# 3. TURN 配置放环境文件，不要写进 unit
+#    使用 coturn 时第 5 步会自动写入 SYNCINE_COTURN_*；
+#    这里的 Cloudflare 密钥只作为未配置 coturn 时的回退，可留空。
 sudo install -m600 /dev/null /opt/syncine/env
 sudo tee /opt/syncine/env >/dev/null <<'EOF'
-SYNCINE_TURN_KEY_ID=...
-SYNCINE_TURN_API_TOKEN=...
+# 未配置 coturn 时才需要：
+# SYNCINE_TURN_KEY_ID=...
+# SYNCINE_TURN_API_TOKEN=...
 # SYNCINE_LOG_LEVEL=info
 EOF
 sudo chown syncine:syncine /opt/syncine/env
@@ -343,7 +348,17 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now syncine
+
+# 5. coturn（推荐）：安装、写配置、写 env 并重启 syncine
+#    Release 的服务端包已包含 deploy/coturn；源码构建时用 Server/deploy/coturn。
+sudo SYNCINE_PUBLIC_IP=<公网IP> \
+     bash /opt/syncine/deploy/coturn/install-coturn.sh
 ```
+
+- coturn 需要放行 **3478/udp、3478/tcp、49160-49300/udp、49160-49300/tcp**（云安全组 + 系统防火墙）；脚本会尝试配置 ufw/firewalld，但云安全组需要手动放行。
+- 脚本会把 `SYNCINE_COTURN_URLS` / `SYNCINE_COTURN_SECRET` 等写入 `/opt/syncine/env`，并保留原有的 Cloudflare 配置。
+- 删除 `SYNCINE_COTURN_*` 四行并重启 `syncine`，即可回退到 Cloudflare TURN。
+- coturn 的 `static-auth-secret` 与 `/opt/syncine/env` 里的 secret 必须一致；脚本会自动生成并写入两边。
 
 - 日志在 `/opt/syncine/logs/`；`SYNCINE_LOG_LEVEL`（trace/debug/info/warn/error）和 `SYNCINE_LOG_DIR` 可覆盖。
 - 需要放行 **8765/tcp**（云安全组和系统防火墙）。
