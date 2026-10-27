@@ -5,8 +5,8 @@ import SyncineApp
 //
 // 与 OptionList 的区别：
 //   · 每行有两段文字（标题 + 右侧小字信息）
-//   · 标出 HDR 的流——Qt 播放器播放 HDR 需离线转 SDR（见 HdrConverter），
-//     用户需能看出所挑选的是哪一条
+//   · 标出 HDR 的流——设置里关闭 HDR 时这类流不会被下载，用户需能看出
+//     所挑选的是哪一条
 //   · 具有「手选」语义：点选后即为 pickedId，父级据此拼接 spec
 //
 // 三处约束（与 OptionList 相同）：
@@ -57,7 +57,7 @@ Column {
                     color: selected ? Style.accent : Style.textPrimary
                 }
 
-                // HDR 标：提醒播放器要转一道
+                // HDR 标：提醒这条流需要允许 HDR 才能下载
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     visible: modelData.hdr === true

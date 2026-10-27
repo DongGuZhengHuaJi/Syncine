@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Controls
 import QtMultimedia
 import SyncineApp
 
@@ -18,20 +17,6 @@ Item {
     property string viewMode: "normal"
     property bool danmakuVisible: true
     property string hintText: ""
-
-    // 转码完成 → 换成 SDR 那份继续播
-    Connections {
-        target: hdrConverter
-        function onFinished(outputUrl) {
-            playbackController.load(outputUrl)
-
-            // 房间里的话，把当前条目的"本机文件"也指过去 —— 否则切到别的集
-            // 再切回来，加载的还是 HDR 原片（等于白转）
-            const itemId = roomSession.playlist.currentItemId
-            if (itemId !== "")
-                roomSession.assignLocalFile(itemId, outputUrl)
-        }
-    }
 
     // 当前模式下还没有可播的片子（本地模式 / 共享模式的房主，且没加载成功）——
     // 这时候点画面不是播放/暂停，而是"去选个文件"
@@ -106,146 +91,17 @@ Item {
         }
     }
 
-    // HDR 提示：Qt 的渲染不做 HDR→SDR 色调映射，直接播会"暗处正常、亮处过曝"。
-    // 这里给一条出路 —— 用自带的 ffmpeg 转一份 SDR(转完自动切过去)。
-    //
-    // 只在视频画面这一层提示，不影响音频/共享等其它逻辑。
-    Rectangle {
-        id: hdrPrompt
-        anchors.centerIn: parent
-        visible: hdrConverter.promptVisible || hdrConverter.running
-                || hdrConverter.errorText !== ""
-
-        width: Math.min(parent.width - 40, 420)
-        height: hdrColumn.implicitHeight + 32
-        radius: Style.radius
-        color: "#D9000000"
-
-        Column {
-            id: hdrColumn
-            anchors.centerIn: parent
-            width: parent.width - 32
-            spacing: 10
-
-            Text {
-                width: parent.width
-                wrapMode: Text.Wrap
-                horizontalAlignment: Text.AlignHCenter
-                color: "#FFFFFF"
-                font.pixelSize: 13
-                text: {
-                    if (hdrConverter.errorText !== "")
-                        return "转码失败:" + hdrConverter.errorText
-                    if (hdrConverter.running)
-                        return "正在转成 SDR… " + Math.max(0, hdrConverter.progress) + "%"
-                                      + "(完成自动切换)"
-                    return "该视频采用HDR（High Dynamic Range，高动态范围），目前播放器渲染画面可能会过暗或过曝，"
-                         + "可以尝试转换为 SDR 播放"
-                }
-            }
-
-            // 转码前：说清要占多少地方 + 两个选择
-            //
-            // 两个按钮的尺寸要显式对齐：PrimaryButton / GhostButton 的默认
-            // 高度和字号都不一样（GhostButton 高 40、字号 14,宽度还随文字走）,
-            // 只给其中一个设尺寸的话，并排就是一大一小
-            Row {
-                id: hdrChoices
-                anchors.horizontalCenter: parent.horizontalCenter
-                spacing: 10
-                visible: !hdrConverter.running && hdrConverter.errorText === ""
-
-                readonly property int buttonWidth: 132
-                readonly property int buttonHeight: 32
-
-                PrimaryButton {
-                    width: hdrChoices.buttonWidth
-                    height: hdrChoices.buttonHeight
-                    font.pixelSize: 12
-                    text: "转换为 SDR"
-                    onClicked: hdrConverter.convert()
-                }
-
-                GhostButton {
-                    width: hdrChoices.buttonWidth
-                    height: hdrChoices.buttonHeight
-                    font.pixelSize: 12
-                    text: "继续播放原片"
-                    // 深色卡上用播放器皮肤那套颜色，不然深灰字几乎看不见
-                    textColor: Style.playerIcon
-                    borderColor: Style.playerLine
-                    onClicked: hdrConverter.dismiss()
-                }
-            }
-
-            Text {
-                anchors.horizontalCenter: parent.horizontalCenter
-                visible: !hdrConverter.running && hdrConverter.errorText === ""
-                color: "#B3FFFFFF"
-                font.pixelSize: 11
-                text: "转换文件位于原视频目录（_SDR.mkv），约 "
-                      + Math.round(hdrConverter.estimatedBytes / 1024 / 1024) + " MB"
-            }
-
-            // 转码中：进度条 + 取消
-            Row {
-                anchors.horizontalCenter: parent.horizontalCenter
-                spacing: 10
-                visible: hdrConverter.running
-
-                Rectangle {
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: 200
-                    height: 6
-                    radius: 3
-                    color: "#40FFFFFF"
-
-                    Rectangle {
-                        width: parent.width * Math.max(0, hdrConverter.progress) / 100
-                        height: parent.height
-                        radius: 3
-                        color: Style.accent
-                    }
-                }
-
-                GhostButton {
-                    width: 88
-                    height: hdrChoices.buttonHeight
-                    font.pixelSize: 12
-                    text: "取消"
-                    textColor: Style.playerIcon
-                    borderColor: Style.playerLine
-                    onClicked: hdrConverter.cancel()
-                }
-            }
-
-            // 失败时给一个"再看原片"的退路
-            GhostButton {
-                anchors.horizontalCenter: parent.horizontalCenter
-                visible: hdrConverter.errorText !== ""
-                width: 160
-                height: 32
-                font.pixelSize: 12
-                text: "播放原片"
-                textColor: Style.playerIcon
-                borderColor: Style.playerLine
-                onClicked: hdrConverter.dismiss()
-            }
-        }
-    }
-
     // 暂停时中央的大播放键。
     //
-    // 条件分两半：**暂停**时显示（playing 为真 => 藏起来）,
-    // 且 HDR 提示卡正占着画面中央时不显示 —— 两个都居中会叠在一起。
-    // 注意别写成 `playing && !prompt`:那是"播放时显示",正好反过来。
+    // 条件分两半：**暂停**时显示（playing 为真 => 藏起来）。
+    // 注意别写成 `playing`:那是"播放时显示",正好反过来。
     Rectangle {
         anchors.centerIn: parent
         width: 64
         height: 64
         radius: 32
         color: "#73000000"
-        opacity: !playbackSync.playing && !hdrPrompt.visible ? 1 : 0
+        opacity: !playbackSync.playing ? 1 : 0
         visible: opacity > 0
         Behavior on opacity { NumberAnimation { duration: 150 } }
 

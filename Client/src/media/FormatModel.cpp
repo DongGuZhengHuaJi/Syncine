@@ -232,31 +232,28 @@ QList<MediaFormat> filterKind(const QList<MediaFormat> &formats, MediaFormat::Ki
     return result;
 }
 
-// 按分辨率档挑画面：height 取自 formats 的 height 字段。HDR 视频在 B 站是另一条
-// hevc 流，`dynamic_range:sdr` 会把它筛掉，此时放开 HDR 限制再挑一次。
+// 按分辨率档挑画面：height 取自 formats 的 height 字段。
+//
+// 统一规则：height > 0 时只考虑“不超过该高度”的流；height = 0 时不设限。
+// 关闭 HDR 时再排除 HDR。这样 1080P 档可以退到 720P SDR，也不会在找不到
+// 精确高度时反而选到更高的 2160P；找不到就返回空，由上层报错。
 MediaFormat pickVideoTier(const MediaInfo &info, int height, bool allowHdr)
 {
-    QList<MediaFormat> tier;
+    QList<MediaFormat> candidates;
     for (const MediaFormat &format : info.formats) {
         if (!format.isVideo() || format.height <= 0)
             continue;
-        if (height > 0 && format.height != height)
+        if (height > 0 && format.height > height)
             continue;
-        tier.append(format);
+        if (!allowHdr && format.isHdr())
+            continue;
+        candidates.append(format);
     }
 
-    MediaFormat best = bestOf(tier, allowHdr);
-    if (best.formatId.isEmpty() && !allowHdr) {
-        best = bestOf(tier, true);
-        if (!best.formatId.isEmpty()) {
-            LOG_DEBUG("Format") << "该档位仅含 HDR 流，已放开 dynamic_range 限制:"
-                                << "height=" << height << " 选中=" << best.formatId;
-        }
-    }
-
+    const MediaFormat best = bestOf(candidates, allowHdr);
     if (best.formatId.isEmpty()) {
         LOG_DEBUG("Format") << "档位无可用画面流: height=" << height
-                            << " 候选=" << tier.size()
+                            << " 候选=" << candidates.size()
                             << " 源内视频流=" << filterKind(info.formats, MediaFormat::VideoOnly).size()
                             << " 合一=" << filterKind(info.formats, MediaFormat::Combined).size();
     }
@@ -376,34 +373,24 @@ MediaFormat pickLiveHls(const MediaInfo &info)
     return groups.first().second;
 }
 
-// 按档位下：`-f` 交给 yt-dlp 的 `bv*+ba/b` 自行挑选，画质由 `-S` 的排序决定。
-// 不要把档位解析成具体 format_id 钉死——一旦对方 formats 变化（登录态不同），
-// 精确 id 取不到就会失败；`-S` 表示「取该档位优先级最高的一条」，始终有解。
+// 按档位下：选中的流会钉成精确的 `-f` 表达式，保证下载内容与界面标出的
+// label/分辨率一致。对方没有这条 id（登录态/会员等级不同）时，下载器会退回
+// `-S` 按档位重挑；关闭 HDR 时还会用 ffprobe 复核下载结果。
 MediaSelection tierSelection(const MediaInfo &info, int height, bool allowHdr)
 {
     const MediaFormat video = pickVideoTier(info, height, allowHdr);
 
     MediaSelection selection;
     selection.live = false;
-    selection.hdr = video.isHdr();
     selection.video = video;
     selection.label = video.displayName();
 
-    // 该档位整档为 HDR 时，Qt 播放需经 HdrConverter 转换，此处提前标记
     if (video.formatId.isEmpty()) {
-        if (height > 0) {
-            // 该高度在源中不存在，退回不设限
-            LOG_INFO("Format") << "档位 " << height << "P 在源中无对应流，退回不设限（最高画质）";
-            return tierSelection(info, 0, allowHdr);
-        }
         // 没有带 height 的画面流：generic 直链单文件（height/vcodec 都未知）。
         // 选一条音视频合一的直链直接交给播放器；不要再递归。
+        // 关闭 HDR 时 bestOf 会跳过 HDR 合一文件；没有 SDR 合一才报错。
         MediaFormat direct = bestOf(filterKind(info.formats, MediaFormat::Combined),
                                     allowHdr);
-        if (direct.formatId.isEmpty()) {
-            direct = bestOf(filterKind(info.formats, MediaFormat::Combined),
-                            !allowHdr);
-        }
         const QString target =
             direct.url.isEmpty() ? direct.manifestUrl : direct.url;
         if (!direct.formatId.isEmpty() && !target.isEmpty()
@@ -414,11 +401,20 @@ MediaSelection tierSelection(const MediaInfo &info, int height, bool allowHdr)
             selection.audio = direct;
             selection.url = target;
             selection.label = direct.displayName();
-            selection.hdr = direct.isHdr();
             return selection;
         }
 
-        LOG_WARN("Format") << "源中没有带 height 的画面流，且找不到可直链的合一文件:"
+        selection.error = !allowHdr
+            ? (height > 0
+                   ? QStringLiteral("这个档位没有 SDR 流（设置中已关闭 HDR），"
+                                    "请选择更低画质或允许 HDR")
+                   : QStringLiteral("这个视频源没有 SDR 流（设置中已关闭 HDR），"
+                                    "请允许 HDR 或换一个源"))
+            : (height > 0
+                   ? QStringLiteral("这个视频源没有不超过该分辨率的画面流，"
+                                    "请选择更低画质或不设限")
+                   : QStringLiteral("这个视频源没有可供下载的画面流"));
+        LOG_WARN("Format") << selection.error
                            << " 候选格式数=" << info.formats.size();
         return selection;
     }
@@ -435,6 +431,26 @@ MediaSelection tierSelection(const MediaInfo &info, int height, bool allowHdr)
     selection.valid = true;
     selection.audio = pickBestAudio(info, allowHdr);
     selection.sortArgs = QStringList{sortKeys.join(QLatin1Char(','))};
+
+    // 精确钉死选中的流。missing id 的兜底在 UrlDownloader::handleDownloadFinished。
+    if (video.isCombined()) {
+        selection.formatExpression = video.formatId;
+    } else if (!selection.audio.formatId.isEmpty()) {
+        selection.formatExpression =
+            QStringLiteral("%1+%2").arg(video.formatId, selection.audio.formatId);
+    }
+
+    if (!selection.formatExpression.isEmpty()) {
+        LOG_INFO("Format") << "钉死选中的流:" << selection.formatExpression
+                           << (allowHdr ? QStringLiteral("(HDR 允许)")
+                                         : QStringLiteral("(强制 SDR)"));
+    } else {
+        LOG_INFO("Format") << "没有完整流对，退回 -S 排序"
+                           << (allowHdr
+                                   ? QString()
+                                   : QStringLiteral("，下载后 ffprobe 复核 HDR"));
+    }
+
     return selection;
 }
 
@@ -977,16 +993,19 @@ QList<FormatChoice> detailChoices(const MediaInfo &info)
 // 按 spec 解析
 // ============================
 
-MediaSelection resolve(const QString &spec, const MediaInfo &info)
+MediaSelection resolve(const QString &spec, const MediaInfo &info,
+                       bool allowHdrOverride)
 {
     MediaSelection selection;
     selection.live = info.live;
 
-    const bool allowHdr = StreamSpec::hdrAllowed(spec);
+    // spec 的 `:h` 表示“这个条目允许 HDR”；本地设置只能再收紧。
+    const bool allowHdr = StreamSpec::hdrAllowed(spec) && allowHdrOverride;
     const QString body = StreamSpec::body(spec);
 
     LOG_DEBUG("Format") << "解析 spec: spec=" << (spec.isEmpty() ? "(空)" : spec)
                         << " live=" << (info.live ? 1 : 0)
+                        << " HDR允许=" << (allowHdr ? 1 : 0)
                         << " 流数=" << info.formats.size();
 
     // ---- 直播：spec 是 m3u8 的地址，或某条流的 format_id ----
@@ -1013,7 +1032,6 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info)
                 selection.url = target;
                 selection.label = format.formatNote.isEmpty() ? QStringLiteral("直播源")
                                                               : format.formatNote;
-                selection.hdr = format.isHdr();
                 return selection;
             }
         }
@@ -1029,7 +1047,6 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info)
         selection.url = target;
         selection.label = chosen.formatNote.isEmpty() ? QStringLiteral("直播源")
                                                       : chosen.formatNote;
-        selection.hdr = chosen.isHdr();
         return selection;
     }
 
@@ -1073,6 +1090,16 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info)
             video = bestOf(filterKind(info.formats, MediaFormat::VideoOnly), allowHdr);
         }
 
+        // 手选的流也必须遵守 spec 的 HDR 许可（以及本地的更严格设置）。
+        // 没有 `:h` 的手选 HDR 流一律拒绝，不再为旧 spec 留兼容路径。
+        if (!allowHdr && video.isHdr()) {
+            selection.error = QStringLiteral(
+                "手选的流是 HDR，但当前条目/设置不允许 HDR；"
+                "请选择 SDR 流，或允许 HDR 后重新添加");
+            LOG_WARN("Format") << selection.error << "spec=" << spec;
+            return selection;
+        }
+
         if (video.isCombined()) {
             // 合一格式：无需音频，且能直链播放
             selection.valid = true;
@@ -1080,14 +1107,14 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info)
             selection.video = video;
             selection.audio = video;
             selection.url = video.url;
-            selection.hdr = video.isHdr();
             selection.label = video.displayName();
             return selection;
         }
 
         if (video.formatId.isEmpty()) {
-            LOG_WARN("Format") << "手选条目中挑不出画面流，交由上层报失败: spec=" << spec;
-            return selection; // 连画面都挑不出，交由上层报失败
+            selection.error = QStringLiteral("手选的条目里没有可用的画面流");
+            LOG_WARN("Format") << selection.error << "spec=" << spec;
+            return selection;
         }
 
         if (audio.formatId.isEmpty())
@@ -1096,7 +1123,6 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info)
         selection.valid = true;
         selection.video = video;
         selection.audio = audio;
-        selection.hdr = video.isHdr();
         selection.label = video.displayName();
         // 精确选择即精确选择：缺少任一路由 yt-dlp 报错，不静默替换为其他流
         selection.formatExpression = audio.formatId.isEmpty()

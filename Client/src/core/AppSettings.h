@@ -62,8 +62,9 @@ class AppSettings : public QObject {
                WRITE setDefaultQuality
                NOTIFY defaultQualityChanged)
 
-    // 简单模式选档时是否允许下载 HDR/杜比视界。默认关闭：
-    // HDR 在 Qt 播放器上需经一次离线转 SDR（见 HdrConverter）。
+    // 添加条目时是否允许 HDR/杜比视界。默认关闭。
+    // 关闭时下载端强制只选 SDR，并在下载后用 ffprobe 复核；即使条目 spec
+    // 允许 HDR，本地关闭也会收紧。不做离线转码。
     Q_PROPERTY(bool hdrAllowed
                READ hdrAllowed
                WRITE setHdrAllowed

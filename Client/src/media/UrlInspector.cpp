@@ -346,10 +346,24 @@ QString UrlInspector::buildSpec(bool allowHdr) const
     if (body.isEmpty())
         return {};
 
-    // HDR 后缀只缀在普通视频的档位上：手选的 id 是用户在详情里看着"HDR"标点出来的，
-    // 不该再由开关改写；直播的 HDR 由清单自己决定
-    if (m_info.live || !m_pickedVideoId.isEmpty())
+    // 直播的 HDR 由清单自己决定，不加后缀。
+    if (m_info.live)
         return body;
+
+    // 手选流：只有“这条流本身是 HDR 且本地允许 HDR”才缀 :h。
+    // 手选 SDR 流不缀，避免列表标签被误显示成“+HDR”；本地关闭时
+    // 手选 HDR 流不缀后缀，下载端会据 allowHdrOverride 拒绝它。
+    if (!m_pickedVideoId.isEmpty()) {
+        bool pickedHdr = false;
+        for (const MediaFormat &format : m_info.formats) {
+            if (format.formatId == m_pickedVideoId) {
+                pickedHdr = format.isHdr();
+                break;
+            }
+        }
+        return StreamSpec::withHdr(body, allowHdr && pickedHdr);
+    }
+
     return StreamSpec::withHdr(body, allowHdr);
 }
 

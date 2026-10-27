@@ -22,6 +22,7 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 #include <QVariantList>
 
 #include "media/FormatModel.h"
@@ -69,12 +70,6 @@ class UrlDownloader : public QObject {
                READ live
                NOTIFY resolved)
 
-    // 选中的流带不带 HDR:Qt 播放器放 HDR 要过一遍离线转 SDR(见 HdrConverter),
-    // 界面靠这个提前提醒
-    Q_PROPERTY(bool hdr
-               READ hdr
-               NOTIFY resolved)
-
 public:
     // cookies 可以为空（那就不带 --cookies）
     explicit UrlDownloader(const Toolchain *toolchain,
@@ -93,7 +88,12 @@ public:
     // (见 itemTempDir 的说明),不该混进 URL/spec 这两个跨端数据里。
     void setDownloadDir(const QString &dir) { m_destDir = dir; }
 
+    // 本地设置里的 HDR 开关。false = 硬约束：只选 SDR；下载完成后用
+    // ffprobe 复核，发现 HDR 就删文件并失败。必须在 start() 之前设好。
+    void setAllowHdr(bool allowed) { m_allowHdr = allowed; }
+
     // 取消当前任务，**并把状态清回干净**(没有任务在跑时也一样清)。
+    // 内部会同步 kill + waitForFinished + 置空，调用后可以立刻 start()。
     // 界面关弹窗时靠它复位；只发 stateChanged,不会发 resolved/failed。
     Q_INVOKABLE void cancel();
 
@@ -108,7 +108,6 @@ public:
     qint64 durationMs() const { return m_media.durationMs; }
     QString errorText() const { return m_error; }
     bool live() const { return m_media.live; }
-    bool hdr() const { return m_selection.hdr; }
 
     // 解析结果：选中了哪条流、是直链还是下载合并
     const MediaInfo &mediaInfo() const { return m_media; }
@@ -159,6 +158,16 @@ private:
     void startProcess(const QStringList &options, const QString &url);
     void handleDownloadLine(const QString &line);
     void handleDownloadFinished(int exitCode);
+    // 下载完成后确认动态范围（仅 m_allowHdr=false 时走）
+    void startHdrProbe(const QString &path);
+    void handleHdrProbeFinished(int exitCode);
+    void finishReady(const QString &path);
+    // 长时间没有输出/进度时主动终止，避免 UI 永远停在“解析中”
+    void onStallTimeout();
+    void startStallTimer(int timeoutMs);
+    void stopStallTimer();
+    void cleanupProcess(QProcess *&process);
+    bool isBusy() const;
     void setStage(const QString &stage);
     void fail(const QString &message);
 
@@ -166,6 +175,13 @@ private:
     // 有 cookie 文件时给 yt-dlp 带上 --cookies(见 CookieManager::cookieArgs)
     const CookieManager *m_cookies = nullptr;
     QProcess *m_process = nullptr;
+    // 下载后的 ffprobe 复核。与 m_process 分开：两者永远不会同时存在。
+    QProcess *m_hdrProbe = nullptr;
+    QString m_hdrProbePath;
+    QTimer m_stallTimer;
+    // 本地 HDR 开关（硬约束）。默认关闭，与 AppSettings 的默认值一致；
+    // main 启动时会用实际设置覆盖。
+    bool m_allowHdr = false;
 
     QString m_stage = QStringLiteral("idle");
     int m_progress = -1;
@@ -189,8 +205,9 @@ private:
     qint64 m_expectedTotalBytes = 0;
     double m_speedBps = 0;
     int m_etaSec = -1;
-    // 手选的精确流在本端不存在时，只允许退回档位重下一次（见 handleDownloadFinished）
-    bool m_manualFallbackTried = false;
+    // 精确流（手选或关闭 HDR 时钉死的 SDR）在本端不存在时，只允许退回档位重下一次
+    // （见 handleDownloadFinished）
+    bool m_exactFallbackTried = false;
 
     // yt-dlp 的输出尾巴，失败时原样给用户看（最后几行足够定位问题）
     QStringList m_outputTail;

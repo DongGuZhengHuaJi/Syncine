@@ -794,7 +794,9 @@ Popup {
                         }
                         return false
                     }
-                    text: "该流为 HDR/杜比视界，播放前需转换为 SDR"
+                    text: appSettings.hdrAllowed
+                          ? "该流为 HDR/杜比视界；设置中已允许 HDR，播放时高光部分可能过曝"
+                          : "该流为 HDR/杜比视界；设置中已关闭 HDR，添加后将无法下载"
                     wrapMode: Text.Wrap
                     font.pixelSize: 11
                     color: Style.danger

@@ -256,6 +256,21 @@ Item {
         }
     }
 
+    // 后台重试（播放列表里对非当前条目点刷新）：完成/失败都给一条系统消息，
+    // 不打断正在播放的条目。
+    Connections {
+        target: playbackSync
+
+        function onBackgroundRetryFinished(itemId, ok, message) {
+            if (ok)
+                root.pushSystem(message !== ""
+                                ? message
+                                : "后台下载完成，切换到该条目即可播放")
+            else if (message !== "")
+                root.pushSystem("后台重试失败：" + message)
+        }
+    }
+
     // 麦克风状态不需要 Connections 同步 —— signalingChannel.audioEnabled
     // 是 Q_PROPERTY,引用它的绑定会随 NOTIFY 自动重算。
 

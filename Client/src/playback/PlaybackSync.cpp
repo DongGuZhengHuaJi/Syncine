@@ -62,8 +62,8 @@ PlaybackSync::PlaybackSync(RoomSession *session,
                 this, &PlaybackSync::onUrlReady);
         connect(m_urlDownloader, &UrlDownloader::stateChanged,
                 this, &PlaybackSync::downloadStateChanged);
-        connect(m_urlDownloader, &UrlDownloader::failed, this,
-                [this](const QString &) { emit downloadStateChanged(); });
+        connect(m_urlDownloader, &UrlDownloader::failed,
+                this, &PlaybackSync::onUrlFailed);
     }
 
     // ---- 本地播放器 -> 房间 ----
@@ -132,7 +132,7 @@ PlaybackSync::PlaybackSync(RoomSession *session,
 
                     // 清掉"已就绪"标记，让 prepareUrlItem 重新走一遍解析
                     m_preparedItemId.clear();
-                    m_preparingItemId.clear();
+                    clearDownloadItem();
                     prepareUrlItem(m_session->playlist()->currentItemId());
                 });
             });
@@ -225,20 +225,41 @@ void PlaybackSync::setPlaybackRate(qreal rate) {
 }
 
 // 网链模式的准备进度。其它模式下下载器是空闲的，这几个值自然是空的。
+// **只暴露当前条目的任务**：后台重试另一个条目时，不能让它的进度/错误
+// 串到正在播放的这一行上（后台状态由 retryingItemId 单独表示）。
+bool PlaybackSync::downloadIsCurrent() const {
+    return m_session != nullptr && m_urlDownloader != nullptr
+           && !m_downloadItemId.isEmpty()
+           && m_downloadItemId == m_session->playlist()->currentItemId();
+}
+
+bool PlaybackSync::downloadFailedIsCurrent() const {
+    return m_session != nullptr
+           && m_failedItems.contains(m_session->playlist()->currentItemId());
+}
+
 QString PlaybackSync::downloadStage() const {
-    return m_urlDownloader != nullptr ? m_urlDownloader->stage() : QString();
+    if (downloadFailedIsCurrent())
+        return QStringLiteral("failed");
+    return downloadIsCurrent() ? m_urlDownloader->stage() : QString();
 }
 
 int PlaybackSync::downloadProgress() const {
-    return m_urlDownloader != nullptr ? m_urlDownloader->progress() : -1;
+    if (downloadFailedIsCurrent())
+        return -1;
+    return downloadIsCurrent() ? m_urlDownloader->progress() : -1;
 }
 
 QString PlaybackSync::downloadDetail() const {
-    return m_urlDownloader != nullptr ? m_urlDownloader->detailText() : QString();
+    if (downloadFailedIsCurrent())
+        return {};
+    return downloadIsCurrent() ? m_urlDownloader->detailText() : QString();
 }
 
 QString PlaybackSync::downloadError() const {
-    return m_urlDownloader != nullptr ? m_urlDownloader->errorText() : QString();
+    if (downloadFailedIsCurrent())
+        return m_failedItems.value(m_session->playlist()->currentItemId());
+    return downloadIsCurrent() ? m_urlDownloader->errorText() : QString();
 }
 
 bool PlaybackSync::live() const {
@@ -249,10 +270,9 @@ bool PlaybackSync::live() const {
 
 QString PlaybackSync::downloadStageText() const
 {
-    if (m_urlDownloader == nullptr)
+    const QString stage = downloadStage();
+    if (stage.isEmpty())
         return {};
-
-    const QString stage = m_urlDownloader->stage();
     if (stage == QLatin1String("probing"))
         return QStringLiteral("解析中…");
     if (stage == QLatin1String("downloading")) {
@@ -265,6 +285,8 @@ QString PlaybackSync::downloadStageText() const
     }
     if (stage == QLatin1String("merging"))
         return QStringLiteral("合并音视频中…");
+    if (stage == QLatin1String("checking"))
+        return QStringLiteral("检查动态范围中…");
     if (stage == QLatin1String("failed"))
         return QStringLiteral("下载失败");
     return {};
@@ -272,10 +294,9 @@ QString PlaybackSync::downloadStageText() const
 
 QString PlaybackSync::downloadShortText() const
 {
-    if (m_urlDownloader == nullptr)
+    const QString stage = downloadStage();
+    if (stage.isEmpty())
         return {};
-
-    const QString stage = m_urlDownloader->stage();
     if (stage == QLatin1String("probing"))
         return QStringLiteral("解析中");
     if (stage == QLatin1String("downloading")) {
@@ -285,33 +306,113 @@ QString PlaybackSync::downloadShortText() const
     }
     if (stage == QLatin1String("merging"))
         return QStringLiteral("合并中");
+    if (stage == QLatin1String("checking"))
+        return QStringLiteral("检查中");
     if (stage == QLatin1String("failed"))
         return QStringLiteral("下载失败");
     return {};
 }
 
-void PlaybackSync::retryCurrentItem() {
-    if (m_session == nullptr)
+QString PlaybackSync::retryingItemId() const
+{
+    if (m_downloadItemId.isEmpty() || m_session == nullptr)
+        return {};
+    return m_downloadItemId == m_session->playlist()->currentItemId()
+               ? QString()
+               : m_downloadItemId;
+}
+
+void PlaybackSync::clearDownloadItem()
+{
+    if (m_downloadItemId.isEmpty())
+        return;
+    m_downloadItemId.clear();
+    emit retryStateChanged();
+    // downloadStage/Progress/Error 都按“是否当前条目”门控，标记变化时
+    // 也要让这些绑定重算
+    emit downloadStateChanged();
+}
+
+void PlaybackSync::clearFailedItem(const QString &itemId)
+{
+    if (m_failedItems.remove(itemId) > 0)
+        emit downloadStateChanged();
+}
+
+void PlaybackSync::clearAllFailedItems()
+{
+    if (m_failedItems.isEmpty())
+        return;
+    m_failedItems.clear();
+    emit downloadStateChanged();
+}
+
+void PlaybackSync::retryItem(const QString &itemId)
+{
+    if (m_session == nullptr || m_urlDownloader == nullptr)
+        return;
+    if (!m_session->inRoom() || m_session->roomMode() != RoomSession::RoomMode::Url)
         return;
 
-    const QString itemId = m_session->playlist()->currentItemId();
-    if (itemId.isEmpty())
+    const QString current = m_session->playlist()->currentItemId();
+    if (itemId.isEmpty() || !m_session->playlist()->contains(itemId))
         return;
 
-    LOG_INFO("Playback") << "重试当前条目";
-    // 先掐掉可能在跑的那次（失败后通常已经结束；取消是对"下载卡住"的兜底）
-    if (m_urlDownloader != nullptr)
+    if (itemId == current) {
+        LOG_INFO("Playback") << "重试当前条目";
+        // 先掐掉可能在跑的那次（失败/卡住时它可能还挂着）
         m_urlDownloader->cancel();
-    // 弹幕也一起复位；beginItem 仍会优先复用已有的 danmaku.xml，
-    // 上次没下成功时才会重新拉取
-    if (m_danmaku != nullptr)
-        m_danmaku->reset();
-    m_preparedItemId.clear();
-    m_preparingItemId.clear();
-    // "重试"的意思是**重新下一遍**:把缓存的映射删掉，否则 prepareUrlItem
-    // 会认出上一轮的产物直接复用它（重试就变成空转）
+        // 弹幕也一起复位；beginItem 仍会优先复用已有的 danmaku.xml，
+        // 上次没下成功时才会重新拉取
+        if (m_danmaku != nullptr)
+            m_danmaku->reset();
+        m_preparedItemId.clear();
+        clearFailedItem(itemId);
+        clearDownloadItem();
+        // "重试"的意思是**重新下一遍**:把缓存的映射删掉，否则 prepareUrlItem
+        // 会认出上一轮的产物直接复用它（重试就变成空转）
+        m_session->playlist()->setLocalFile(itemId, QString());
+        prepareUrlItem(itemId);
+        return;
+    }
+
+    // 后台重试：只在下载器空闲时做，避免打断当前条目的准备。
+    // 当前条目如果已经在播，下载器通常是 idle/ready，这里可以放心下另一条。
+    const QString stage = m_urlDownloader->stage();
+    const bool busy = stage == QLatin1String("probing")
+                      || stage == QLatin1String("downloading")
+                      || stage == QLatin1String("merging")
+                      || stage == QLatin1String("checking");
+    if (busy) {
+        LOG_INFO("Playback") << "下载器正忙,暂不后台重试:" << itemId
+                             << " 当前阶段=" << stage;
+        emit backgroundRetryFinished(
+            itemId, false,
+            QStringLiteral("当前有下载任务正在进行，请稍后再试"));
+        return;
+    }
+
+    const QString url = m_session->urlFor(itemId);
+    if (url.isEmpty()) {
+        LOG_WARN("Playback") << "后台重试失败:条目没有 URL" << itemId;
+        emit backgroundRetryFinished(itemId, false,
+                                     QStringLiteral("该条目没有可解析的链接"));
+        return;
+    }
+
+    LOG_INFO("Playback") << "后台重试条目:" << itemId << url;
+    // 如果重试的正是之前失败的那一条，清掉失败标记；当前条目的失败
+    // 标记（如果不同）保留，界面仍能看到它的错误。
+    if (m_failedItems.contains(itemId))
+        clearFailedItem(itemId);
+    // 缓存的映射先清掉，否则 prepare 会直接复用旧产物
     m_session->playlist()->setLocalFile(itemId, QString());
-    prepareUrlItem(itemId);
+    m_downloadItemId = itemId;
+    emit retryStateChanged();
+
+    m_urlDownloader->setDownloadDir(
+        UrlDownloader::itemTempDir(m_session->roomId(), m_session->clientId(), itemId));
+    m_urlDownloader->start(url, m_session->playlist()->specOf(itemId));
 }
 
 // ============================
@@ -443,6 +544,17 @@ void PlaybackSync::onRoomChanged() {
     if (m_session == nullptr || m_playback == nullptr)
         return;
 
+    // 换房/退房时，上一条目的下载、失败、就绪状态都不再属于当前房间。
+    // 必须在后面的 applyPlaylistItem 之前清，否则新房间可能复用旧标记。
+    if (m_session->roomId() != m_roomId) {
+        m_roomId = m_session->roomId();
+        if (m_urlDownloader != nullptr)
+            m_urlDownloader->cancel();
+        clearDownloadItem();
+        m_preparedItemId.clear();
+        clearAllFailedItems();
+    }
+
     // 该显示哪一路画面：
     //
     //   同步模式          → 自己的画面（每人各自加载各自的文件）
@@ -452,7 +564,10 @@ void PlaybackSync::onRoomChanged() {
     //
     // 网链模式**不能**按"非房主就看远端"处理：那样观众会去等房主的推流，
     // 而这条模式的语义是"每个人自己从链接拿内容"。
-    m_showRemote = (m_session->roomMode() == RoomSession::RoomMode::Share)
+    // 离开房间时一律回到“本地画面”（即使上一刻还是共享观众）：
+    // 远端渲染器会因此停手，减少 pop 页面后它还往已销毁的 QVideoSink 写帧的窗口。
+    m_showRemote = m_session->inRoom()
+                   && m_session->roomMode() == RoomSession::RoomMode::Share
                    && !m_session->isHost();
 
     m_playback->setShowingRemote(m_showRemote);
@@ -483,9 +598,32 @@ void PlaybackSync::onRoomChanged() {
             m_urlDownloader->cancel();
             UrlDownloader::removeClientTempDir(m_session->clientId());
         }
-        m_preparingItemId.clear();
+        clearDownloadItem();
         m_preparedItemId.clear();
+        clearAllFailedItems();
+
+        // 离开房间时不要再走 applyPlaylistItem()：RoomSession::clearRoomState()
+        // 先清成员表、后清模式/播放列表，这段中间状态仍会看到旧的 Url 模式和
+        // 当前条目，继续解析会白起一次 yt-dlp（日志里表现为“开始解析”后立刻
+        // “已取消”）。播放器在这里显式卸载，避免离开房间后还占着文件。
+        m_playback->unload();
+        emit durationChanged();
+        emit seekableChanged();
+        emit positionChanged();
+        emit playingChanged();
+        emit gateChanged();
+        emit downloadStateChanged();
+        return;
     }
+
+    // 非网链模式不再需要下载器：切走时把还在跑的解析/下载停掉。
+    // 只取消，不删已下好的缓存（切回网链模式还能复用）。
+    if (m_session->roomMode() != RoomSession::RoomMode::Url
+        && !m_downloadItemId.isEmpty()) {
+        cancelOngoingDownload();
+    }
+    if (m_session->roomMode() != RoomSession::RoomMode::Url)
+        clearAllFailedItems();
 
     // 模式变了，"这一条从哪儿来"也跟着变：同步/共享读本地文件，网链读 URL。
     // 重新解析一次当前条目（没有当前条目时是空串，等价于卸载）
@@ -496,12 +634,18 @@ void PlaybackSync::onRoomChanged() {
     emit positionChanged();
     emit playingChanged();
     emit gateChanged();
+    // 当前条目变了，下载进度/错误的“是否属于当前条目”也会变
+    emit downloadStateChanged();
+    // retryingItemId 也按“是否为当前条目”计算，切条目后要重算
+    emit retryStateChanged();
 }
 
 void PlaybackSync::onPlaylistSwitched(const QString &itemId) {
     if (m_session == nullptr || m_playback == nullptr)
         return;
 
+    // 失败状态不在切条目时清除：切回失败条目仍然显示错误，必须由用户
+    // 点刷新图标才会重新下载。离开房间/切到非网链模式时才清（见 onRoomChanged）。
 
     // 切集不自动播：位置归零、停在暂停，由用户按播放（和"换了部片子"的直觉一致）
     m_syncedPosition = 0;
@@ -512,6 +656,10 @@ void PlaybackSync::onPlaylistSwitched(const QString &itemId) {
     applyPlaylistItem(itemId);
     emit liveChanged();
     emit gateChanged();
+    // 切到一条正在后台下载的条目时，让进度文案立刻显示出来
+    emit downloadStateChanged();
+    // retryingItemId 从“后台”变成“当前”，或反过来
+    emit retryStateChanged();
 
     // 直播没有共同时间轴，播放器对直播倍速的支持也不可靠：切到直播即回原速
     if (live())
@@ -574,21 +722,53 @@ void PlaybackSync::prepareUrlItem(const QString &itemId)
         return;
     }
 
-    // ---- 幂等保护 ----
+    // 切到另一条时，清掉上一条遗留的 failed/ready 标记；真正在跑的任务
+    // （probing/downloading/merging/checking）不动，后台重试要靠它。
+    if (!m_downloadItemId.isEmpty() && m_downloadItemId != itemId
+        && m_urlDownloader != nullptr) {
+        const QString stage = m_urlDownloader->stage();
+        const bool active = stage == QLatin1String("probing")
+                            || stage == QLatin1String("downloading")
+                            || stage == QLatin1String("merging")
+                            || stage == QLatin1String("checking");
+        if (!active)
+            clearDownloadItem();
+    }
+
+    // 已经在播放器里：不重启
+    if (itemId == m_preparedItemId && m_playback->hasLoaded())
+        return;
+
+    // 当前条目已经失败：保留失败状态给界面显示，等用户点重试。
+    // 否则每次成员表刷新（video_status 回显等）都会自动重拉一次 yt-dlp，
+    // 既刷屏又会把别的条目的后台重试任务挤掉。
+    if (m_failedItems.contains(itemId)) {
+        if (!(itemId == m_preparedItemId && m_playback->hasLoaded())) {
+            m_preparedItemId.clear();
+            m_playback->unload();
+        }
+        return;
+    }
+
+    // ---- 下载器任务幂等保护 ----
     // 房间状态变一次就会走到这里一次(成员表更新、模式广播、连自己上报的
-    // video_status 回显也算),不挡住的话会反复重启 yt-dlp,
-    // 而且每次都会把已经加载好的媒体卸载掉 —— 表现为永远"解析中"。
-    if (itemId == m_preparingItemId && m_urlDownloader != nullptr) {
+    // video_status 回显也算),不挡住的话会反复重启 yt-dlp。
+    // 这里用 m_downloadItemId 而不是“当前条目”：后台重试另一条时，
+    // 当前条目的 membersChanged 刷新不应该把那个任务推倒重来。
+    if (itemId == m_downloadItemId && m_urlDownloader != nullptr) {
         const QString stage = m_urlDownloader->stage();
         if (stage == QLatin1String("probing")
             || stage == QLatin1String("resolved")   // 直链就绪,等 PlaybackSync 切播放器
             || stage == QLatin1String("downloading")
-            || stage == QLatin1String("merging")) {
-            return; // 正在准备(或已经准备好),别把它推倒重来
+            || stage == QLatin1String("merging")
+            || stage == QLatin1String("checking")) {
+            // 用户刚切到一条正在后台下载的条目：播放器先清空等 ready；
+            // 任务本身不重启。
+            m_preparedItemId.clear();
+            m_playback->unload();
+            return;
         }
     }
-    if (itemId == m_preparedItemId && m_playback->hasLoaded())
-        return; // 已经就绪,播放器上就是它
 
     // 弹幕与视频同目录、同生命周期。beginItem 对同一目录的在飞请求是幂等的，
     // 不会因为成员表刷新而反复 abort 重来。
@@ -606,15 +786,24 @@ void PlaybackSync::prepareUrlItem(const QString &itemId)
         // 弹幕 XML 没命中缓存时，用会话内 cid / 页面 URL 补拉一次
         if (!danmakuCached && m_danmaku != nullptr)
             m_danmaku->loadFromUrl();
+        // 这一条自己的下载任务已经结束；别的条目的后台任务不要动
+        if (m_downloadItemId == itemId)
+            clearDownloadItem();
+        // 缓存能加载成功，说明之前的失败已经无关紧要
+        if (m_failedItems.contains(itemId))
+            clearFailedItem(itemId);
         m_preparedItemId = itemId;
         m_playback->load(QUrl::fromLocalFile(cached));
         return;
     }
 
     // 换了条目：只把还在跑的下载停掉，**不删文件** —— 下好的那份留着，
-    // 切回来直接复用（以前这里是"切走就删",下过的片子每次都要重下）
+    // 切回来直接复用（以前这里是"切走就删",下过的片子每次都要重下）。
+    // 后台重试另一个条目的任务也会在这里被取消：当前播放的条目优先。
     cancelOngoingDownload();
-    m_preparingItemId = itemId;
+    m_downloadItemId = itemId;
+    emit retryStateChanged();
+    emit downloadStateChanged();
 
     // 准备期间播放器是空的 —— 门禁会自动挡住播放，界面显示"准备中"
     m_playback->unload();
@@ -641,12 +830,12 @@ void PlaybackSync::prepareUrlItem(const QString &itemId)
 
 void PlaybackSync::onUrlResolved()
 {
-    if (m_urlDownloader == nullptr)
+    if (m_urlDownloader == nullptr || m_session == nullptr)
         return;
 
-    // 解析这几秒里用户可能已经切走了 —— 结果作废，别把播放器抢回来
-    const QString itemId = m_session->playlist()->currentItemId();
-    if (itemId.isEmpty() || itemId != m_preparingItemId) {
+    // 下载器当前任务对应的条目。后台重试一个非当前条目时，它 != current。
+    const QString itemId = m_downloadItemId;
+    if (itemId.isEmpty()) {
         LOG_DEBUG("Playback") << "解析结果已过期,丢弃";
         return;
     }
@@ -655,12 +844,25 @@ void PlaybackSync::onUrlResolved()
     if (!m_urlDownloader->direct())
         return;
 
+    const bool isCurrent = itemId == m_session->playlist()->currentItemId();
+    if (!isCurrent) {
+        // 后台重试拿到直链：没有文件可缓存，切到该条目时重新解析即可。
+        LOG_INFO("Playback") << "后台重试得到直链,无法缓存:" << itemId;
+        clearDownloadItem();
+        emit backgroundRetryFinished(
+            itemId, true,
+            QStringLiteral("该条目是直链，切换到该条目即可播放"));
+        return;
+    }
+
     // 路径 A:选中的是音视频合一格式（或直播的 m3u8）—— 直链交给播放器：
     // 秒开、能拖、不落盘
     LOG_INFO("Playback") << "直链播放:" << m_urlDownloader->title();
     // 记成"已就绪":直链这条路没有临时文件，但同样不该被反复重新解析
     m_preparedItemId = itemId;
     m_playback->load(QUrl(m_urlDownloader->directUrl()));
+    clearFailedItem(itemId);
+    clearDownloadItem();
 }
 
 void PlaybackSync::onUrlProbed()
@@ -671,10 +873,9 @@ void PlaybackSync::onUrlProbed()
         || m_session->roomMode() != RoomSession::RoomMode::Url)
         return;
 
-    // 解析这几秒里用户可能已经切走了 —— 不能把新条目的弹幕槽位写进旧结果
-    const QString itemId = m_session->playlist()->currentItemId();
-    if (itemId.isEmpty() || itemId != m_preparingItemId) {
-        LOG_DEBUG("Playback") << "探测结果已过期,丢弃弹幕";
+    // 只有当前条目的探测结果才用于弹幕；后台重试另一条时不要动当前弹幕。
+    if (!downloadIsCurrent()) {
+        LOG_DEBUG("Playback") << "探测结果不是当前条目,跳过弹幕";
         return;
     }
 
@@ -684,19 +885,59 @@ void PlaybackSync::onUrlProbed()
 
 void PlaybackSync::onUrlReady(const QString &filePath)
 {
-    const QString itemId = m_session->playlist()->currentItemId();
-    if (itemId.isEmpty() || itemId != m_preparingItemId) {
-        LOG_DEBUG("Playback") << "下载完成但条目已经切走,丢弃并删除:" << filePath;
+    if (m_session == nullptr) {
+        QFile::remove(filePath);
+        return;
+    }
+
+    const QString itemId = m_downloadItemId;
+    if (itemId.isEmpty()) {
+        LOG_DEBUG("Playback") << "下载完成但任务已作废,丢弃并删除:" << filePath;
         QFile::remove(filePath);
         return;
     }
 
     // 记下这份缓存属于哪一条：切走再切回来时靠它直接复用，不必重新解析下载。
-    // (会话内的映射；退出软件时缓存文件本身会被清掉，这份映射也随会话结束消失)
+    // 后台重试的条目也走这里，只是不加载播放器。
     m_session->playlist()->setLocalFile(itemId, filePath);
 
-    m_preparedItemId = itemId;
-    m_playback->load(QUrl::fromLocalFile(filePath));
+    const bool isCurrent = itemId == m_session->playlist()->currentItemId();
+    if (isCurrent) {
+        m_preparedItemId = itemId;
+        m_playback->load(QUrl::fromLocalFile(filePath));
+    } else {
+        LOG_INFO("Playback") << "后台重试完成,已写入缓存:" << itemId << filePath;
+    }
+
+    if (m_failedItems.contains(itemId))
+        clearFailedItem(itemId);
+    clearDownloadItem();
+    if (!isCurrent)
+        emit backgroundRetryFinished(itemId, true, QString());
+}
+
+void PlaybackSync::onUrlFailed(const QString &message)
+{
+    const QString itemId = m_downloadItemId;
+
+    // 当前条目的失败按条目记下来：即使随后有别的条目的后台重试覆盖了
+    // m_downloadItemId，当前行的错误/重试状态也要保留。
+    if (!itemId.isEmpty() && m_session != nullptr
+        && itemId == m_session->playlist()->currentItemId()) {
+        m_failedItems.insert(itemId, message);
+        emit downloadStateChanged();
+        return;
+    }
+
+    emit downloadStateChanged();
+    if (itemId.isEmpty() || m_session == nullptr)
+        return;
+
+    LOG_WARN("Playback") << "后台重试失败:" << itemId << message;
+    // 按条目记下失败原因：用户切到它时仍然显示错误，且不会自动重拉。
+    m_failedItems.insert(itemId, message);
+    clearDownloadItem();
+    emit backgroundRetryFinished(itemId, false, message);
 }
 
 void PlaybackSync::cancelOngoingDownload()
@@ -706,6 +947,7 @@ void PlaybackSync::cancelOngoingDownload()
     // **只停进程，不删文件** —— 下载好的那份留着给下次复用。
     // 删文件的时机只有两个：退出软件（整目录清掉）、重试（覆盖同一目录）
     m_urlDownloader->cancel();
+    clearDownloadItem();
 }
 
 void PlaybackSync::onPositionTimer() {

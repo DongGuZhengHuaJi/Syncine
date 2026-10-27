@@ -64,7 +64,7 @@ class PlaybackController : public QObject
                READ player
                CONSTANT)
 
-    // 当前加载的媒体（空 = 没加载）。本地文件的 HDR 检查靠它拿路径
+    // 当前加载的媒体（空 = 没加载）。界面与日志用。
     Q_PROPERTY(QUrl source
                READ source
                NOTIFY sourceChanged)

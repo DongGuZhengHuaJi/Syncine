@@ -145,8 +145,6 @@ qt_add_executable(Syncine
         src/core/AudioDevices.h
         src/core/CookieManager.cpp
         src/core/CookieManager.h
-        src/core/HdrConverter.cpp
-        src/core/HdrConverter.h
         src/core/Log.cpp
         src/core/Log.h
         src/core/MediaHash.cpp

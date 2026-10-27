@@ -168,7 +168,9 @@ public:
     Q_INVOKABLE void cancel();
 
     // 把当前选择拼成条目上要记的 spec:
-    //   allowHdr = 设置里的"允许 HDR"开关（在档位 spec 上缀 ":h"）
+    //   allowHdr = 设置里的"允许 HDR"开关。档位直接据此缀/不缀 ":h"；
+    //   手选流只在它本身是 HDR 且开关允许时才缀（避免 SDR 手选被标成 +HDR）。
+    //   直播的 HDR 由清单决定，不缀后缀。
     // 返回空串 = 用户没选过任何东西（弹窗不该提交，靠 canSubmit 挡住）
     Q_INVOKABLE QString buildSpec(bool allowHdr) const;
 

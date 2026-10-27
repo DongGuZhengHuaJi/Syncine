@@ -14,7 +14,6 @@
 #include "core/AppSettings.h"
 #include "core/AudioDevices.h"
 #include "core/CookieManager.h"
-#include "core/HdrConverter.h"
 #include "core/Log.h"
 #include "core/NetworkManager.h"
 #include "core/Toolchain.h"
@@ -76,9 +75,6 @@ int main(int argc, char *argv[]) {
     // 必须在 Toolchain 之后（要用它的 yt-dlp 路径）、在两个下载器之前
     CookieManager cookieManager(&toolchain, &appSettings);
 
-    // HDR → SDR:检测到 HDR 视频时提示用户转码（Qt 的渲染不做色调映射，会过曝）
-    HdrConverter hdrConverter(&toolchain);
-
     // ---- 房间与会话 ----
     RoomSession roomSession(&networkManager);
     SessionController sessionController(&networkManager, &roomSession);
@@ -88,6 +84,14 @@ int main(int argc, char *argv[]) {
     // urlInspector 供弹窗解析链接（标题/画质/流列表）。共用一个会导致解析互相阻塞。
     UrlDownloader playbackDownloader(&toolchain, &cookieManager);
     UrlInspector urlInspector(&toolchain, &cookieManager);
+
+    // HDR 是下载端的硬约束：设置关闭时只选 SDR，下载后再用 ffprobe 复核。
+    // 不再做离线转码；设置变化立刻作用于下一次解析。
+    playbackDownloader.setAllowHdr(appSettings.hdrAllowed());
+    QObject::connect(&appSettings, &AppSettings::hdrAllowedChanged, &playbackDownloader,
+                     [&appSettings, &playbackDownloader]() {
+                         playbackDownloader.setAllowHdr(appSettings.hdrAllowed());
+                     });
 
     // 网链模式的 B 站弹幕：用 yt-dlp 的 danmaku 字幕轨下载 XML，
     // 再按播放进度供 QML 取条目。声明在 PlaybackSync 之前。
@@ -144,13 +148,6 @@ int main(int argc, char *argv[]) {
     // 这一路推出无人渲染（接收端会丢弃），而发送端仍需付出逐行搬运、编码与上行带宽。
     // 门控挡在 push 之前而非仅关轨道，是为了把 Qt 帧 → I420 的逐行转换开销一并省掉；
     // 轨道开关见下方 updateVideoEnabled。
-    // 加载本地文件后检查是否为 HDR，是则界面提示是否转为 SDR：Qt 的渲染不做
-    // HDR→SDR 映射，直接播放会高光过曝（详见 HdrConverter 顶部）。
-    QObject::connect(&playbackController, &PlaybackController::sourceChanged, &app,
-                     [&playbackController, &hdrConverter]() {
-                         hdrConverter.check(playbackController.source());
-                     });
-
     QObject::connect(&playbackController, &PlaybackController::videoFrameAvailable,
                      &app, [&webrtcManager, &roomSession](const QVideoFrame &f) {
                          if (roomSession.roomMode() != RoomSession::RoomMode::Share)
@@ -248,7 +245,6 @@ int main(int argc, char *argv[]) {
     // 实际下载走 playbackSync 那条线
     engine->rootContext()->setContextProperty("urlInspector", &urlInspector);
     engine->rootContext()->setContextProperty("cookieManager", &cookieManager);
-    engine->rootContext()->setContextProperty("hdrConverter", &hdrConverter);
 
     // 外部工具链（yt-dlp / ffmpeg）自检。版本探测是异步的（yt-dlp 为 PyInstaller
     // 打包，启动需数百毫秒），不会阻塞界面。

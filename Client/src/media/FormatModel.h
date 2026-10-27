@@ -10,12 +10,13 @@
 // spec 记录条目「要下载哪些流」，三种形态（`:h` 后缀表示允许 HDR，见 StreamSpec）：
 //   "1080"          分辨率档：不超过且尽量接近 1080
 //   "30102+30280"   详情视图手选的精确流（format_id 对）
-//   "1080:h"        分辨率档，且不排除 HDR（由调用方拼上/去掉）
+//   "1080:h"        分辨率档或手选流，且允许 HDR（由调用方拼上/去掉）
 //   空串 = 不设限（最高画质）
 //
-// 画质由 `-S` 排序决定，不用 `-f [height<=N]` 筛选——后者只筛不排，
-// 实测 `bv*[height<=1080]+ba` 会下到 480P。故此处生成
-// `-S "res:1080,fps,vcodec:h264,…"`，而 `-f` 恒为 `bv*+ba/b`。
+// 画质档位会把选中的流钉成精确的 `-f` 表达式；`-S` 只在对方缺少该 format_id
+// 时作为回退。HDR 是例外中的例外：`-S dynamic_range:sdr` 只是排序，不是过滤，
+// 所以关闭 HDR 时靠“精确 id + 下载后 ffprobe 复核”保证不会落成 HDR。
+// 见 MediaSelection::formatExpression 与 UrlDownloader 的 checking 阶段。
 //
 
 #ifndef SYNCINE_FORMATMODEL_H
@@ -90,7 +91,8 @@ struct MediaFormat {
             return width < height ? width : height;
         return height;
     }
-    // HDR(含杜比视界):本地 Qt 播放器对它需要离线转 SDR,见 HdrConverter
+    // HDR(含杜比视界)。设置里关闭 HDR 时，下载端会拒绝这类流（见 resolve 的
+    // allowHdrOverride）；这是硬约束，不再做离线转码。
     bool isHdr() const;
 
     // 体积：优先确切大小，没有就退回估算值；都拿不到返回 0
@@ -172,7 +174,7 @@ struct MediaSelection {
     QString formatExpression;   // yt-dlp 的 -f 表达式
     QStringList sortArgs;       // yt-dlp 的 -S 排序参数（合并在一起）
     QString label;              // "1080P60 · H.264"，供日志与界面使用
-    bool hdr = false;           // 选中项带 HDR，界面需提前提示
+    QString error;              // valid=false 时的具体原因（给用户看）
     MediaFormat video;          // 选中的画面流（直播时为空）
     MediaFormat audio;          // 选中的声音流（合一格式时等于 video）
 };
@@ -229,7 +231,12 @@ QString displayTitle(const Episode &episode, int fallbackIndex);
 // ---- 播放/下载 ----
 // 按 spec 解析为要下载的流。live 的 formats 为清单中的 variant：
 // 空 spec 给 master 清单（播放器自适应），具体 id 给对应 variant。
-MediaSelection resolve(const QString &spec, const MediaInfo &info);
+//
+// allowHdrOverride 是**本地设置的硬上限**：即使 spec 带 `:h`，传 false 时也
+// 只选 SDR 流。反过来不成立——spec 不带 `:h` 时，传 true 也不会选 HDR
+// （条目的 spec 决定"这条内容是什么"，本地设置只能收紧，不能放宽）。
+MediaSelection resolve(const QString &spec, const MediaInfo &info,
+                       bool allowHdrOverride = true);
 
 } // namespace MediaFormats
 

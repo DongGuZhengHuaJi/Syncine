@@ -97,13 +97,25 @@ UrlDownloader::UrlDownloader(const Toolchain *toolchain,
       m_toolchain(toolchain),
       m_cookies(cookies),
       m_network(new QNetworkAccessManager(this)) {
+
+    // 单个定时器覆盖三种等待：探测/下载无输出、ffprobe 无输出。
+    // 每次 readyRead 或进度行都会 restart，超时说明进程卡死。
+    m_stallTimer.setSingleShot(true);
+    connect(&m_stallTimer, &QTimer::timeout, this, &UrlDownloader::onStallTimeout);
 }
 
 UrlDownloader::~UrlDownloader() {
-    if (m_process != nullptr) {
-        m_process->kill();
-        m_process->waitForFinished(1000);
+    stopStallTimer();
+    for (QProcess *process : {m_process, m_hdrProbe}) {
+        if (process == nullptr)
+            continue;
+        disconnect(process, nullptr, this, nullptr);
+        process->kill();
+        process->waitForFinished(1000);
+        delete process;
     }
+    m_process = nullptr;
+    m_hdrProbe = nullptr;
 }
 
 // ============================
@@ -131,10 +143,6 @@ void UrlDownloader::removeClientTempDir(const QString &clientId)
 
 void UrlDownloader::start(const QString &url, const QString &spec)
 {
-    if (m_process != nullptr) {
-        LOG_DEBUG("UrlDownloader") << "上一次任务还没结束,忽略这次解析";
-        return;
-    }
     if (m_toolchain == nullptr || !m_toolchain->ytDlpReady()) {
         fail(QStringLiteral("找不到 yt-dlp,无法解析链接"));
         return;
@@ -145,6 +153,16 @@ void UrlDownloader::start(const QString &url, const QString &spec)
         fail(QStringLiteral("这个条目的地址不是有效的 http/https 链接，已跳过"));
         return;
     }
+
+    // 新任务直接取代旧任务：cancel() 会同步 kill + waitForFinished + 置空，
+    // 所以这里不会再有“旧进程还没结束，start 被静默吞掉”的窗口。
+    // m_destDir 由调用方在 start 前设好，cancel 会清掉它，故先存一份。
+    const QString destDir = m_destDir;
+    if (isBusy()) {
+        LOG_DEBUG("UrlDownloader") << "新任务取代未结束的旧任务";
+        cancel();
+    }
+    m_destDir = destDir;
 
     startResolve(url, spec);
 }
@@ -158,6 +176,9 @@ void UrlDownloader::startResolve(const QString &url, const QString &spec)
     m_error.clear();
     m_progress = -1;
     m_detail.clear();
+    m_hdrProbePath.clear();
+    // 上一轮的精确流回退标记不能带到新任务里
+    m_exactFallbackTried = false;
     setStage(QStringLiteral("probing"));
 
     startProcess({QStringLiteral("-J"), QStringLiteral("--no-playlist")}, url);
@@ -178,16 +199,17 @@ void UrlDownloader::handleResolveFinished(int exitCode)
     }
 
     m_media = MediaFormats::parseMediaInfo(document.object());
-    m_selection = MediaFormats::resolve(m_spec, m_media);
+    m_selection = MediaFormats::resolve(m_spec, m_media, m_allowHdr);
 
     if (!m_selection.valid) {
-        // 直播走到这里 = 没有能直接拉的流（通常是要登录/要特殊请求头）;
-        // 普通视频走到这里 = 连一条画面都挑不出来（空 formats 之类）
-        reportFailure(m_media.live
-                          ? QStringLiteral("这个直播源没有可直接播放的流"
-                                           "，请检查输入内容或Cookie状态")
-                          : QStringLiteral("这个视频源没有可供下载的流"
-                                            "，请检查输入内容或Cookie状态"));
+        // resolve() 会给出具体原因（例如“关闭 HDR 后该档位没有 SDR 流”）
+        reportFailure(!m_selection.error.isEmpty()
+                          ? m_selection.error
+                          : (m_media.live
+                                 ? QStringLiteral("这个直播源没有可直接播放的流"
+                                                  "，请检查输入内容或Cookie状态")
+                                 : QStringLiteral("这个视频源没有可供下载的流"
+                                                  "，请检查输入内容或Cookie状态")));
         return;
     }
 
@@ -266,6 +288,11 @@ void UrlDownloader::verifyDirectUrl(const QString &url)
 
 void UrlDownloader::beginDownload(int /*exitCode*/)
 {
+    if (!m_selection.valid) {
+        fail(!m_selection.error.isEmpty() ? m_selection.error
+                                          : QStringLiteral("没有可下载的流"));
+        return;
+    }
     if (m_destDir.isEmpty()) {
         // 没指定目录就放在系统临时目录里，每次新建一个 syncine/download 子目录
         m_destDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation)
@@ -321,17 +348,16 @@ void UrlDownloader::beginDownload(int /*exitCode*/)
                         QStringLiteral("-o"), m_outputTemplate};
 
     if (m_selection.video.kind == MediaFormat::Combined && !m_selection.formatExpression.isEmpty()) {
-        // 用户手选的是一条合一格式：原样照下，不转换不合并
+        // 合一格式（用户手选，或按档位选中的精确合一流）：原样照下
         options << QStringLiteral("-f") << m_selection.formatExpression;
     } else if (!m_selection.formatExpression.isEmpty()) {
-        // 用户手选的一对具体流：精确指定。
-        // 合并格式按容器名定（mkv 能装几乎所有编码组合，也是最稳的）:
-        // 源本身就是单文件 mp4 时不重封装。
+        // 精确流对（用户手选，或按档位选中的画面+声音）：
+        // 合并格式按容器名定（mkv 能装几乎所有编码组合，也是最稳的）。
         options << QStringLiteral("-f") << m_selection.formatExpression
                 << QStringLiteral("--merge-output-format") << QStringLiteral("mkv");
     } else if (!m_selection.sortArgs.isEmpty()) {
-        // 档位：不写 -f,让 yt-dlp 按 -S 的优先级自己挑(见 FormatModel.h 顶部
-        // 为什么不写 `-f "bv*[height<=1080]"` —— 那是筛选，不是排序，实测会降档)
+        // 对方没有精确流时的回退：用 -S 排序。
+        // 注意 -S 只是偏好，不能保证不选 HDR；关闭 HDR 时下载后还会走 ffprobe 复核。
         options << QStringLiteral("-f") << QStringLiteral("bv*+ba/b")
                 << QStringLiteral("-S") << m_selection.sortArgs.first()
                 << QStringLiteral("--merge-output-format") << QStringLiteral("mkv");
@@ -352,10 +378,13 @@ void UrlDownloader::beginDownload(int /*exitCode*/)
 void UrlDownloader::handleDownloadLine(const QString &line)
 {
     // yt-dlp 在合并时会打 "[Merger] Merging formats into ..." ——
-    // 这一段没有任何进度输出，不告诉用户的话界面会卡在 100% 不动
+    // 这一段没有任何进度输出，不告诉用户的话界面会卡在 100% 不动。
+    // 合并是 ffmpeg 的 remux，通常很快；大文件/慢磁盘给 3 分钟，
+    // 避免 60 秒的下载看门狗把正常的合并误杀。
     if (line.contains(QLatin1String("[Merger]"))) {
         m_progress = 100;
         setStage(QStringLiteral("merging"));
+        startStallTimer(180000);
         emit stateChanged();
         return;
     }
@@ -415,20 +444,32 @@ void UrlDownloader::handleDownloadLine(const QString &line)
 void UrlDownloader::handleDownloadFinished(int exitCode)
 {
     if (exitCode != 0) {
-        // 手选的 format_id 在本端不存在（登录态/会员等级和添加者不同）时，
-        // 退回"按档位挑"再试一次 —— 别让"这条下不到"变成"这条播不了"。
-        // **注意：这里只对"手选的精确流"这么做**;档位下载本身不会遇到这个错。
+        // 精确的 format_id 在本端不存在（登录态/会员等级和添加者不同，或关闭
+        // HDR 时钉死的 SDR 流对方没有）时，退回"按档位挑"再试一次 ——
+        // 别让"这条下不到"变成"这条播不了"。回退仍遵守本地 HDR 开关。
         if (!m_selection.formatExpression.isEmpty()
             && looksLikeFormatUnavailable(m_outputTail)
-            && !m_manualFallbackTried) {
-            m_manualFallbackTried = true;
+            && !m_exactFallbackTried) {
+            m_exactFallbackTried = true;
             const int height = m_selection.video.height;
-            LOG_WARN("UrlDownloader") << "手选的流在本端不存在,退回按档位解析:"
+            // 回退也只能在“条目 spec 允许 HDR 且本地设置允许”时选 HDR；
+            // 不能用 m_allowHdr 单独决定，否则会把条目的 SDR 意图放宽成 HDR。
+            const bool fallbackHdr = StreamSpec::hdrAllowed(m_spec) && m_allowHdr;
+            LOG_WARN("UrlDownloader") << "精确流在本端不存在,退回按档位解析:"
                                       << m_selection.formatExpression;
             m_selection = MediaFormats::resolve(
                 StreamSpec::withHdr(height > 0 ? QString::number(height) : QString(),
-                                    /*allowHdr=*/true),
-                m_media);
+                                    fallbackHdr),
+                m_media, m_allowHdr);
+            if (!m_selection.valid) {
+                fail(!m_selection.error.isEmpty()
+                         ? m_selection.error
+                         : QStringLiteral("退回按档位解析后仍没有可用的流"));
+                return;
+            }
+            // 精确 id 既然下不到，再钉一次同样的 id 没意义；这次改用纯 -S 排序。
+            // 关闭 HDR 时排序键含 dynamic_range:sdr，下载后还有 ffprobe 复核。
+            m_selection.formatExpression.clear();
             beginDownload(0);
             return;
         }
@@ -438,10 +479,7 @@ void UrlDownloader::handleDownloadFinished(int exitCode)
         return;
     }
 
-    // 找产物：**只认最终的那个 media.<ext>**(合并完是 mkv,单文件格式保持原扩展名)。
-    //
-    // 中间流文件形如 media.<format_id>.<ext>，例如 media.f30280.m4a 为纯音频——
-    // 上一轮失败残留的此类文件若被当作产物加载，症状为「只有声音」（实测）。
+    // 寻找最终产物
     const QStringList finalExts{QStringLiteral("mkv"), QStringLiteral("mp4"),
                                 QStringLiteral("webm"), QStringLiteral("mov"),
                                 QStringLiteral("flv"), QStringLiteral("avi")};
@@ -458,9 +496,12 @@ void UrlDownloader::handleDownloadFinished(int exitCode)
         const qint64 bytes = QFileInfo(path).size();
         LOG_INFO("UrlDownloader") << "下载完成:" << path
                                   << QStringLiteral("%1 MB").arg(bytes / 1024.0 / 1024.0, 0, 'f', 1);
-        m_progress = 100;
-        setStage(QStringLiteral("ready"));
-        emit ready(path);
+        if (m_allowHdr) {
+            finishReady(path);
+        } else {
+            // ffprobe复核
+            startHdrProbe(path);
+        }
         return;
     }
 
@@ -492,10 +533,11 @@ void UrlDownloader::startProcess(const QStringList &options, const QString &url)
     m_outputTail.clear();
     m_outputBuffer.clear();
 
-    m_process = new QProcess(this);
+    auto *process = new QProcess(this);
+    m_process = process;
     // 合并 stdout/stderr:进度和错误信息在一个流里，顺序也真实
-    m_process->setProcessChannelMode(QProcess::MergedChannels);
-    m_process->setProgram(m_toolchain->ytDlpPath());
+    process->setProcessChannelMode(QProcess::MergedChannels);
+    process->setProgram(m_toolchain->ytDlpPath());
 
     // 拼接参数：用户选项 + ffmpeg-location + cookies + url
     // url 在末尾，其余无限制
@@ -504,14 +546,19 @@ void UrlDownloader::startProcess(const QStringList &options, const QString &url)
     if (m_cookies != nullptr)
         args << m_cookies->cookieArgs();
     Toolchain::appendUrlArg(args, url); // 必须走它，理由见 Toolchain.h
-    m_process->setArguments(args);
+    process->setArguments(args);
 
     LOG_DEBUG("UrlDownloader") << "yt-dlp" << args.join(QLatin1Char(' '));
 
-    connect(m_process, &QProcess::readyReadStandardOutput, this, [this]() {
-        const QByteArray raw = m_process->readAllStandardOutput();
-        // 缓存输出
-        m_outputBuffer.append(raw);
+    connect(process, &QProcess::readyReadStandardOutput, this, [this, process]() {
+        if (m_process != process)
+            return;
+        const QByteArray raw = process->readAllStandardOutput();
+        // 探测阶段要攒整份 JSON；下载阶段只留尾巴，避免长下载无限涨内存
+        if (m_stage == QLatin1String("probing"))
+            m_outputBuffer.append(raw);
+        // 有输出就说明进程还活着，喂一次看门狗
+        m_stallTimer.start();
 
         const QString chunk = QString::fromUtf8(raw);
         for (const QString &line : chunk.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
@@ -526,23 +573,35 @@ void UrlDownloader::startProcess(const QStringList &options, const QString &url)
         }
     });
 
-    connect(m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-        if (error == QProcess::FailedToStart)
-            fail(QStringLiteral("yt-dlp 启动失败:%1").arg(m_process->errorString()));
-    });
+    connect(process, &QProcess::errorOccurred, this,
+            [this, process](QProcess::ProcessError error) {
+                if (error != QProcess::FailedToStart || m_process != process)
+                    return;
+                // FailedToStart 不会再有 finished()：必须在这里同步清理，
+                // 否则 m_process 永远非空，后续 start() 全部被吞。
+                stopStallTimer();
+                const QString reason = process->errorString();
+                disconnect(process, nullptr, this, nullptr);
+                if (m_process == process)
+                    m_process = nullptr;
+                process->deleteLater();
+                fail(QStringLiteral("yt-dlp 启动失败:%1").arg(reason));
+            });
 
-    connect(m_process, &QProcess::finished, this,
-            [this](int exitCode, QProcess::ExitStatus status) {
+    connect(process, &QProcess::finished, this,
+            [this, process](int exitCode, QProcess::ExitStatus status) {
+                if (m_process != process) {
+                    process->deleteLater();
+                    return;
+                }
                 const QString stage = m_stage;
+                stopStallTimer();
 
-                QProcess *finished = m_process;
                 m_process = nullptr;
-                if (finished != nullptr)
-                    finished->deleteLater();
+                process->deleteLater();
 
                 // cancel() 会把阶段设回 idle —— 这种"异常结束"是用户自己取消的，
                 // 不能报成失败
-
                 if (stage == QLatin1String("idle")) {
                     LOG_INFO("UrlDownloader") << "yt-dlp 被用户取消";
                     return;
@@ -566,7 +625,10 @@ void UrlDownloader::startProcess(const QStringList &options, const QString &url)
                     handleDownloadFinished(exitCode);
             });
 
-    m_process->start();
+    // 探测 30 秒、下载 60 秒没有输出就判卡死；进入合并阶段后放宽到 3 分钟
+    // （见 handleDownloadLine 的 [Merger] 分支）。
+    startStallTimer(m_stage == QLatin1String("probing") ? 30000 : 60000);
+    process->start();
 }
 
 void UrlDownloader::reportFailure(const QString &message)
@@ -574,22 +636,164 @@ void UrlDownloader::reportFailure(const QString &message)
     fail(message);
 }
 
+bool UrlDownloader::isBusy() const
+{
+    return m_process != nullptr || m_hdrProbe != nullptr || m_verifyReply != nullptr;
+}
+
+void UrlDownloader::cleanupProcess(QProcess *&process)
+{
+    QProcess *old = process;
+    process = nullptr;
+    if (old == nullptr)
+        return;
+
+    // 先断开再 kill：kill 后 QProcess 会发 finished，若不拦住，回调会拿
+    // 一个已经被放弃的任务去 handleResolve/DownloadFinished。
+    disconnect(old, nullptr, this, nullptr);
+    if (old->state() != QProcess::NotRunning) {
+        old->kill();
+        old->waitForFinished(1000);
+    }
+    old->deleteLater();
+}
+
+void UrlDownloader::startStallTimer(int timeoutMs)
+{
+    m_stallTimer.start(timeoutMs);
+}
+
+void UrlDownloader::stopStallTimer()
+{
+    m_stallTimer.stop();
+}
+
+void UrlDownloader::onStallTimeout()
+{
+    if (m_hdrProbe != nullptr) {
+        LOG_WARN("UrlDownloader") << "ffprobe 超时,无法确认动态范围";
+        const QString path = m_hdrProbePath;
+        m_hdrProbePath.clear();
+        cleanupProcess(m_hdrProbe);
+        if (!path.isEmpty())
+            QFile::remove(path);
+        fail(QStringLiteral("ffprobe 超时，无法确认下载文件的动态范围"));
+        return;
+    }
+
+    if (m_process == nullptr)
+        return;
+
+    LOG_WARN("UrlDownloader") << "yt-dlp 长时间无输出,主动终止";
+    cleanupProcess(m_process);
+    fail(QStringLiteral("yt-dlp 无响应（长时间没有输出），请检查网络后重试"));
+}
+
+void UrlDownloader::startHdrProbe(const QString &path)
+{
+    if (m_toolchain == nullptr || m_toolchain->ffprobePath().isEmpty()) {
+        QFile::remove(path);
+        fail(QStringLiteral("找不到 ffprobe，无法确认下载文件的动态范围"));
+        return;
+    }
+
+    m_hdrProbePath = path;
+    auto *probe = new QProcess(this);
+    m_hdrProbe = probe;
+    probe->setProgram(m_toolchain->ffprobePath());
+    probe->setArguments({
+        QStringLiteral("-v"), QStringLiteral("error"),
+        QStringLiteral("-select_streams"), QStringLiteral("v:0"),
+        QStringLiteral("-show_entries"), QStringLiteral("stream=color_transfer"),
+        QStringLiteral("-of"), QStringLiteral("default=noprint_wrappers=1:nokey=1"),
+        path,
+    });
+
+    connect(probe, &QProcess::finished, this,
+            [this, probe](int exitCode, QProcess::ExitStatus) {
+                if (m_hdrProbe != probe)
+                    return;
+                handleHdrProbeFinished(exitCode);
+            });
+    connect(probe, &QProcess::errorOccurred, this,
+            [this, probe](QProcess::ProcessError error) {
+                if (error != QProcess::FailedToStart || m_hdrProbe != probe)
+                    return;
+                const QString path = m_hdrProbePath;
+                m_hdrProbePath.clear();
+                cleanupProcess(m_hdrProbe);
+                if (!path.isEmpty())
+                    QFile::remove(path);
+                fail(QStringLiteral("ffprobe 启动失败，无法确认下载文件的动态范围"));
+            });
+
+    LOG_DEBUG("UrlDownloader") << "复核动态范围:" << path;
+    setStage(QStringLiteral("checking"));
+    m_stallTimer.start(10000); // ffprobe 读本地文件，10 秒足够
+    probe->start();
+}
+
+void UrlDownloader::handleHdrProbeFinished(int exitCode)
+{
+    QProcess *probe = m_hdrProbe;
+    m_hdrProbe = nullptr;
+    stopStallTimer();
+
+    QString output;
+    if (probe != nullptr) {
+        output = QString::fromUtf8(probe->readAllStandardOutput()).trimmed();
+        probe->deleteLater();
+    }
+
+    const QString path = m_hdrProbePath;
+    m_hdrProbePath.clear();
+    const QString transfer = output.toLower();
+    const bool hdr = transfer.contains(QLatin1String("smpte2084"))
+                     || transfer.contains(QLatin1String("arib-std-b67"));
+
+    if (exitCode != 0 || output.isEmpty()) {
+        QFile::remove(path);
+        fail(QStringLiteral("无法确认下载文件的动态范围（ffprobe 没有返回 color_transfer）"));
+        return;
+    }
+    if (hdr) {
+        QFile::remove(path);
+        LOG_WARN("UrlDownloader") << "下载到 HDR 流,按设置拒绝:" << path
+                                  << "color_transfer=" << output;
+        fail(QStringLiteral("下载到的是 HDR 流，已按设置拒绝；"
+                            "请在设置中允许 HDR，或选择 SDR 档位"));
+        return;
+    }
+
+    finishReady(path);
+}
+
+void UrlDownloader::finishReady(const QString &path)
+{
+    m_progress = 100;
+    setStage(QStringLiteral("ready"));
+    emit ready(path);
+}
+
 void UrlDownloader::cancel()
 {
+    stopStallTimer();
+
     if (m_process != nullptr) {
         LOG_INFO("UrlDownloader") << "已取消";
-        m_process->kill();
+        // 同步杀掉并置空：调用方（retry）紧接着就会 start()，
+        // 不能把“旧进程还没结束”留给下一次 start 去撞。
+        cleanupProcess(m_process);
     }
+    if (m_hdrProbe != nullptr) {
+        cleanupProcess(m_hdrProbe);
+        // 还没通过复核的文件不留下，否则下次可能被当成缓存
+        if (!m_hdrProbePath.isEmpty())
+            QFile::remove(m_hdrProbePath);
+    }
+    m_hdrProbePath.clear();
     abortVerify();
 
-    // 复位：界面（加条目弹窗）关掉/重开时要回到干净状态。
-    // **没有进程在跑时也要清** —— 上一次解析成功留下的标题、档位列表
-    // 不清掉的话，下次打开弹窗会直接看到上一次的结果。
-    //
-    // 这里**只发 stateChanged**:setStage 对相同取值去重，而 reset 之后
-    // 各属性都变了，得让绑定有机会重算。千万别在这里 emit resolved() ——
-    // PlaybackSync::retryCurrentItem 是先 cancel 再重新准备，
-    // 一个多余的 resolved 会让它拿着刚被清空的直链直接去下载。
     m_progress = -1;
     m_detail.clear();
     m_error.clear();
@@ -599,10 +803,12 @@ void UrlDownloader::cancel()
     m_selection = MediaSelection();
     m_destDir.clear();
     m_outputTemplate.clear();
+    m_outputTail.clear();
+    m_outputBuffer.clear();
     m_currentFileBytes = 0;
     m_finishedBytes = 0;
     m_expectedTotalBytes = 0;
-    m_manualFallbackTried = false;
+    m_exactFallbackTried = false;
     const bool stageChanged = m_stage != QLatin1String("idle");
     setStage(QStringLiteral("idle"));
     // 本来就是 idle 时 setStage 会去重（不发信号）,可上面那一串清空同样
@@ -625,6 +831,7 @@ void UrlDownloader::setStage(const QString &stage)
 
 void UrlDownloader::fail(const QString &message)
 {
+    stopStallTimer();
     m_error = message;
     m_progress = -1;
     m_detail.clear();

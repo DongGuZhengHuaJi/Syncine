@@ -272,9 +272,11 @@ Item {
                         wrapMode: Text.Wrap
                         font.pixelSize: 12
                         color: Style.textFaint
-                        text: "动态范围（HDR / 杜比视界）。开启后画质档会优先选择带 HDR 的流，"
-                              + "下载不受影响，但播放前需离线转为 SDR 才能正常显示（高光部分会过曝）；"
-                              + "关闭则只选择 SDR 流。详情视图中的 HDR 标记不受该开关限制。"
+                        text: "动态范围（HDR / 杜比视界）。添加条目时，若选中的流是 HDR，"
+                              + "该开关决定条目是否允许它；本地关闭会强制只选 SDR，"
+                              + "即使条目允许 HDR，下载后还会用 ffprobe 复核，发现 HDR 直接拒绝。"
+                              + "允许 HDR 时不再离线转码，播放时高光部分可能过曝。"
+                              + "直播源的 HDR 由清单决定，不受此开关限制。"
                     }
 
                     OptionList {

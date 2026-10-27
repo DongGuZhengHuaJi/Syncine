@@ -458,20 +458,47 @@ Rectangle {
                                    ? Style.danger : Style.textFaint
                         }
 
-                        // 失败时给一个重试（每个人下自己的那份，所以谁都能点）
-                        Text {
-                            visible: playlistTab.isUrlMode && isCurrent
-                                     && playbackSync.downloadStage === "failed"
+                        // 网链模式：每个还没下好的条目都能单独重试。
+                        // 当前条目失败/卡住时也能点；非当前条目会在后台下载并
+                        // 写入缓存，不打断正在播放的条目。
+                        Item {
+                            readonly property bool retryable:
+                                playlistTab.isUrlMode && !hasLocalFile
+                                && (!live || isCurrent)
+                            visible: retryable
+                                     && playbackSync.retryingItemId !== itemId
+                                     && (isCurrent || rowHover.containsMouse)
+                            Layout.preferredWidth: 18
+                            Layout.preferredHeight: 18
                             Layout.alignment: Qt.AlignVCenter
-                            text: "重试"
-                            font.pixelSize: 12
-                            color: Style.accent
-                            MouseArea {
-                                anchors.fill: parent
-                                anchors.margins: -6
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: playbackSync.retryCurrentItem()
+
+                            AppIcon {
+                                anchors.centerIn: parent
+                                width: 14
+                                height: 14
+                                name: "refresh"
+                                color: retryHover.containsMouse
+                                       ? Style.accentHover : Style.accent
                             }
+
+                            MouseArea {
+                                id: retryHover
+                                anchors.fill: parent
+                                anchors.margins: -4
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: playbackSync.retryItem(itemId)
+                            }
+                        }
+
+                        // 后台重试中：给一行短提示（当前条目的进度在左边状态里）
+                        Text {
+                            visible: playlistTab.isUrlMode
+                                     && playbackSync.retryingItemId === itemId
+                            Layout.alignment: Qt.AlignVCenter
+                            text: "重试中…"
+                            font.pixelSize: 11
+                            color: Style.textFaint
                         }
 
                         // 当前条目：一个状态标记，不给操作
