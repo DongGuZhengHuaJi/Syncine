@@ -20,22 +20,41 @@
 #include "core/RoomTypes.h"
 #include "session/MemberModel.h"
 #include "session/RoomSession.h"
+#include "transfer/TransferChannels.h"
 #include "webrtc/WebrtcManager.h"
 
 namespace {
 
-constexpr int kChunkSize = 64 * 1024;             // 单个二进制块（SCTP 上限 256KB）
-constexpr qint64 kSendBudgetPerTick = 1024 * 1024; // 每拍最多发送 1MB
+constexpr int kChunkSize = 32 * 1024;              // 单个文件块
+constexpr qint64 kReplayChunkSize = 1024 * 1024;   // 续传重算前缀哈希时的单次读取量
+constexpr qint64 kSendBudgetPerTick = 256 * 1024;  // 每拍最多发送 256KB
 constexpr int kPumpIntervalMs = 10;
 constexpr int kNotifyIntervalMs = 200;
 
-// DataChannel 内部的 SCTP 发送缓冲水位。达到高水位就停止塞数据，
-// 等排水到低水位再继续。SCTP 自己负责拥塞控制，这里只是避免把
-// 几 MB 的数据一次性压进发送队列，导致内存上涨和延迟失控。
-constexpr qint64 kSendBufferHighWater = 4 * 1024 * 1024;
-constexpr qint64 kSendBufferLowWater = 1024 * 1024;
+// 发送窗口：已读出但尚未被接收端 ACK 的字节数上限。
+// 接收端每 128KB 或 100ms 回报一次，窗口内最多 512KB 在途。
+constexpr qint64 kSendWindowBytes = 512 * 1024;
+constexpr qint64 kAckEveryBytes = 128 * 1024;
+constexpr qint64 kAckIntervalMs = 100;
+
+// 数据通道自己的 SCTP 发送缓冲水位。应用层窗口已经限制了在途量，
+// 这里只是第二道保险，避免 SCTP 队列无界增长。
+constexpr qint64 kSendBufferHighWater = 1024 * 1024;
+constexpr qint64 kSendBufferLowWater = 256 * 1024;
 // 断线后等待 P2P 恢复/续传的最长时间
 constexpr qint64 kInterruptedGraceMs = 60 * 1000;
+
+// 数据传输停滞判定：15 秒没有收到 ACK / 数据块，转入 Interrupted。
+// 之后每 5 秒发一次 resume；60 秒仍无进展则失败。
+constexpr qint64 kDataStallMs = 15 * 1000;
+constexpr qint64 kResumeRetryMs = 5 * 1000;
+
+// 控制通道心跳。任意控制消息都算“活着”，因此大文件传输期间的 ACK
+// 也能维持心跳；15 秒完全没动静才判定通道无响应。
+constexpr int kHealthIntervalMs = 5 * 1000;
+constexpr qint64 kHealthTimeoutMs = 15 * 1000;
+
+constexpr qint64 kLogIntervalMs = 2 * 1000;
 
 quint32 idOf(const QJsonObject &message)
 {
@@ -79,11 +98,15 @@ FileTransferManager::FileTransferManager(WebrtcManager *webrtc,
 
     m_notifyTimer.setInterval(kNotifyIntervalMs);
     connect(&m_notifyTimer, &QTimer::timeout, this, &FileTransferManager::onNotifyTimer);
+
+    m_healthTimer.setInterval(kHealthIntervalMs);
+    connect(&m_healthTimer, &QTimer::timeout, this, &FileTransferManager::onHealthTimer);
 }
 
 FileTransferManager::~FileTransferManager() {
     m_pumpTimer.stop();
     m_notifyTimer.stop();
+    m_healthTimer.stop();
 }
 
 // ============================
@@ -110,8 +133,13 @@ FileTransferModel *FileTransferManager::modelFor(const QString &peerId) const {
 }
 
 bool FileTransferManager::isConnected(const QString &peerId) const {
-    return m_openChannels.contains(peerId)
-           || (m_webrtc != nullptr && m_webrtc->isDataChannelOpen(peerId));
+    if (m_webrtc == nullptr || m_unresponsive.contains(peerId))
+        return false;
+    // 两条通道都打开才算连通：控制通道负责 ACK/取消，数据通道负责文件块
+    return m_webrtc->isDataChannelOpen(peerId,
+                                       QString::fromLatin1(TransferChannel::ControlId))
+           && m_webrtc->isDataChannelOpen(
+               peerId, QString::fromLatin1(TransferChannel::DataId));
 }
 
 TransferRecordPtr FileTransferManager::findOutgoing(const QString &peerId,
@@ -155,6 +183,20 @@ void FileTransferManager::sendFile(const QString &peerId, const QUrl &fileUrl) {
     if (path.isEmpty() || !info.exists() || !info.isFile() || !info.isReadable()) {
         emit errorOccurred(peerId, QStringLiteral("无法读取所选文件"));
         return;
+    }
+
+    // 同一文件正在传输时不重复发起：重复请求会占满窗口，也会让对方看到
+    // 多条同名记录，反而分不清哪条是有效的
+    if (FileTransferModel *model = modelFor(peerId)) {
+        for (const TransferRecordPtr &existing : model->records()) {
+            if (existing->direction == TransferDirection::Send
+                && isActiveTransferState(existing->state)
+                && existing->sourcePath == path) {
+                emit errorOccurred(peerId,
+                                   QStringLiteral("该文件正在传输中，请等待完成或先取消"));
+                return;
+            }
+        }
     }
 
     auto record = std::make_shared<TransferRecord>();
@@ -213,14 +255,21 @@ void FileTransferManager::acceptTransfer(const QString &peerId, quint32 id) {
     record->file = file;
     record->hash = std::make_shared<QCryptographicHash>(QCryptographicHash::Sha256);
     record->transferred = 0;
+    record->peerReceived = 0;
     record->hashReplayRemaining = 0;
     record->resumeRequested = false;
+    record->resumeAllowsRewind = false;
     record->finalHash.clear();
     record->interruptedFrom = TransferState::Failed;
     record->interruptedAtMs = 0;
     record->speedBps = 0;
     record->lastSampleBytes = 0;
     record->lastSampleMs = 0;
+    record->lastProgressMs = QDateTime::currentMSecsSinceEpoch();
+    record->lastAckBytes = 0;
+    record->lastAckMs = record->lastProgressMs;
+    record->lastResumeMs = 0;
+    record->lastLogMs = 0;
     record->state = TransferState::Transferring;
 
     if (!sendControl(peerId, makeControl(QStringLiteral("accept"), record->id))) {
@@ -283,62 +332,77 @@ void FileTransferManager::revealTransfer(const QString &peerId, quint32 id) {
 // 数据通道事件
 // ============================
 
-void FileTransferManager::onDataChannelOpened(const QString &peerId) {
-    LOG_INFO("Transfer") << "与" << peerId << "的数据通道已就绪";
-    m_openChannels.insert(peerId);
-    m_sendPaused.remove(peerId);
-    if (m_pendingControl.contains(peerId) && !m_pumpTimer.isActive())
-        m_pumpTimer.start();
-    emit connectionChanged(peerId);
+void FileTransferManager::onDataChannelOpened(const QString &peerId,
+                                              const QString &channel) {
+    const bool wasReady = m_controlOpen.contains(peerId) && m_dataOpen.contains(peerId);
 
-    // 通道重建后，把中断的传输重新挂上
-    reissueAfterReconnect(peerId);
-}
-
-void FileTransferManager::onDataChannelClosed(const QString &peerId) {
-    const bool wasOpen = m_openChannels.remove(peerId) > 0;
-    m_pendingControl.remove(peerId);
-    m_sendPaused.remove(peerId);
-    if (!wasOpen)
+    if (channel == QLatin1String(TransferChannel::ControlId)) {
+        m_controlOpen.insert(peerId);
+    } else if (channel == QLatin1String(TransferChannel::DataId)) {
+        m_dataOpen.insert(peerId);
+    } else {
         return;
-
-    LOG_WARN("Transfer") << "与" << peerId << "的数据通道已关闭";
-
-    FileTransferModel *model = modelFor(peerId);
-    if (model != nullptr) {
-        const QList<TransferRecordPtr> records = model->records();
-        for (const TransferRecordPtr &record : records) {
-            if (!isActiveTransferState(record->state))
-                continue;
-
-            // 对端真的离开房间：不能续传，直接失败并清理
-            if (!peerStillInRoom(peerId)) {
-                failRecord(record, QStringLiteral("对方已离开房间"), false);
-                continue;
-            }
-
-            // 只是连接断了：保留 .part / QFile / hash / 已传字节数，
-            // 等数据通道恢复后按断点前的状态重发控制消息。
-            record->interruptedFrom = record->state;
-            record->state = TransferState::Interrupted;
-            record->interruptedAtMs = QDateTime::currentMSecsSinceEpoch();
-            record->resumeRequested = false;
-            record->hashReplayRemaining = 0;
-            record->speedBps = 0;
-            record->lastSampleMs = 0;
-            record->lastSampleBytes = 0;
-            model->updateRecord(record);
-        }
     }
 
-    // 通知节拍继续跑：既负责速度显示，也负责断线超时兜底
-    if (!m_notifyTimer.isActive())
-        m_notifyTimer.start();
+    LOG_INFO("Transfer") << "与" << peerId << "的数据通道已打开:" << channel;
+
+    const bool ready = m_controlOpen.contains(peerId) && m_dataOpen.contains(peerId);
+    if (!ready || wasReady)
+        return;
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    m_unresponsive.remove(peerId);
+    m_lastPongMs.insert(peerId, now);
+    m_sendPaused.remove(peerId);
+    if (!m_healthTimer.isActive())
+        m_healthTimer.start();
+
+    // 立刻探一次活；顺便让双方都建立“最近有控制消息”的时间戳
+    sendControl(peerId, makeControl(QStringLiteral("ping"), 0));
+
     emit connectionChanged(peerId);
+
+    // 通道重建后，把中断的传输重新挂上。新通道是新的 SCTP 流，
+    // 旧数据不会再来，允许按接收端偏移回退。
+    reissueAfterReconnect(peerId, /*allowRewind=*/true);
+
+    if (m_pendingControl.contains(peerId) && !m_pumpTimer.isActive())
+        m_pumpTimer.start();
+}
+
+void FileTransferManager::onDataChannelClosed(const QString &peerId,
+                                              const QString &channel) {
+    const bool wasReady = m_controlOpen.contains(peerId) && m_dataOpen.contains(peerId);
+
+    if (channel == QLatin1String(TransferChannel::ControlId)) {
+        m_controlOpen.remove(peerId);
+    } else if (channel == QLatin1String(TransferChannel::DataId)) {
+        m_dataOpen.remove(peerId);
+    } else {
+        return;
+    }
+
+    if (!wasReady)
+        return;
+
+    handleChannelDown(peerId, QStringLiteral("数据通道已关闭"));
+
+    bool anyReady = false;
+    for (const QString &id : std::as_const(m_controlOpen)) {
+        if (m_dataOpen.contains(id)) {
+            anyReady = true;
+            break;
+        }
+    }
+    if (!anyReady)
+        m_healthTimer.stop();
 }
 
 void FileTransferManager::onPeerRemoved(const QString &peerId) {
-    m_openChannels.remove(peerId);
+    m_controlOpen.remove(peerId);
+    m_dataOpen.remove(peerId);
+    m_unresponsive.remove(peerId);
+    m_lastPongMs.remove(peerId);
     m_pendingControl.remove(peerId);
     m_sendPaused.remove(peerId);
 
@@ -351,6 +415,16 @@ void FileTransferManager::onPeerRemoved(const QString &peerId) {
             }
         }
     }
+
+    bool anyReady = false;
+    for (const QString &id : std::as_const(m_controlOpen)) {
+        if (m_dataOpen.contains(id)) {
+            anyReady = true;
+            break;
+        }
+    }
+    if (!anyReady)
+        m_healthTimer.stop();
 
     emit connectionChanged(peerId);
 }
@@ -366,23 +440,68 @@ void FileTransferManager::onRoomLeft() {
         model->clear();
     }
 
-    m_openChannels.clear();
+    m_controlOpen.clear();
+    m_dataOpen.clear();
+    m_unresponsive.clear();
+    m_lastPongMs.clear();
     m_pendingControl.clear();
     m_sendPaused.clear();
     m_pumpTimer.stop();
     m_notifyTimer.stop();
+    m_healthTimer.stop();
 }
 
-void FileTransferManager::onDataChannelMessage(const QString &peerId, bool binary,
-                                               const QByteArray &data) {
+void FileTransferManager::onDataChannelMessage(const QString &peerId,
+                                               const QString &channel,
+                                               bool binary, const QByteArray &data) {
+    if (binary && channel != QLatin1String(TransferChannel::DataId)) {
+        LOG_WARN("Transfer") << "在控制通道上收到二进制消息，已忽略:" << peerId;
+        return;
+    }
+    if (!binary && channel != QLatin1String(TransferChannel::ControlId)) {
+        LOG_WARN("Transfer") << "在数据通道上收到控制消息，已忽略:" << peerId;
+        return;
+    }
+
     if (binary) {
         if (data.size() <= 4)
             return;
 
         const quint32 id = qFromBigEndian<quint32>(data.constData());
         const TransferRecordPtr record = findIncoming(peerId, id);
-        if (record == nullptr || record->state != TransferState::Transferring)
+        if (record == nullptr)
             return;
+
+        // 数据停滞/通道抖动后被标记为 Interrupted，但文件仍在、
+        // 哈希状态也还在——收到后续数据块可以直接接着写。
+        const bool recovering =
+            record->state == TransferState::Interrupted
+            && record->interruptedFrom == TransferState::Transferring;
+        if (record->state != TransferState::Transferring && !recovering)
+            return;
+
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (recovering) {
+            if (record->file == nullptr || record->hash == nullptr
+                || record->file->size() != record->transferred) {
+                failRecord(record, QStringLiteral("断点状态不一致，无法继续接收"), true);
+                return;
+            }
+            record->file->seek(record->transferred);
+            record->state = TransferState::Transferring;
+            record->interruptedFrom = TransferState::Failed;
+            record->interruptedAtMs = 0;
+            record->resumeRequested = false;
+            record->resumeAllowsRewind = false;
+            record->lastResumeMs = 0;
+            record->lastProgressMs = now;
+            record->speedBps = 0;
+            record->lastSampleMs = now;
+            record->lastSampleBytes = record->transferred;
+            ensureModel(peerId)->updateRecord(record);
+            LOG_INFO("Transfer") << "接收端恢复接收:" << record->fileName
+                                 << "offset=" << record->transferred;
+        }
 
         const QByteArray chunk = data.mid(4);
         if (record->transferred + chunk.size() > record->totalBytes) {
@@ -402,11 +521,23 @@ void FileTransferManager::onDataChannelMessage(const QString &peerId, bool binar
 
         record->hash->addData(chunk);
         record->transferred += written;
+        record->lastProgressMs = now;
+
+        // 合并 ACK：每 128KB 或 100ms 回报一次；最后一块必须回报，
+        // 否则发送端会一直等不到 complete 的时机
+        if (record->transferred >= record->totalBytes
+            || record->transferred - record->lastAckBytes >= kAckEveryBytes
+            || now - record->lastAckMs >= kAckIntervalMs) {
+            sendAck(record);
+        }
 
         if (!m_notifyTimer.isActive())
             m_notifyTimer.start();
         return;
     }
+
+    // 任意控制消息都说明控制通道还活着
+    noteChannelAlive(peerId);
 
     QJsonParseError error{};
     const QJsonDocument document = QJsonDocument::fromJson(data, &error);
@@ -429,10 +560,16 @@ void FileTransferManager::onDataChannelMessage(const QString &peerId, bool binar
         handleComplete(peerId, message);
     } else if (type == QLatin1String("result")) {
         handleResult(peerId, message);
+    } else if (type == QLatin1String("ack")) {
+        handleAck(peerId, message);
     } else if (type == QLatin1String("resume")) {
         handleResume(peerId, message);
     } else if (type == QLatin1String("resume_ack")) {
         handleResumeAck(peerId, message);
+    } else if (type == QLatin1String("ping")) {
+        handlePing(peerId, message);
+    } else if (type == QLatin1String("pong")) {
+        handlePong(peerId, message);
     } else {
         LOG_DEBUG("Transfer") << "忽略未知控制消息:" << type;
     }
@@ -447,13 +584,14 @@ bool FileTransferManager::sendControl(const QString &peerId,
     if (m_webrtc == nullptr)
         return false;
 
+    const QString channel = QString::fromLatin1(TransferChannel::ControlId);
     const QByteArray payload = QJsonDocument(message).toJson(QJsonDocument::Compact);
-    if (m_webrtc->sendDataChannelMessage(peerId, payload, false))
+    if (m_webrtc->sendDataChannelMessage(peerId, channel, payload, false))
         return true;
 
-    // 发送队列满（大文件正在传）时先存着，由发送节拍重试。
-    // 取消、校验这类消息丢了会让对端一直等，不能当作失败丢弃。
-    if (!m_webrtc->isDataChannelOpen(peerId)) {
+    // 控制通道极少被占满（它不和文件块共用队列）；这里仍保留队列，
+    // 以应对 SCTP 短暂阻塞。控制消息不能丢，取消/校验都靠它。
+    if (!m_webrtc->isDataChannelOpen(peerId, channel)) {
         LOG_DEBUG("Transfer") << "控制消息发送失败(通道已关闭):"
                               << message.value(QStringLiteral("t")).toString()
                               << "→" << peerId;
@@ -476,9 +614,23 @@ void FileTransferManager::handleOffer(const QString &peerId, const QJsonObject &
         return;
     }
     if (findIncoming(peerId, id) != nullptr) {
-        // 已经有一条同 id 的接收记录。若它停在“已接受、但 accept 消息
-        // 在断线中丢了”的状态，重发 accept，让发送方从 0 开始。
+        // 已经有一条同 id 的接收记录。
         const TransferRecordPtr existing = findIncoming(peerId, id);
+
+        // 终态记录重发 offer：告诉发送端这条已经结束，别让它一直等
+        if (existing->state == TransferState::Rejected) {
+            sendControl(peerId, makeControl(QStringLiteral("reject"), id));
+            return;
+        }
+        if (existing->state == TransferState::Cancelled
+            || existing->state == TransferState::Failed
+            || existing->state == TransferState::Completed) {
+            sendControl(peerId, makeControl(QStringLiteral("cancel"), id));
+            return;
+        }
+
+        // 停在“已接受、但 accept 消息在断线中丢了”的状态：
+        // 重发 accept，让发送方从 0 开始。
         if (existing->state == TransferState::Interrupted
             && existing->interruptedFrom == TransferState::Transferring
             && existing->transferred == 0) {
@@ -494,6 +646,11 @@ void FileTransferManager::handleOffer(const QString &peerId, const QJsonObject &
             existing->interruptedFrom = TransferState::Failed;
             existing->interruptedAtMs = 0;
             existing->resumeRequested = false;
+            existing->resumeAllowsRewind = false;
+            existing->lastProgressMs = QDateTime::currentMSecsSinceEpoch();
+            existing->lastAckBytes = 0;
+            existing->lastAckMs = existing->lastProgressMs;
+            existing->lastResumeMs = 0;
             ensureModel(peerId)->updateRecord(existing);
             sendControl(peerId, makeControl(QStringLiteral("accept"), existing->id));
             LOG_INFO("Transfer") << "重发 accept（上次在断线中丢失）:"
@@ -547,14 +704,21 @@ void FileTransferManager::handleAccept(const QString &peerId, const QJsonObject 
     record->file = file;
     record->hash = std::make_shared<QCryptographicHash>(QCryptographicHash::Sha256);
     record->transferred = 0;
+    record->peerReceived = 0;
     record->hashReplayRemaining = 0;
     record->resumeRequested = false;
+    record->resumeAllowsRewind = false;
     record->finalHash.clear();
     record->interruptedFrom = TransferState::Failed;
     record->interruptedAtMs = 0;
     record->speedBps = 0;
     record->lastSampleBytes = 0;
     record->lastSampleMs = 0;
+    record->lastProgressMs = QDateTime::currentMSecsSinceEpoch();
+    record->lastAckBytes = 0;
+    record->lastAckMs = record->lastProgressMs;
+    record->lastResumeMs = 0;
+    record->lastLogMs = 0;
     record->state = TransferState::Transferring;
 
     ensureModel(peerId)->updateRecord(record);
@@ -565,7 +729,14 @@ void FileTransferManager::handleAccept(const QString &peerId, const QJsonObject 
 
 void FileTransferManager::handleReject(const QString &peerId, const QJsonObject &message) {
     const TransferRecordPtr record = findOutgoing(peerId, idOf(message));
-    if (record == nullptr || record->state != TransferState::WaitingAccept)
+    if (record == nullptr)
+        return;
+
+    const bool awaitingAccept =
+        record->state == TransferState::WaitingAccept
+        || (record->state == TransferState::Interrupted
+            && record->interruptedFrom == TransferState::WaitingAccept);
+    if (!awaitingAccept)
         return;
 
     finishRecord(record, TransferState::Rejected);
@@ -640,14 +811,72 @@ void FileTransferManager::handleResult(const QString &peerId, const QJsonObject 
     failRecord(record, QStringLiteral("对方校验失败，文件可能已损坏"), false);
 }
 
+void FileTransferManager::handleAck(const QString &peerId, const QJsonObject &message) {
+    const TransferRecordPtr record = findOutgoing(peerId, idOf(message));
+    if (record == nullptr)
+        return;
+
+    const bool transferring = record->state == TransferState::Transferring;
+    const bool interrupted =
+        record->state == TransferState::Interrupted
+        && record->interruptedFrom == TransferState::Transferring;
+    if (!transferring && !interrupted)
+        return;
+
+    const qint64 received = static_cast<qint64>(
+        message.value(QStringLiteral("received")).toDouble(-1));
+    if (received < 0 || received > record->totalBytes) {
+        failRecord(record, QStringLiteral("对方回报的接收进度非法"), true);
+        return;
+    }
+    if (received < record->peerReceived)
+        return; // 旧的 ACK，忽略
+
+    const qint64 confirmed = qMin(received, record->transferred);
+    record->lastProgressMs = QDateTime::currentMSecsSinceEpoch();
+
+    if (interrupted) {
+        // 停滞期间收到的 ACK 说明接收端还活着：按它报告的偏移对齐。
+        // 旧通道上不允许回退重发（SCTP 可能还在重传之前的块）。
+        resumeFromReceived(record, confirmed, /*allowRewind=*/false);
+        return;
+    }
+
+    record->peerReceived = qMax(record->peerReceived, confirmed);
+
+    // 所有数据都已被接收端确认，才发 complete。控制通道是无序的，
+    // 过早发 complete 会在最后几个数据块之前到达接收端。
+    if (record->transferred >= record->totalBytes
+        && record->peerReceived >= record->totalBytes) {
+        finishSending(record);
+        return;
+    }
+
+    if (!m_pumpTimer.isActive())
+        m_pumpTimer.start();
+}
+
+void FileTransferManager::handlePing(const QString &peerId, const QJsonObject &) {
+    sendControl(peerId, makeControl(QStringLiteral("pong"), 0));
+}
+
+void FileTransferManager::handlePong(const QString &, const QJsonObject &) {
+    // 时间戳已在 noteChannelAlive 中更新，这里无需额外处理
+}
+
 void FileTransferManager::handleResume(const QString &peerId, const QJsonObject &message) {
     const TransferRecordPtr record = findIncoming(peerId, idOf(message));
     if (record == nullptr)
         return;
-    if (record->state != TransferState::Interrupted
-        || record->interruptedFrom != TransferState::Transferring) {
+
+    // 允许在 Transferring 状态下收到 resume：数据停滞时发送端会主动
+    // 请求重新对齐，接收端回报当前真实偏移即可。
+    const bool resumable =
+        record->state == TransferState::Transferring
+        || (record->state == TransferState::Interrupted
+            && record->interruptedFrom == TransferState::Transferring);
+    if (!resumable)
         return;
-    }
 
     if (record->file == nullptr) {
         if (record->partialPath.isEmpty()) {
@@ -670,15 +899,24 @@ void FileTransferManager::handleResume(const QString &peerId, const QJsonObject 
         failRecord(record, QStringLiteral("断点状态不一致，无法续传"), true);
         return;
     }
-    record->file->seek(size);
+    if (!record->file->seek(size)) {
+        failRecord(record, QStringLiteral("无法定位断点文件"), true);
+        return;
+    }
 
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
     record->state = TransferState::Transferring;
     record->interruptedFrom = TransferState::Failed;
     record->interruptedAtMs = 0;
     record->resumeRequested = false;
+    record->resumeAllowsRewind = false;
+    record->lastResumeMs = 0;
     record->speedBps = 0;
-    record->lastSampleMs = 0;
-    record->lastSampleBytes = 0;
+    record->lastSampleMs = now;
+    record->lastSampleBytes = record->transferred;
+    record->lastProgressMs = now;
+    record->lastAckBytes = record->transferred;
+    record->lastAckMs = now;
     ensureModel(peerId)->updateRecord(record);
 
     QJsonObject ack = makeControl(QStringLiteral("resume_ack"), record->id);
@@ -709,39 +947,8 @@ void FileTransferManager::handleResumeAck(const QString &peerId,
         return;
     }
 
-    if (record->file == nullptr) {
-        auto file = std::make_shared<QFile>(record->sourcePath);
-        if (!file->open(QIODevice::ReadOnly)) {
-            failRecord(record,
-                       QStringLiteral("无法读取源文件: %1").arg(file->errorString()),
-                       true);
-            return;
-        }
-        record->file = file;
-    }
-    if (record->file->size() != record->totalBytes) {
-        failRecord(record, QStringLiteral("源文件在传输期间发生变化，请重新发送"), true);
+    if (!resumeFromReceived(record, received, record->resumeAllowsRewind))
         return;
-    }
-    if (!record->file->seek(0)) {
-        failRecord(record, QStringLiteral("无法定位源文件"), true);
-        return;
-    }
-
-    // 从 0 开始重算前缀哈希；hashReplayRemaining 由发送节拍逐块消化
-    record->hash = std::make_shared<QCryptographicHash>(QCryptographicHash::Sha256);
-    record->transferred = received;
-    record->hashReplayRemaining = received;
-    record->resumeRequested = false;
-    record->finalHash.clear();
-    record->interruptedFrom = TransferState::Failed;
-    record->interruptedAtMs = 0;
-    record->state = TransferState::Transferring;
-    record->speedBps = 0;
-    record->lastSampleMs = 0;
-    record->lastSampleBytes = 0;
-    ensureModel(peerId)->updateRecord(record);
-    startPumping();
 
     LOG_INFO("Transfer") << "发送端恢复续传:" << record->fileName
                          << "offset=" << received;
@@ -759,6 +966,11 @@ void FileTransferManager::startPumping() {
 }
 
 void FileTransferManager::onPumpTimer() {
+    if (m_webrtc == nullptr) {
+        m_pumpTimer.stop();
+        return;
+    }
+
     bool active = false;
 
     // 数据通道事件里拿不到 peers 列表，控制消息队列按 model 的 key 遍历
@@ -766,12 +978,15 @@ void FileTransferManager::onPumpTimer() {
         const QString &peerId = it.key();
 
         // 先补发积压的控制消息；仍发不出去就留到下一拍。
-        // 不依赖 m_openChannels：即使 open 信号还没处理，Send 自己会判断
+        // 不依赖 m_controlOpen：即使 open 信号还没处理，Send 自己会判断
         auto pending = m_pendingControl.find(peerId);
         if (pending != m_pendingControl.end()) {
+            const QString controlChannel =
+                QString::fromLatin1(TransferChannel::ControlId);
             QVector<QByteArray> &messages = pending.value();
             while (!messages.isEmpty()) {
-                if (!m_webrtc->sendDataChannelMessage(peerId, messages.first(), false))
+                if (!m_webrtc->sendDataChannelMessage(peerId, controlChannel,
+                                                       messages.first(), false))
                     break;
                 messages.removeFirst();
             }
@@ -782,7 +997,7 @@ void FileTransferManager::onPumpTimer() {
             }
         }
 
-        if (!m_openChannels.contains(peerId))
+        if (!isConnected(peerId))
             continue;
 
         FileTransferModel *model = it.value();
@@ -801,8 +1016,9 @@ void FileTransferManager::onPumpTimer() {
         // 只要还有发送任务，节拍就必须继续跑；即使当前因为水位被暂停。
         active = true;
 
-        const qint64 buffered =
-            static_cast<qint64>(m_webrtc->dataChannelBufferedAmount(peerId));
+        const qint64 buffered = static_cast<qint64>(
+            m_webrtc->dataChannelBufferedAmount(
+                peerId, QString::fromLatin1(TransferChannel::DataId)));
         bool &paused = m_sendPaused[peerId];
         if (paused) {
             if (buffered <= kSendBufferLowWater)
@@ -848,10 +1064,11 @@ bool FileTransferManager::sendNextChunk(const TransferRecordPtr &record, qint64 
         return false;
 
     // 续传时先把 [0, transferred) 的前缀重新哈希一遍，让发送端的
-    // SHA-256 状态和接收端的 .part 文件对齐。按块做，避免卡住界面。
+    // SHA-256 状态和接收端的 .part 文件对齐。每拍只处理一块就返回，
+    // 让出事件循环；重放本身也算进展，避免被停滞看门狗误判。
     if (record->hashReplayRemaining > 0) {
-        const qint64 want = qMin<qint64>(kChunkSize,
-                                         qMin(record->hashReplayRemaining, *budget));
+        const qint64 want = qMin<qint64>(kReplayChunkSize,
+                                         record->hashReplayRemaining);
         if (want <= 0)
             return false;
 
@@ -866,23 +1083,37 @@ bool FileTransferManager::sendNextChunk(const TransferRecordPtr &record, qint64 
 
         record->hash->addData(prefix);
         record->hashReplayRemaining -= prefix.size();
-        *budget -= prefix.size();
+        record->lastProgressMs = QDateTime::currentMSecsSinceEpoch();
+        *budget -= qMin<qint64>(*budget, prefix.size());
 
         if (record->hashReplayRemaining == 0) {
             record->file->seek(record->transferred);
-            if (record->transferred >= record->totalBytes)
+            // 全部数据已在对端（例如停滞发生在最后一块之后），
+            // 补齐哈希后直接进入校验
+            if (record->transferred >= record->totalBytes
+                && record->peerReceived >= record->totalBytes)
                 finishSending(record);
         }
-        return true;
+        // 返回 false 只结束本拍，不结束发送节拍（state 仍是 Transferring）
+        return false;
     }
 
     const qint64 remaining = record->totalBytes - record->transferred;
     if (remaining <= 0) {
-        finishSending(record);
+        // 数据已全部发出，但要等接收端 ACK 到最后一块才能发 complete
+        if (record->peerReceived >= record->totalBytes)
+            finishSending(record);
         return false;
     }
 
-    const qint64 want = qMin<qint64>(kChunkSize, qMin(remaining, *budget));
+    // 应用层发送窗口：未被 ACK 的字节不超过 kSendWindowBytes
+    const qint64 inFlight = record->transferred - record->peerReceived;
+    if (inFlight >= kSendWindowBytes)
+        return false;
+    const qint64 windowLeft = kSendWindowBytes - inFlight;
+
+    const qint64 want = qMin<qint64>(
+        kChunkSize, qMin(remaining, qMin(*budget, windowLeft)));
     if (want <= 0)
         return false;
 
@@ -898,10 +1129,11 @@ bool FileTransferManager::sendNextChunk(const TransferRecordPtr &record, qint64 
     qToBigEndian<quint32>(record->id, frame.data());
     std::memcpy(frame.data() + 4, chunk.constData(), static_cast<size_t>(chunk.size()));
 
-    if (!m_webrtc->sendDataChannelMessage(record->peerId, frame, true)) {
+    if (!m_webrtc->sendDataChannelMessage(
+            record->peerId, QString::fromLatin1(TransferChannel::DataId), frame, true)) {
         // 发送队列满时下一拍重试；文件位置要退回，否则这块数据会丢
         record->file->seek(record->transferred);
-        if (!m_webrtc->isDataChannelOpen(record->peerId))
+        if (!isConnected(record->peerId))
             failRecord(record, QStringLiteral("数据通道已断开"), false);
         return false;
     }
@@ -910,18 +1142,32 @@ bool FileTransferManager::sendNextChunk(const TransferRecordPtr &record, qint64 
     record->transferred += chunk.size();
     *budget -= chunk.size();
 
-    if (record->transferred >= record->totalBytes)
-        finishSending(record);
+    // 最后一块不在这里收尾：控制通道是无序的，complete 可能先于数据块
+    // 到达。等接收端 ACK 确认所有字节后再由 handleAck 触发 finishSending。
     return true;
 }
 
 void FileTransferManager::finishSending(const TransferRecordPtr &record) {
+    if (record->direction != TransferDirection::Send
+        || record->state != TransferState::Transferring) {
+        return;
+    }
+    // 前缀哈希还没重放完、或还有数据没被接收端确认时不能发 complete：
+    // 控制通道是无序的，complete 可能先于数据块到达接收端。
+    if (record->hash == nullptr || record->hashReplayRemaining > 0)
+        return;
+    if (record->transferred < record->totalBytes
+        || record->peerReceived < record->totalBytes)
+        return;
+
     if (record->file != nullptr) {
         record->file->close();
         record->file.reset();
     }
 
     record->state = TransferState::Verifying;
+    record->lastProgressMs = QDateTime::currentMSecsSinceEpoch();
+    record->hashReplayRemaining = 0;
 
     record->finalHash = QString::fromLatin1(record->hash->result().toHex());
     QJsonObject complete = makeControl(QStringLiteral("complete"), record->id);
@@ -940,6 +1186,7 @@ void FileTransferManager::finishSending(const TransferRecordPtr &record) {
 void FileTransferManager::verifyIncoming(const TransferRecordPtr &record,
                                          const QString &sha256) {
     record->state = TransferState::Verifying;
+    record->lastProgressMs = QDateTime::currentMSecsSinceEpoch();
 
     if (record->file != nullptr) {
         record->file->close();
@@ -1031,6 +1278,9 @@ void FileTransferManager::finishRecord(const TransferRecordPtr &record,
     record->interruptedAtMs = 0;
     record->hashReplayRemaining = 0;
     record->resumeRequested = false;
+    record->resumeAllowsRewind = false;
+    record->lastResumeMs = 0;
+    record->lastProgressMs = 0;
     record->finalHash.clear();
 
     ensureModel(record->peerId)->updateRecord(record);
@@ -1066,6 +1316,9 @@ void FileTransferManager::failRecord(const TransferRecordPtr &record,
     record->interruptedAtMs = 0;
     record->hashReplayRemaining = 0;
     record->resumeRequested = false;
+    record->resumeAllowsRewind = false;
+    record->lastResumeMs = 0;
+    record->lastProgressMs = 0;
     record->finalHash.clear();
 
     ensureModel(record->peerId)->updateRecord(record);
@@ -1083,6 +1336,16 @@ void FileTransferManager::onNotifyTimer() {
         for (const TransferRecordPtr &record : records) {
             if (record->state == TransferState::Interrupted) {
                 active = true;
+
+                // 发送端每 5 秒主动请求一次续传；接收端等发送端的 resume
+                if (record->direction == TransferDirection::Send
+                    && record->interruptedFrom == TransferState::Transferring
+                    && peerStillInRoom(record->peerId)
+                    && isConnected(record->peerId)
+                    && now - record->lastResumeMs >= kResumeRetryMs) {
+                    attemptResume(record);
+                }
+
                 // 通道一直没恢复（或 resume 一直没得到回应）：放弃并清理
                 if (record->interruptedAtMs > 0
                     && now - record->interruptedAtMs >= kInterruptedGraceMs) {
@@ -1096,6 +1359,30 @@ void FileTransferManager::onNotifyTimer() {
                 continue;
 
             active = true;
+
+            // 兜底：任何路径漏了初始化时，从本拍开始计时，避免永远不触发停滞
+            if (record->lastProgressMs == 0)
+                record->lastProgressMs = now;
+
+            // 15 秒没有任何 ACK / 数据块：转入 Interrupted 并尝试续传
+            if (now - record->lastProgressMs >= kDataStallMs) {
+                const quint64 buffered =
+                    m_webrtc != nullptr
+                        ? m_webrtc->dataChannelBufferedAmount(
+                              record->peerId,
+                              QString::fromLatin1(TransferChannel::DataId))
+                        : 0;
+                LOG_WARN("Transfer") << "传输停滞:" << record->fileName
+                                     << "已传" << record->transferred
+                                     << "已确认" << record->peerReceived
+                                     << "速度" << record->speedBps
+                                     << "缓冲" << buffered;
+                markInterrupted(record);
+                if (record->direction == TransferDirection::Send)
+                    attemptResume(record);
+                continue;
+            }
+
             if (record->lastSampleMs == 0) {
                 record->lastSampleMs = now;
                 record->lastSampleBytes = record->transferred;
@@ -1109,12 +1396,264 @@ void FileTransferManager::onNotifyTimer() {
                 }
             }
 
+            // 每 2 秒一条进度日志：窗口、ACK、SCTP 缓冲都能直接看出卡在哪
+            if (now - record->lastLogMs >= kLogIntervalMs) {
+                record->lastLogMs = now;
+                const quint64 buffered =
+                    m_webrtc != nullptr
+                        ? m_webrtc->dataChannelBufferedAmount(
+                              record->peerId,
+                              QString::fromLatin1(TransferChannel::DataId))
+                        : 0;
+                LOG_DEBUG("Transfer") << "进度" << record->id << record->fileName
+                                      << record->transferred << "/" << record->totalBytes
+                                      << "ACK" << record->peerReceived
+                                      << "速度" << record->speedBps
+                                      << "缓冲" << buffered;
+            }
+
             model->updateRecord(record);
         }
     }
 
     if (!active)
         m_notifyTimer.stop();
+}
+
+// ============================
+// 可靠性与恢复
+// ============================
+
+void FileTransferManager::sendAck(const TransferRecordPtr &record) {
+    QJsonObject ack = makeControl(QStringLiteral("ack"), record->id);
+    ack.insert(QStringLiteral("received"), static_cast<double>(record->transferred));
+    if (!sendControl(record->peerId, ack))
+        return;
+
+    record->lastAckBytes = record->transferred;
+    record->lastAckMs = QDateTime::currentMSecsSinceEpoch();
+}
+
+void FileTransferManager::markInterrupted(const TransferRecordPtr &record) {
+    if (!isActiveTransferState(record->state)
+        || record->state == TransferState::Interrupted) {
+        return;
+    }
+
+    record->interruptedFrom = record->state;
+    record->state = TransferState::Interrupted;
+    record->interruptedAtMs = QDateTime::currentMSecsSinceEpoch();
+    record->resumeRequested = false;
+    record->lastResumeMs = 0;
+    // **不要清 hashReplayRemaining**：发送端可能正在重算前缀哈希，
+    // resume 时靠它判断哈希是否已与 transferred 对齐
+    record->speedBps = 0;
+    record->lastSampleMs = 0;
+    record->lastSampleBytes = 0;
+
+    ensureModel(record->peerId)->updateRecord(record);
+    LOG_WARN("Transfer") << "传输中断，等待恢复:" << record->fileName;
+}
+
+bool FileTransferManager::resumeFromReceived(const TransferRecordPtr &record,
+                                              qint64 received, bool allowRewind) {
+    if (record->direction != TransferDirection::Send)
+        return false;
+
+    if (record->file == nullptr) {
+        auto file = std::make_shared<QFile>(record->sourcePath);
+        if (!file->open(QIODevice::ReadOnly)) {
+            failRecord(record,
+                       QStringLiteral("无法读取源文件: %1").arg(file->errorString()),
+                       true);
+            return false;
+        }
+        record->file = file;
+    }
+    if (record->file->size() != record->totalBytes) {
+        failRecord(record, QStringLiteral("源文件在传输期间发生变化，请重新发送"), true);
+        return false;
+    }
+    if (received < 0 || received > record->totalBytes
+        || received > record->transferred) {
+        failRecord(record, QStringLiteral("对方返回的续传偏移非法"), true);
+        return false;
+    }
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+    // 哈希状态正好覆盖 transferred 时直接接着发；否则从 0 重算前缀。
+    // 重放由发送节拍逐块完成，避免一次性读完整份大文件卡住界面。
+    const bool hashAligned = record->hash != nullptr
+                             && record->hashReplayRemaining == 0
+                             && received == record->transferred;
+    if (hashAligned) {
+        if (!record->file->seek(received)) {
+            failRecord(record, QStringLiteral("无法定位源文件"), true);
+            return false;
+        }
+        record->peerReceived = received;
+    } else if (!allowRewind) {
+        // 通道没有重建：SCTP 可能还在重传之前的块，此时回退重发会
+        // 与那些块重复，直接把接收端文件写坏。只允许从 transferred
+        // 继续发，让窗口等待 ACK 追上。
+        if (record->hash == nullptr) {
+            LOG_DEBUG("Transfer") << "通道未重建且哈希缺失，无法继续:"
+                                   << record->fileName;
+            return false;
+        }
+        if (received != record->transferred) {
+            if (record->hashReplayRemaining > 0) {
+                // 接收端尚未收全已发送字节，而前缀哈希也只覆盖了一部分：
+                // 回退会重复，继续重放又对不上接收端的偏移，只能等通道重建。
+                LOG_DEBUG("Transfer") << "通道未重建，暂不能重放哈希:"
+                                       << record->fileName;
+                return false;
+            }
+            if (!record->file->seek(record->transferred)) {
+                failRecord(record, QStringLiteral("无法定位源文件"), true);
+                return false;
+            }
+        }
+        // received == transferred 时保持文件当前位置：前缀重放若尚未
+        // 完成就从原位置继续，重放结束后会自动 seek 到 transferred。
+        record->peerReceived = received;
+    } else {
+        // 新通道：旧数据不会再来，可以安全回退并重算前缀哈希
+        record->hash =
+            std::make_shared<QCryptographicHash>(QCryptographicHash::Sha256);
+        record->transferred = received;
+        record->peerReceived = received;
+        record->hashReplayRemaining = received;
+        if (!record->file->seek(0)) {
+            failRecord(record, QStringLiteral("无法定位源文件"), true);
+            return false;
+        }
+    }
+
+    record->resumeRequested = false;
+    record->resumeAllowsRewind = false;
+    record->lastResumeMs = 0;
+    record->finalHash.clear();
+    record->interruptedFrom = TransferState::Failed;
+    record->interruptedAtMs = 0;
+    record->state = TransferState::Transferring;
+    record->speedBps = 0;
+    record->lastSampleMs = now;
+    record->lastSampleBytes = record->transferred;
+    record->lastProgressMs = now;
+    record->lastAckBytes = received;
+    record->lastAckMs = now;
+    record->lastLogMs = 0;
+    ensureModel(record->peerId)->updateRecord(record);
+
+    if (record->hashReplayRemaining == 0
+        && record->transferred >= record->totalBytes
+        && record->peerReceived >= record->totalBytes) {
+        finishSending(record);
+    } else {
+        startPumping();
+    }
+    return true;
+}
+
+void FileTransferManager::attemptResume(const TransferRecordPtr &record) {
+    if (record->direction != TransferDirection::Send
+        || record->state != TransferState::Interrupted
+        || record->interruptedFrom != TransferState::Transferring) {
+        return;
+    }
+    if (!isConnected(record->peerId))
+        return;
+
+    record->lastResumeMs = QDateTime::currentMSecsSinceEpoch();
+    record->resumeAllowsRewind = false;
+    if (!sendControl(record->peerId, makeControl(QStringLiteral("resume"), record->id))) {
+        LOG_DEBUG("Transfer") << "续传请求发送失败，稍后重试:" << record->fileName;
+        return;
+    }
+
+    record->resumeRequested = true;
+    LOG_INFO("Transfer") << "请求续传:" << record->fileName
+                         << "offset=" << record->transferred;
+}
+
+void FileTransferManager::handleChannelDown(const QString &peerId,
+                                            const QString &reason) {
+    LOG_WARN("Transfer") << "与" << peerId << "的文件传输中断:" << reason;
+
+    FileTransferModel *model = modelFor(peerId);
+    if (model != nullptr) {
+        const QList<TransferRecordPtr> records = model->records();
+        for (const TransferRecordPtr &record : records) {
+            if (!isActiveTransferState(record->state))
+                continue;
+
+            // 对端真的离开房间：不能续传，直接失败并清理
+            if (!peerStillInRoom(peerId)) {
+                failRecord(record, QStringLiteral("对方已离开房间"), false);
+                continue;
+            }
+
+            // 只是连接断了：保留 .part / QFile / hash / 已传字节数，
+            // 等通道恢复后按断点前的状态重发控制消息。
+            markInterrupted(record);
+        }
+    }
+
+    m_sendPaused.remove(peerId);
+    m_pendingControl.remove(peerId);
+    m_lastPongMs.remove(peerId);
+
+    // 通知节拍继续跑：既负责速度显示，也负责断线超时兜底
+    if (!m_notifyTimer.isActive())
+        m_notifyTimer.start();
+
+    emit connectionChanged(peerId);
+}
+
+void FileTransferManager::noteChannelAlive(const QString &peerId) {
+    m_lastPongMs.insert(peerId, QDateTime::currentMSecsSinceEpoch());
+
+    if (m_unresponsive.remove(peerId)) {
+        LOG_INFO("Transfer") << "与" << peerId << "的控制通道恢复响应";
+        emit connectionChanged(peerId);
+        reissueAfterReconnect(peerId, /*allowRewind=*/false);
+    }
+}
+
+void FileTransferManager::onHealthTimer() {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    bool anyReady = false;
+
+    // 迭代副本：handleChannelDown 会发 connectionChanged，QML 处理期间
+    // 理论上可能触碰对端状态（例如关闭传输窗口）。
+    const QSet<QString> peers = m_controlOpen;
+    for (const QString &peerId : peers) {
+        if (!m_dataOpen.contains(peerId))
+            continue;
+        anyReady = true;
+
+        if (m_unresponsive.contains(peerId)) {
+            // 继续探测：通道恢复后，第一个 pong/控制消息会把状态带回来
+            sendControl(peerId, makeControl(QStringLiteral("ping"), 0));
+            continue;
+        }
+
+        const qint64 last = m_lastPongMs.value(peerId, 0);
+        if (last > 0 && now - last >= kHealthTimeoutMs) {
+            LOG_WARN("Transfer") << "与" << peerId << "的控制通道"
+                                 << (kHealthTimeoutMs / 1000) << "秒无响应";
+            m_unresponsive.insert(peerId);
+            handleChannelDown(peerId, QStringLiteral("数据通道无响应"));
+            continue;
+        }
+
+        sendControl(peerId, makeControl(QStringLiteral("ping"), 0));
+    }
+
+    if (!anyReady)
+        m_healthTimer.stop();
 }
 
 // ============================
@@ -1146,7 +1685,8 @@ bool FileTransferManager::peerStillInRoom(const QString &peerId) const {
     return m_session->members()->contains(peerId);
 }
 
-void FileTransferManager::reissueAfterReconnect(const QString &peerId) {
+void FileTransferManager::reissueAfterReconnect(const QString &peerId,
+                                                bool allowRewind) {
     FileTransferModel *model = modelFor(peerId);
     if (model == nullptr)
         return;
@@ -1160,8 +1700,12 @@ void FileTransferManager::reissueAfterReconnect(const QString &peerId) {
         if (record->direction != TransferDirection::Send)
             continue;
 
-        // 超时从这次重发重新计时；对端没回应的话由通知节拍兜底
+        // 超时从这次重发重新计时；对端没回应的话由通知节拍兜底。
+        // 之前的 resume 可能在断线时丢了，这里统一允许重发。
         record->interruptedAtMs = now;
+        record->resumeRequested = false;
+        record->resumeAllowsRewind = false;
+        record->lastResumeMs = 0;
 
         switch (record->interruptedFrom) {
         case TransferState::WaitingAccept: {
@@ -1173,11 +1717,13 @@ void FileTransferManager::reissueAfterReconnect(const QString &peerId) {
             break;
         }
         case TransferState::Transferring: {
-            if (record->resumeRequested)
-                break;
+            record->resumeAllowsRewind = allowRewind;
             if (sendControl(peerId, makeControl(QStringLiteral("resume"), record->id))) {
                 record->resumeRequested = true;
-                LOG_INFO("Transfer") << "请求断点续传:" << record->fileName;
+                record->lastResumeMs = now;
+                LOG_INFO("Transfer") << "请求断点续传:" << record->fileName
+                                     << (allowRewind ? "(通道已重建)"
+                                                     : "(通道未重建，仅继续发送)");
             }
             break;
         }

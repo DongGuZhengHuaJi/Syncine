@@ -195,6 +195,7 @@ qt_add_executable(Syncine
         src/transfer/FileTransferModel.h
         src/transfer/FileTransferManager.cpp
         src/transfer/FileTransferManager.h
+        src/transfer/TransferChannels.h
 
         # webrtc
         src/webrtc/WebrtcManager.cpp

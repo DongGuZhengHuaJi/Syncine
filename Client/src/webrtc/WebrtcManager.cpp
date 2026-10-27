@@ -600,20 +600,23 @@ void WebrtcManager::removePeer(const QString &peerId) {
     }
 }
 
-bool WebrtcManager::isDataChannelOpen(const QString &peerId) const {
+bool WebrtcManager::isDataChannelOpen(const QString &peerId,
+                                      const QString &channel) const {
     PeerLink *link = peer(peerId, LinkKind::Voice);
-    return link != nullptr && link->isDataChannelOpen();
+    return link != nullptr && link->isDataChannelOpen(channel);
 }
 
-quint64 WebrtcManager::dataChannelBufferedAmount(const QString &peerId) const {
+quint64 WebrtcManager::dataChannelBufferedAmount(const QString &peerId,
+                                                 const QString &channel) const {
     PeerLink *link = peer(peerId, LinkKind::Voice);
-    return link != nullptr ? link->dataChannelBufferedAmount() : 0;
+    return link != nullptr ? link->dataChannelBufferedAmount(channel) : 0;
 }
 
 bool WebrtcManager::sendDataChannelMessage(const QString &peerId,
+                                           const QString &channel,
                                            const QByteArray &data, bool binary) {
     PeerLink *link = peer(peerId, LinkKind::Voice);
-    return link != nullptr && link->sendDataChannelMessage(data, binary);
+    return link != nullptr && link->sendDataChannelMessage(channel, data, binary);
 }
 
 void WebrtcManager::closeAllPeers() {

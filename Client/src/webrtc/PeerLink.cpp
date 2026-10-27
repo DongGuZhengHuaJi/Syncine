@@ -10,6 +10,7 @@
 
 #include "WebrtcManager.h"
 #include "core/Log.h"
+#include "transfer/TransferChannels.h"
 
 #include "rtc_base/copy_on_write_buffer.h"
 #include "rtc_base/thread.h"
@@ -56,20 +57,22 @@ std::string describeStreams(const webrtc::scoped_refptr<webrtc::RtpReceiverInter
 // 所有文件逻辑由主线程的 FileTransferManager 处理。
 class PeerLink::ChannelObserver final : public webrtc::DataChannelObserver {
 public:
-    explicit ChannelObserver(PeerLink *link)
-        : m_link(link) {
+    ChannelObserver(PeerLink *link, DataChannelKind kind)
+        : m_link(link),
+          m_kind(kind) {
     }
 
     void OnStateChange() override {
-        m_link->onDataChannelStateChanged();
+        m_link->onDataChannelStateChanged(m_kind);
     }
 
     void OnMessage(const webrtc::DataBuffer &buffer) override {
-        m_link->onDataChannelMessage(buffer);
+        m_link->onDataChannelMessage(m_kind, buffer);
     }
 
 private:
     PeerLink *m_link = nullptr;
+    DataChannelKind m_kind;
 };
 
 
@@ -93,7 +96,8 @@ PeerLink::PeerLink(const QString &peerId,
         return;
     }
 
-    m_channelObserver = std::make_unique<ChannelObserver>(this);
+    m_controlObserver = std::make_unique<ChannelObserver>(this, DataChannelKind::Control);
+    m_dataObserver = std::make_unique<ChannelObserver>(this, DataChannelKind::Data);
 
     webrtc::PeerConnectionDependencies dependencies(this);
     auto result = m_factory->CreatePeerConnectionOrError(config, std::move(dependencies));
@@ -105,19 +109,26 @@ PeerLink::PeerLink(const QString &peerId,
     m_connection = result.value();
 
     // 创建数据通路，用于文件传输。只有 offer 方创建：answer 方在
-    // SetRemoteDescription 后经 OnDataChannel 拿到同一条通道。两侧都创建会
-    // 协商出两条同名通道（甚至流号冲突），反而更麻烦。
+    // SetRemoteDescription 后经 OnDataChannel 拿到同样的两条通道。
+    // 控制通道无序，避免文件块的重传排队把取消/校验消息堵住；
+    // 数据通道保序，接收端按到达顺序写文件。
     if (createDataChannel) {
-        webrtc::DataChannelInit init;
-        // ordered=true 让对端收到的消息顺序与发送顺序一致
-        init.ordered = true;
-        auto channel = m_connection->CreateDataChannelOrError("syncine-file", &init);
-        if (!channel.ok()) {
-            LOG_ERROR("PeerLink") << m_peerId << "创建数据通道失败:"
-                                  << channel.error().message();
-        } else {
-            attachDataChannel(channel.value());
-        }
+        const auto createChannel = [this](DataChannelKind kind, const char *label,
+                                          bool ordered) {
+            webrtc::DataChannelInit init;
+            init.ordered = ordered;
+            auto channel = m_connection->CreateDataChannelOrError(label, &init);
+            if (!channel.ok()) {
+                LOG_ERROR("PeerLink") << m_peerId << "创建数据通道失败:"
+                                      << label << channel.error().message();
+                return;
+            }
+            attachDataChannel(channel.value(), kind);
+        };
+        createChannel(DataChannelKind::Control, TransferChannel::ControlLabel,
+                      /*ordered=*/false);
+        createChannel(DataChannelKind::Data, TransferChannel::DataLabel,
+                      /*ordered=*/true);
     }
 }
 
@@ -128,15 +139,20 @@ PeerLink::~PeerLink() {
 void PeerLink::close() {
     // 先摘观察者再放通道：UnregisterObserver 会阻塞到网络线程完成，
     // 返回后不会再有回调摸到本对象。观察者对象本身留到析构（见头文件）。
-    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel;
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> controlChannel;
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> dataChannel;
     {
         webrtc::MutexLock lock(&m_dataChannelLock);
         m_dataChannelClosing = true;
-        channel = m_dataChannel;
-        m_dataChannel = nullptr;
+        controlChannel = m_controlChannel.channel;
+        dataChannel = m_dataChannel.channel;
+        m_controlChannel.channel = nullptr;
+        m_dataChannel.channel = nullptr;
     }
-    if (channel != nullptr)
-        channel->UnregisterObserver();
+    if (controlChannel != nullptr)
+        controlChannel->UnregisterObserver();
+    if (dataChannel != nullptr)
+        dataChannel->UnregisterObserver();
 
     m_pendingCandidateSdps.clear();
     m_pendingCandidateMids.clear();
@@ -458,8 +474,15 @@ void PeerLink::OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface>
     if (channel == nullptr)
         return;
 
+    const std::optional<DataChannelKind> kind = kindFromLabel(channel->label());
+    if (!kind.has_value()) {
+        LOG_WARN("PeerLink") << m_peerId << "忽略未知的数据通道:" << channel->label();
+        channel->Close();
+        return;
+    }
+
     LOG_INFO("PeerLink") << m_peerId << "收到数据通道:" << channel->label();
-    attachDataChannel(channel);
+    attachDataChannel(channel, *kind);
 
     // 协商完成后再设一次画质：AddTrack 之后立刻设有时还太早
     pushVideoQuality();
@@ -854,8 +877,44 @@ void PeerLink::pushMovieAudioSending() {
 // 数据通道
 // ============================
 
+PeerLink::ChannelSlot &PeerLink::slotFor(DataChannelKind kind) {
+    return kind == DataChannelKind::Control ? m_controlChannel : m_dataChannel;
+}
+
+const PeerLink::ChannelSlot &PeerLink::slotFor(DataChannelKind kind) const {
+    return kind == DataChannelKind::Control ? m_controlChannel : m_dataChannel;
+}
+
+PeerLink::ChannelObserver *PeerLink::observerFor(DataChannelKind kind) const {
+    return kind == DataChannelKind::Control ? m_controlObserver.get()
+                                            : m_dataObserver.get();
+}
+
+QString PeerLink::channelId(DataChannelKind kind) {
+    return kind == DataChannelKind::Control
+               ? QString::fromLatin1(TransferChannel::ControlId)
+               : QString::fromLatin1(TransferChannel::DataId);
+}
+
+std::optional<PeerLink::DataChannelKind> PeerLink::kindFromId(const QString &channel) {
+    if (channel == QLatin1String(TransferChannel::ControlId))
+        return DataChannelKind::Control;
+    if (channel == QLatin1String(TransferChannel::DataId))
+        return DataChannelKind::Data;
+    return std::nullopt;
+}
+
+std::optional<PeerLink::DataChannelKind> PeerLink::kindFromLabel(const std::string &label) {
+    if (label == TransferChannel::ControlLabel)
+        return DataChannelKind::Control;
+    if (label == TransferChannel::DataLabel)
+        return DataChannelKind::Data;
+    return std::nullopt;
+}
+
 void PeerLink::attachDataChannel(
-    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel) {
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel,
+    DataChannelKind kind) {
     if (channel == nullptr)
         return;
 
@@ -863,15 +922,17 @@ void PeerLink::attachDataChannel(
     bool shouldClose = false;
     {
         webrtc::MutexLock lock(&m_dataChannelLock);
+        ChannelSlot &slot = slotFor(kind);
         if (m_dataChannelClosing) {
             // 连接已在拆除流程中，别再挂上来
             shouldClose = true;
-        } else if (m_dataChannel == nullptr) {
-            m_dataChannel = channel;
+        } else if (slot.channel == nullptr) {
+            slot.channel = channel;
+            slot.openReported = false;
+            slot.closedReported = false;
             accepted = true;
-        } else if (m_dataChannel.get() != channel.get()) {
-            // offer 方已有一条本地创建的通道，answer 方则是首次到达。
-            // 同一连接上只认一条（旧版对端两侧都创建时会到这里）
+        } else if (slot.channel.get() != channel.get()) {
+            // 同一路只认一条通道（旧版对端可能重复创建）
             LOG_WARN("PeerLink") << m_peerId << "忽略重复的数据通道:"
                                  << channel->label();
             shouldClose = true;
@@ -885,27 +946,27 @@ void PeerLink::attachDataChannel(
     if (!accepted)
         return;
 
-    channel->RegisterObserver(m_channelObserver.get());
+    channel->RegisterObserver(observerFor(kind));
 
     // 注册期间连接可能已经开始拆除（close() 并发进来）。这种情况下
     // 取消注册，避免回调落在已经作废的通道上。
     {
         webrtc::MutexLock lock(&m_dataChannelLock);
-        if (m_dataChannelClosing || m_dataChannel.get() != channel.get()) {
+        if (m_dataChannelClosing || slotFor(kind).channel.get() != channel.get()) {
             channel->UnregisterObserver();
             return;
         }
     }
 
     // 注册时通道可能已经打开，OnStateChange 不会补发，这里主动对一次状态
-    onDataChannelStateChanged();
+    onDataChannelStateChanged(kind);
 }
 
-void PeerLink::onDataChannelStateChanged() {
+void PeerLink::onDataChannelStateChanged(DataChannelKind kind) {
     webrtc::scoped_refptr<webrtc::DataChannelInterface> channel;
     {
         webrtc::MutexLock lock(&m_dataChannelLock);
-        channel = m_dataChannel;
+        channel = slotFor(kind).channel;
     }
     if (channel == nullptr)
         return;
@@ -915,15 +976,17 @@ void PeerLink::onDataChannelStateChanged() {
         bool reported = false;
         {
             webrtc::MutexLock lock(&m_dataChannelLock);
-            if (!m_dataChannelOpenReported) {
-                m_dataChannelOpenReported = true;
-                m_dataChannelClosedReported = false;
+            ChannelSlot &slot = slotFor(kind);
+            if (slot.channel == channel && !slot.openReported) {
+                slot.openReported = true;
+                slot.closedReported = false;
                 reported = true;
             }
         }
         if (reported) {
-            LOG_INFO("PeerLink") << (m_peerId + ":" + linkId()) << "数据通道已打开";
-            emit dataChannelOpened(m_peerId);
+            LOG_INFO("PeerLink") << (m_peerId + ":" + linkId())
+                                 << "数据通道已打开:" << channelId(kind);
+            emit dataChannelOpened(m_peerId, channelId(kind));
         }
         return;
     }
@@ -933,53 +996,69 @@ void PeerLink::onDataChannelStateChanged() {
         bool reported = false;
         {
             webrtc::MutexLock lock(&m_dataChannelLock);
-            if (!m_dataChannelClosedReported) {
-                m_dataChannelClosedReported = true;
-                m_dataChannelOpenReported = false;
+            ChannelSlot &slot = slotFor(kind);
+            if (slot.channel == channel && !slot.closedReported) {
+                slot.closedReported = true;
+                slot.openReported = false;
                 reported = true;
             }
         }
         if (reported) {
-            LOG_INFO("PeerLink") << (m_peerId + ":" + linkId()) << "数据通道已关闭";
-            emit dataChannelClosed(m_peerId);
+            LOG_INFO("PeerLink") << (m_peerId + ":" + linkId())
+                                 << "数据通道已关闭:" << channelId(kind);
+            emit dataChannelClosed(m_peerId, channelId(kind));
         }
     }
 }
 
-void PeerLink::onDataChannelMessage(const webrtc::DataBuffer &buffer) {
+void PeerLink::onDataChannelMessage(DataChannelKind kind,
+                                    const webrtc::DataBuffer &buffer) {
     // 到主线程之前就把数据拷出来：buffer 的内存在回调返回后失效
     const QByteArray data(reinterpret_cast<const char *>(buffer.data.data()),
                           static_cast<int>(buffer.data.size()));
-    emit dataChannelMessageReceived(m_peerId, buffer.binary, data);
+    emit dataChannelMessageReceived(m_peerId, channelId(kind), buffer.binary, data);
 }
 
-bool PeerLink::isDataChannelOpen() const {
-    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel;
+bool PeerLink::isDataChannelOpen(const QString &channel) const {
+    const std::optional<DataChannelKind> kind = kindFromId(channel);
+    if (!kind.has_value())
+        return false;
+
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> dataChannel;
     {
         webrtc::MutexLock lock(&m_dataChannelLock);
-        channel = m_dataChannel;
+        dataChannel = slotFor(*kind).channel;
     }
-    return channel != nullptr
-           && channel->state() == webrtc::DataChannelInterface::kOpen;
+    return dataChannel != nullptr
+           && dataChannel->state() == webrtc::DataChannelInterface::kOpen;
 }
 
-quint64 PeerLink::dataChannelBufferedAmount() const {
-    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel;
+quint64 PeerLink::dataChannelBufferedAmount(const QString &channel) const {
+    const std::optional<DataChannelKind> kind = kindFromId(channel);
+    if (!kind.has_value())
+        return 0;
+
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> dataChannel;
     {
         webrtc::MutexLock lock(&m_dataChannelLock);
-        channel = m_dataChannel;
+        dataChannel = slotFor(*kind).channel;
     }
-    return channel != nullptr ? channel->buffered_amount() : 0;
+    return dataChannel != nullptr ? dataChannel->buffered_amount() : 0;
 }
 
-bool PeerLink::sendDataChannelMessage(const QByteArray &data, bool binary) {
-    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel;
+bool PeerLink::sendDataChannelMessage(const QString &channel, const QByteArray &data,
+                                      bool binary) {
+    const std::optional<DataChannelKind> kind = kindFromId(channel);
+    if (!kind.has_value())
+        return false;
+
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> dataChannel;
     {
         webrtc::MutexLock lock(&m_dataChannelLock);
-        channel = m_dataChannel;
+        dataChannel = slotFor(*kind).channel;
     }
-    if (channel == nullptr
-        || channel->state() != webrtc::DataChannelInterface::kOpen) {
+    if (dataChannel == nullptr
+        || dataChannel->state() != webrtc::DataChannelInterface::kOpen) {
         return false;
     }
 
@@ -987,7 +1066,7 @@ bool PeerLink::sendDataChannelMessage(const QByteArray &data, bool binary) {
         webrtc::CopyOnWriteBuffer(reinterpret_cast<const uint8_t *>(data.constData()),
                                   static_cast<size_t>(data.size())),
         binary);
-    return channel->Send(buffer);
+    return dataChannel->Send(buffer);
 }
 
 void PeerLink::emitError(const QString &message) {

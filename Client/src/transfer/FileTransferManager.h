@@ -1,13 +1,19 @@
 //
-// 点对点文件传输：控制消息 + 分块数据全部走已建立的 WebRTC DataChannel。
+// 点对点文件传输：控制消息与分块数据分别走两条 WebRTC DataChannel。
 //
 // 与音频/视频链路完全分开：这里不碰媒体轨，只在 voice 连接的数据通道上收发。
 // 传输状态保存在本类（而非 QML 窗口）中，因此关闭窗口不会中断任何任务，
 // 重新打开即可看到进度与历史。
 //
-// 控制消息为文本 JSON，文件块为二进制：前 4 字节是发送方分配的传输 id
-// （大端），其后为数据。通道本身可靠且保序，故接收端只需按到达顺序写文件，
-// 收到 complete 时再核对 SHA-256。
+// 两条通道：
+//   syncine-file-ctl  reliable + unordered，控制 JSON（offer/accept/ack/...）
+//   syncine-file-data reliable + ordered，文件块（前 4 字节为传输 id）
+// 控制与文件块分开，取消/校验/心跳不会被大量数据块的重传队列堵住。
+//
+// 发送端按接收端回报的 ack 推进窗口：未确认的字节数不超过 kSendWindowBytes，
+// 避免把几 MB 压进 SCTP 队列。接收端只在超过阈值或间隔时回报一次，合并 ACK。
+// 两条通道都有周期性 ping/pong；传输中长时间没有进展会转入 Interrupted 并
+// 尝试 resume，而不是无限卡住。
 //
 
 #ifndef SYNCINE_FILETRANSFERMANAGER_H
@@ -64,14 +70,15 @@ signals:
     void connectionChanged(const QString &peerId);
 
 private slots:
-    void onDataChannelOpened(const QString &peerId);
-    void onDataChannelClosed(const QString &peerId);
-    void onDataChannelMessage(const QString &peerId, bool binary,
-                              const QByteArray &data);
+    void onDataChannelOpened(const QString &peerId, const QString &channel);
+    void onDataChannelClosed(const QString &peerId, const QString &channel);
+    void onDataChannelMessage(const QString &peerId, const QString &channel,
+                              bool binary, const QByteArray &data);
     void onPeerRemoved(const QString &peerId);
     void onRoomLeft();
     void onPumpTimer();
     void onNotifyTimer();
+    void onHealthTimer();
 
 private:
     // ---- 记录查找 ----
@@ -88,9 +95,13 @@ private:
     void handleCancel(const QString &peerId, const QJsonObject &message);
     void handleComplete(const QString &peerId, const QJsonObject &message);
     void handleResult(const QString &peerId, const QJsonObject &message);
+    // 接收端回报已连续收到的字节数（应用层 ACK）
+    void handleAck(const QString &peerId, const QJsonObject &message);
     // 断线续传：发送端请求从某个偏移继续；接收端回报已有字节数
     void handleResume(const QString &peerId, const QJsonObject &message);
     void handleResumeAck(const QString &peerId, const QJsonObject &message);
+    void handlePing(const QString &peerId, const QJsonObject &message);
+    void handlePong(const QString &peerId, const QJsonObject &message);
 
     // ---- 传输推进 ----
     void startPumping();
@@ -102,12 +113,29 @@ private:
     void failRecord(const TransferRecordPtr &record, const QString &message,
                     bool notifyPeer);
 
+    // ---- 可靠性与恢复 ----
+    // 发一条 ACK（接收端，合并发送）
+    void sendAck(const TransferRecordPtr &record);
+    // 进入 Interrupted 并保留文件/哈希，等待 resume 恢复
+    void markInterrupted(const TransferRecordPtr &record);
+    // 从接收端确认的偏移重新开始发送。allowRewind 只在通道重建后为真：
+    // 旧通道上可能还有 SCTP 重传中的数据块，回退重发会造成重复。
+    bool resumeFromReceived(const TransferRecordPtr &record, qint64 received,
+                            bool allowRewind);
+    // 数据停滞时主动发 resume 请求（对端重发 resume_ack）
+    void attemptResume(const TransferRecordPtr &record);
+    // 两条通道都不可用：中断该对端的进行中传输（对端已离开则直接失败）
+    void handleChannelDown(const QString &peerId, const QString &reason);
+    // 收到任意控制消息：刷新心跳时间；从“无响应”恢复时重新挂接传输
+    void noteChannelAlive(const QString &peerId);
+
     void updatePending(const QString &peerId);
     QString nicknameFor(const QString &peerId) const;
     // 对端是否仍在成员表里（离线等待重连也算在）
     bool peerStillInRoom(const QString &peerId) const;
-    // 数据通道恢复后，按断点前的状态重发 offer / resume / complete
-    void reissueAfterReconnect(const QString &peerId);
+    // 数据通道恢复后，按断点前的状态重发 offer / resume / complete。
+    // allowRewind 表示通道是否已经重建（新 SCTP 流，旧数据不会再来）。
+    void reissueAfterReconnect(const QString &peerId, bool allowRewind);
     static QString downloadDirectory();
     static QString sanitizeFileName(const QString &name);
     static QString uniquePath(const QString &directory, const QString &name);
@@ -117,7 +145,13 @@ private:
 
     // peerId → 记录。模型归本类所有，析构时随之释放
     QHash<QString, FileTransferModel *> m_models;
-    QSet<QString> m_openChannels;
+    // 两条通道各自就绪的对端。只有两条都打开才算真正连通
+    QSet<QString> m_controlOpen;
+    QSet<QString> m_dataOpen;
+    // 心跳超时判定为无响应的对端；收到任意控制消息即恢复
+    QSet<QString> m_unresponsive;
+    // 最近一次收到控制消息/心跳回应的时间
+    QHash<QString, qint64> m_lastPongMs;
     // 数据通道发送缓冲达到高水位后暂停该对端的发送，低于低水位再恢复
     QHash<QString, bool> m_sendPaused;
     // 发送队列满时暂存的控制消息，由发送节拍重试（取消/校验消息不能丢）
@@ -125,6 +159,7 @@ private:
 
     QTimer m_pumpTimer;    // 发送节拍（只有存在发送任务时运行）
     QTimer m_notifyTimer;  // 进度/速度刷新节拍
+    QTimer m_healthTimer;  // 两条数据通道的 ping/pong
     quint32 m_nextId = 1;
 };
 
