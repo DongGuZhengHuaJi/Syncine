@@ -137,6 +137,11 @@ public:
     bool sendDataChannelMessage(const QString &channel, const QByteArray &data,
                                 bool binary);
 
+    // 采集一次 WebRTC GetStats，输出一条诊断日志：
+    // 选中 candidate 类型、RTT、可用带宽、DataChannel 收发字节。
+    // 由 FileTransferManager 在传输期间低频调用（默认 15 秒一次）。
+    void requestDataChannelStats();
+
     // 生命周期由 WebrtcManager 管理，Release返回 kOtherRefsRemained
     void AddRef() const override {
         ++m_refCount;

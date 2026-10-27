@@ -103,6 +103,10 @@ public:
     bool sendDataChannelMessage(const QString &peerId, const QString &channel,
                                 const QByteArray &data, bool binary);
 
+    // 采集一次某对端 voice 链路的 WebRTC 统计并写日志。
+    // 由 FileTransferManager 在传输期间低频调用（默认 15 秒一次）。
+    void requestDataChannelStats(const QString &peerId);
+
     // 关闭并销毁某对端的两条连接。对端离开房间时调用。
     void removePeer(const QString &peerId);
 

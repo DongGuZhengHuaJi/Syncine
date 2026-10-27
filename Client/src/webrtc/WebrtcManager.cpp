@@ -619,6 +619,12 @@ bool WebrtcManager::sendDataChannelMessage(const QString &peerId,
     return link != nullptr && link->sendDataChannelMessage(channel, data, binary);
 }
 
+void WebrtcManager::requestDataChannelStats(const QString &peerId) {
+    PeerLink *link = peer(peerId, LinkKind::Voice);
+    if (link != nullptr)
+        link->requestDataChannelStats();
+}
+
 void WebrtcManager::closeAllPeers() {
     const QList<QString> ids = m_peers.keys();
     for (const QString &id : ids)

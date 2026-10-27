@@ -15,6 +15,7 @@
 #include <QRegularExpression>
 #include <QStandardPaths>
 #include <QtEndian>
+#include <QtGlobal>
 
 #include "core/Log.h"
 #include "core/RoomTypes.h"
@@ -32,15 +33,25 @@ constexpr int kPumpIntervalMs = 10;
 constexpr int kNotifyIntervalMs = 200;
 
 // 发送窗口：已读出但尚未被接收端 ACK 的字节数上限。
-// 接收端每 128KB 或 100ms 回报一次，窗口内最多 512KB 在途。
-constexpr qint64 kSendWindowBytes = 512 * 1024;
+// 接收端每 128KB 或 100ms 回报一次。默认 2MB；可用环境变量
+// SYNCINE_TRANSFER_WINDOW_KB 覆盖（128–16384），方便在长 RTT 链路上做对照。
+constexpr qint64 kDefaultSendWindowBytes = 2 * 1024 * 1024;
+const qint64 kSendWindowBytes = [] {
+    bool ok = false;
+    const int kb = qEnvironmentVariableIntValue("SYNCINE_TRANSFER_WINDOW_KB", &ok);
+    if (ok && kb >= 128 && kb <= 16384)
+        return static_cast<qint64>(kb) * 1024;
+    return kDefaultSendWindowBytes;
+}();
 constexpr qint64 kAckEveryBytes = 128 * 1024;
 constexpr qint64 kAckIntervalMs = 100;
 
 // 数据通道自己的 SCTP 发送缓冲水位。应用层窗口已经限制了在途量，
 // 这里只是第二道保险，避免 SCTP 队列无界增长。
-constexpr qint64 kSendBufferHighWater = 1024 * 1024;
-constexpr qint64 kSendBufferLowWater = 256 * 1024;
+const qint64 kSendBufferHighWater =
+    qMax<qint64>(4 * 1024 * 1024, kSendWindowBytes + 1024 * 1024);
+const qint64 kSendBufferLowWater =
+    qMax<qint64>(1024 * 1024, kSendBufferHighWater / 4);
 // 断线后等待 P2P 恢复/续传的最长时间
 constexpr qint64 kInterruptedGraceMs = 60 * 1000;
 
@@ -54,7 +65,10 @@ constexpr qint64 kResumeRetryMs = 5 * 1000;
 constexpr int kHealthIntervalMs = 5 * 1000;
 constexpr qint64 kHealthTimeoutMs = 15 * 1000;
 
-constexpr qint64 kLogIntervalMs = 2 * 1000;
+// 传输中每 10 秒打一条进度；GetStats 诊断每 15 秒一次。
+// 两者都只在传输期间运行，避免空闲时刷日志。
+constexpr qint64 kLogIntervalMs = 10 * 1000;
+constexpr qint64 kStatsIntervalMs = 15 * 1000;
 
 quint32 idOf(const QJsonObject &message)
 {
@@ -405,6 +419,9 @@ void FileTransferManager::onPeerRemoved(const QString &peerId) {
     m_lastPongMs.remove(peerId);
     m_pendingControl.remove(peerId);
     m_sendPaused.remove(peerId);
+    m_statsPeers.remove(peerId);
+    if (m_statsPeers.isEmpty())
+        m_lastStatsMs = 0;
 
     FileTransferModel *model = modelFor(peerId);
     if (model != nullptr) {
@@ -446,6 +463,8 @@ void FileTransferManager::onRoomLeft() {
     m_lastPongMs.clear();
     m_pendingControl.clear();
     m_sendPaused.clear();
+    m_statsPeers.clear();
+    m_lastStatsMs = 0;
     m_pumpTimer.stop();
     m_notifyTimer.stop();
     m_healthTimer.stop();
@@ -1330,12 +1349,15 @@ void FileTransferManager::failRecord(const TransferRecordPtr &record,
 void FileTransferManager::onNotifyTimer() {
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     bool active = false;
+    // 本拍仍有传输（Transferring / Interrupted）的对端，用于低频 GetStats。
+    QSet<QString> activePeers;
 
     for (FileTransferModel *model : std::as_const(m_models)) {
         const QList<TransferRecordPtr> records = model->records();
         for (const TransferRecordPtr &record : records) {
             if (record->state == TransferState::Interrupted) {
                 active = true;
+                activePeers.insert(record->peerId);
 
                 // 发送端每 5 秒主动请求一次续传；接收端等发送端的 resume
                 if (record->direction == TransferDirection::Send
@@ -1359,6 +1381,7 @@ void FileTransferManager::onNotifyTimer() {
                 continue;
 
             active = true;
+            activePeers.insert(record->peerId);
 
             // 兜底：任何路径漏了初始化时，从本拍开始计时，避免永远不触发停滞
             if (record->lastProgressMs == 0)
@@ -1366,17 +1389,23 @@ void FileTransferManager::onNotifyTimer() {
 
             // 15 秒没有任何 ACK / 数据块：转入 Interrupted 并尝试续传
             if (now - record->lastProgressMs >= kDataStallMs) {
-                const quint64 buffered =
-                    m_webrtc != nullptr
-                        ? m_webrtc->dataChannelBufferedAmount(
-                              record->peerId,
-                              QString::fromLatin1(TransferChannel::DataId))
-                        : 0;
-                LOG_WARN("Transfer") << "传输停滞:" << record->fileName
-                                     << "已传" << record->transferred
-                                     << "已确认" << record->peerReceived
-                                     << "速度" << record->speedBps
-                                     << "缓冲" << buffered;
+                if (record->direction == TransferDirection::Send) {
+                    const quint64 buffered =
+                        m_webrtc != nullptr
+                            ? m_webrtc->dataChannelBufferedAmount(
+                                  record->peerId,
+                                  QString::fromLatin1(TransferChannel::DataId))
+                            : 0;
+                    LOG_WARN("Transfer") << "传输停滞:" << record->fileName
+                                         << "已传" << record->transferred
+                                         << "已确认" << record->peerReceived
+                                         << "速度" << record->speedBps
+                                         << "缓冲" << buffered;
+                } else {
+                    LOG_WARN("Transfer") << "传输停滞:" << record->fileName
+                                         << "已写" << record->transferred
+                                         << "速度" << record->speedBps;
+                }
                 markInterrupted(record);
                 if (record->direction == TransferDirection::Send)
                     attemptResume(record);
@@ -1396,23 +1425,45 @@ void FileTransferManager::onNotifyTimer() {
                 }
             }
 
-            // 每 2 秒一条进度日志：窗口、ACK、SCTP 缓冲都能直接看出卡在哪
+            // 每 10 秒一条进度日志；发送端同时打印 ACK 和发送缓冲。
+            // 接收端的 peerReceived/buffered 没有意义，只打印已写字节和速度。
             if (now - record->lastLogMs >= kLogIntervalMs) {
                 record->lastLogMs = now;
-                const quint64 buffered =
-                    m_webrtc != nullptr
-                        ? m_webrtc->dataChannelBufferedAmount(
-                              record->peerId,
-                              QString::fromLatin1(TransferChannel::DataId))
-                        : 0;
-                LOG_DEBUG("Transfer") << "进度" << record->id << record->fileName
-                                      << record->transferred << "/" << record->totalBytes
-                                      << "ACK" << record->peerReceived
-                                      << "速度" << record->speedBps
-                                      << "缓冲" << buffered;
+                if (record->direction == TransferDirection::Send) {
+                    const quint64 buffered =
+                        m_webrtc != nullptr
+                            ? m_webrtc->dataChannelBufferedAmount(
+                                  record->peerId,
+                                  QString::fromLatin1(TransferChannel::DataId))
+                            : 0;
+                    LOG_DEBUG("Transfer") << "进度" << record->id << record->fileName
+                                          << record->transferred << "/" << record->totalBytes
+                                          << "ACK" << record->peerReceived
+                                          << "速度" << record->speedBps
+                                          << "缓冲" << buffered;
+                } else {
+                    LOG_DEBUG("Transfer") << "进度" << record->id << record->fileName
+                                          << record->transferred << "/" << record->totalBytes
+                                          << "速度" << record->speedBps;
+                }
             }
 
             model->updateRecord(record);
+        }
+    }
+
+    // 只有传输期间才采 GetStats；开始新传输时立即采一次，之后每 15 秒一次。
+    // 回调在 WebRTC 线程执行，只写一行日志，不阻塞发送/接收。
+    if (activePeers != m_statsPeers) {
+        m_statsPeers = activePeers;
+        m_lastStatsMs = 0;
+    }
+    if (!activePeers.isEmpty()
+        && (m_lastStatsMs == 0 || now - m_lastStatsMs >= kStatsIntervalMs)) {
+        m_lastStatsMs = now;
+        if (m_webrtc != nullptr) {
+            for (const QString &peerId : std::as_const(activePeers))
+                m_webrtc->requestDataChannelStats(peerId);
         }
     }
 

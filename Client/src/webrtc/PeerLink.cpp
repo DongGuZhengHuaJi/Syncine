@@ -7,11 +7,16 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 
 #include "WebrtcManager.h"
 #include "core/Log.h"
 #include "transfer/TransferChannels.h"
 
+#include "api/make_ref_counted.h"
+#include "api/stats/rtc_stats_collector_callback.h"
+#include "api/stats/rtc_stats_report.h"
+#include "api/stats/rtcstats_objects.h"
 #include "rtc_base/copy_on_write_buffer.h"
 #include "rtc_base/thread.h"
 
@@ -50,6 +55,127 @@ std::string describeStreams(const webrtc::scoped_refptr<webrtc::RtpReceiverInter
     }
     return result.empty() ? "<无>" : result;
 }
+
+QString formatBitrate(double bps) {
+    if (bps < 0)
+        return QStringLiteral("?");
+    if (bps >= 1000000.0)
+        return QStringLiteral("%1Mbps").arg(bps / 1000000.0, 0, 'f', 1);
+    return QStringLiteral("%1kbps").arg(bps / 1000.0, 0, 'f', 0);
+}
+
+QString formatBytes(uint64_t bytes) {
+    if (bytes >= 1024ull * 1024ull)
+        return QStringLiteral("%1MiB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1);
+    if (bytes >= 1024ull)
+        return QStringLiteral("%1KiB").arg(bytes / 1024.0, 0, 'f', 1);
+    return QStringLiteral("%1B").arg(bytes);
+}
+
+QString candidateType(const webrtc::RTCIceCandidateStats *candidate) {
+    if (candidate == nullptr)
+        return QStringLiteral("?");
+    return QString::fromStdString(candidate->candidate_type.value_or("?"));
+}
+
+// GetStats 回调。只在传输期间被低频调用，不持有 PeerLink，
+// 因此即使回调晚于 PeerLink 析构也不会踩到悬空指针。
+class StatsLogger : public webrtc::RTCStatsCollectorCallback {
+public:
+    StatsLogger(QString peerId, QString link)
+        : m_peerId(std::move(peerId)),
+          m_link(std::move(link)) {
+    }
+
+    void OnStatsDelivered(
+        const webrtc::scoped_refptr<const webrtc::RTCStatsReport> &report) override {
+        if (report == nullptr)
+            return;
+
+        const webrtc::RTCIceCandidatePairStats *pair = nullptr;
+        for (const auto *candidate :
+             report->GetStatsOfType<webrtc::RTCIceCandidatePairStats>()) {
+            if (!candidate->nominated.value_or(false))
+                continue;
+            if (candidate->state.value_or("") == "succeeded") {
+                pair = candidate;
+                break;
+            }
+            if (pair == nullptr)
+                pair = candidate;
+        }
+
+        QString localType = QStringLiteral("?");
+        QString remoteType = QStringLiteral("?");
+        double rtt = -1;
+        double outgoing = -1;
+        uint64_t bytesSent = 0;
+        uint64_t bytesReceived = 0;
+        uint64_t discarded = 0;
+        if (pair != nullptr) {
+            // candidate 对象有两种具体类型，GetAs<RTCIceCandidateStats> 会因
+            // type() 不匹配而取不到，必须用 local/remote 子类。
+            const auto *local = report->GetAs<webrtc::RTCLocalIceCandidateStats>(
+                pair->local_candidate_id.value_or(""));
+            const auto *remote = report->GetAs<webrtc::RTCRemoteIceCandidateStats>(
+                pair->remote_candidate_id.value_or(""));
+            localType = candidateType(local);
+            remoteType = candidateType(remote);
+            rtt = pair->current_round_trip_time.value_or(-1);
+            outgoing = pair->available_outgoing_bitrate.value_or(-1);
+            bytesSent = pair->bytes_sent.value_or(0);
+            bytesReceived = pair->bytes_received.value_or(0);
+            discarded = pair->packets_discarded_on_send.value_or(0);
+        }
+
+        int pairChanges = -1;
+        for (const auto *transport :
+             report->GetStatsOfType<webrtc::RTCTransportStats>()) {
+            if (!transport->selected_candidate_pair_id.has_value())
+                continue;
+            if (pair != nullptr && transport->selected_candidate_pair_id.value()
+                                       != pair->id()) {
+                continue;
+            }
+            pairChanges = static_cast<int>(
+                transport->selected_candidate_pair_changes.value_or(0));
+            break;
+        }
+
+        QString controlBytes = QStringLiteral("-");
+        QString dataBytes = QStringLiteral("-");
+        for (const auto *channel :
+             report->GetStatsOfType<webrtc::RTCDataChannelStats>()) {
+            const QString label = QString::fromStdString(channel->label.value_or(""));
+            const QString bytes = formatBytes(channel->bytes_sent.value_or(0))
+                                  + QStringLiteral("/")
+                                  + formatBytes(channel->bytes_received.value_or(0));
+            if (label.endsWith(QLatin1String(TransferChannel::ControlLabel)))
+                controlBytes = bytes;
+            else if (label.endsWith(QLatin1String(TransferChannel::DataLabel)))
+                dataBytes = bytes;
+        }
+
+        LOG_INFO("WebRTCStats") << m_peerId << m_link
+                                << "local=" << localType
+                                << "remote=" << remoteType
+                                << "rtt="
+                                << (rtt >= 0
+                                        ? QStringLiteral("%1ms").arg(rtt * 1000.0, 0, 'f', 1)
+                                        : QStringLiteral("?"))
+                                << "out=" << formatBitrate(outgoing)
+                                << "pairSent=" << formatBytes(bytesSent)
+                                << "pairRecv=" << formatBytes(bytesReceived)
+                                << "discarded=" << discarded
+                                << "pairChanges=" << pairChanges
+                                << "dc.ctl=" << controlBytes
+                                << "dc.data=" << dataBytes;
+    }
+
+private:
+    QString m_peerId;
+    QString m_link;
+};
 
 } // namespace
 
@@ -1067,6 +1193,16 @@ bool PeerLink::sendDataChannelMessage(const QString &channel, const QByteArray &
                                   static_cast<size_t>(data.size())),
         binary);
     return dataChannel->Send(buffer);
+}
+
+void PeerLink::requestDataChannelStats() {
+    if (m_connection == nullptr)
+        return;
+
+    // 每次新建回调对象：GetStats 是异步的，回调可能在本对象析构之后才到。
+    // StatsLogger 只持有 peerId/link 字符串，不碰 this。
+    auto callback = webrtc::make_ref_counted<StatsLogger>(m_peerId, linkId());
+    m_connection->GetStats(callback.get());
 }
 
 void PeerLink::emitError(const QString &message) {

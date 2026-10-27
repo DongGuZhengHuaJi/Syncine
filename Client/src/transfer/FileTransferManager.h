@@ -160,6 +160,10 @@ private:
     QTimer m_pumpTimer;    // 发送节拍（只有存在发送任务时运行）
     QTimer m_notifyTimer;  // 进度/速度刷新节拍
     QTimer m_healthTimer;  // 两条数据通道的 ping/pong
+    // GetStats 诊断：只在有传输时低频采样，避免空闲时刷日志。
+    // m_statsPeers 变化（开始/结束新传输）时立即采一次，之后每 15 秒一次。
+    QSet<QString> m_statsPeers;
+    qint64 m_lastStatsMs = 0;
     quint32 m_nextId = 1;
 };
 
