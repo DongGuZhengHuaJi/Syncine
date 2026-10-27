@@ -1,0 +1,111 @@
+name: windows
+
+# 只构建 Windows 客户端包，用于快速出包/复测。
+# 不创建 Release、不构建 Linux 客户端和服务端。
+# 步骤与 release.yml 的 windows job 保持一致；改那边时请同步这里。
+on:
+  push:
+    branches: ['feat/windows-only']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows 包
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.10.2'
+          arch: win64_msvc2022_64
+          modules: 'qtmultimedia qtwebsockets'
+          cache: true
+
+      - name: 下载随包工具（Windows 版）
+        shell: bash
+        # ffmpeg / yt-dlp 的 Windows 哈希本仓库没有验证过，脚本只会警告；
+        # 下载失败也不该挡住出包（Client/CMakeLists.txt 用 EXISTS 包住了 tools/）
+        continue-on-error: true
+        run: ./scripts/fetch-tools.sh
+
+      - name: 下载预编译 WebRTC
+        shell: pwsh
+        env:
+          WEBRTC_ASSET_URL: ${{ vars.WEBRTC_WINDOWS_ASSET_URL }}
+        run: |
+          if (-not $env:WEBRTC_ASSET_URL) {
+            Write-Error "未配置仓库变量 WEBRTC_WINDOWS_ASSET_URL"
+            exit 1
+          }
+          New-Item -ItemType Directory -Force webrtc | Out-Null
+          curl.exe -fL --retry 3 -o webrtc.zip "$env:WEBRTC_ASSET_URL"
+          7z x webrtc.zip -owebrtc
+
+          # 压缩包顶层可能是 webrtc-windows-x64-<rev>/，也可能是平铺的。
+          # 以 out/Default/obj/webrtc.lib 所在目录为准。
+          $root = $null
+          if (Test-Path "webrtc\out\Default\obj\webrtc.lib") {
+            $root = (Resolve-Path webrtc).Path
+          } else {
+            $candidate = Get-ChildItem webrtc -Directory | Where-Object {
+              Test-Path (Join-Path $_.FullName "out\Default\obj\webrtc.lib")
+            } | Select-Object -First 1
+            if ($candidate) { $root = $candidate.FullName }
+          }
+          if (-not $root) {
+            Write-Error "webrtc.zip 里找不到 out/Default/obj/webrtc.lib"
+            exit 1
+          }
+          "WEBRTC_ROOT=$root" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          Write-Host "WEBRTC_ROOT=$root"
+
+      # 客户端从 1.2.1 起依赖 zlib（直播弹幕的压缩包体）。
+      # 用 runner 自带 vcpkg 安装静态库；static-md 与 Qt/WebRTC 的 /MD 对齐。
+      - name: 安装 zlib
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install zlib:x64-windows-static-md
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 配置（MSVC + VS 生成器）
+        shell: pwsh
+        run: |
+          $zlibRoot = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md"
+          $zlibLib = Get-ChildItem "$zlibRoot\lib\*.lib" | Select-Object -First 1
+          if (-not $zlibLib) { throw "vcpkg zlib 静态库不存在: $zlibRoot\lib" }
+          cmake -S Client -B Client/build-release -G "Visual Studio 18 2026" -A x64 `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
+            -DZLIB_INCLUDE_DIR="$zlibRoot\include" `
+            -DZLIB_LIBRARY="$($zlibLib.FullName)" `
+            -DWEBRTC_ROOT="$env:WEBRTC_ROOT" `
+            -DWEBRTC_WIN_SYSTEM_LIBS="$env:WEBRTC_WIN_SYSTEM_LIBS"
+
+      - name: 构建
+        run: cmake --build Client/build-release --config Release --parallel
+
+      - name: 打包
+        working-directory: Client/build-release
+        run: cpack -C Release
+
+      - name: 生成校验和
+        shell: pwsh
+        working-directory: Client/build-release
+        run: |
+          Get-ChildItem Syncine-*.zip | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          } | Set-Content -Encoding ascii SHA256SUMS-Windows.txt
+          Get-Content SHA256SUMS-Windows.txt
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Syncine-Windows
+          path: |
+            Client/build-release/Syncine-*.zip
+            Client/build-release/SHA256SUMS-Windows.txt
