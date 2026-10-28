@@ -21,7 +21,7 @@ void MovieAudioSource::AddSink(webrtc::AudioTrackSinkInterface *sink) {
     // 这里有日志很重要：WebRTC 是在 AddTrack 时把自己的发送适配器挂进来的。
     // 如果这行**从未出现**,说明挂载没发生 —— 那么 pushPcm 会扇出给一个空表，
     // 数据就此消失（对端只会收到 WebRTC 自己产生的静音）。
-    LOG_INFO("MovieAudio") << "WebRTC 已挂入发送适配器" << static_cast<void *>(sink)
+    LOG_DEBUG("MovieAudio") << "WebRTC 已挂入发送适配器" << static_cast<void *>(sink)
                            << "(当前" << m_sinks.size() << "个)";
 }
 

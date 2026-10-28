@@ -534,7 +534,7 @@ void VideoTrackSource::AddOrUpdateSink(webrtc::VideoSinkInterface<webrtc::VideoF
             m_sinkCount.fetch_add(1, std::memory_order_relaxed);
     }
     if (inserted) {
-        LOG_INFO("VideoSource") << "编码器已接入,当前订阅者 ="
+        LOG_DEBUG("VideoSource") << "编码器已接入,当前订阅者 ="
                                 << m_sinkCount.load();
     }
 

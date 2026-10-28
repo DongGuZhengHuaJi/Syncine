@@ -615,7 +615,7 @@ bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataC
         // 需把用户选择的设备套回——缺少此步骤，每次进房都会静默回到默认设备。
         // （顺序有保证：引擎初始化走 worker 线程上的 BlockingCall，
         //  在 CreatePeerConnection 返回前即已完成。）
-        LOG_INFO("WebRTC") << "引擎初始化，重新套用用户选择的音频设备";
+        LOG_DEBUG("WebRTC") << "引擎初始化，重新套用用户选择的音频设备";
         applyDevice(true, m_desiredRecordingName, /*force=*/true);
         applyDevice(false, m_desiredPlayoutName, /*force=*/true);
     }
@@ -840,7 +840,7 @@ std::vector<WebrtcManager::DeviceInfo> WebrtcManager::enumerateDevicesOnWorker(b
     names.reserve(static_cast<int>(devices.size()));
     for (const DeviceInfo &device : devices)
         names << device.name;
-    LOG_INFO("WebRTC") << what << "设备" << devices.size() << "个:"
+    LOG_DEBUG("WebRTC") << what << "设备" << devices.size() << "个:"
                        << (names.isEmpty() ? QStringLiteral("(无)")
                                            : names.join(QStringLiteral(" / ")));
 
@@ -885,7 +885,7 @@ bool WebrtcManager::applyRecordingDeviceOnWorker(int index) {
     const QString name = deviceNameAt(m_voiceAdm.get(), true,
                                       useDefault ? defaultDeviceQueryIndex()
                                                  : static_cast<uint16_t>(index));
-    LOG_INFO("WebRTC") << "麦克风已切到"
+    LOG_DEBUG("WebRTC") << "麦克风已切到"
                        << (useDefault ? QStringLiteral("跟随系统默认:")
                                       : QString::number(index) + QStringLiteral(":"))
                        << (name.isEmpty() ? QStringLiteral("(取不到设备名)") : name)
@@ -928,7 +928,7 @@ bool WebrtcManager::applyPlayoutDeviceOnWorker(int index) {
     const QString name = deviceNameAt(m_voiceAdm.get(), false,
                                       useDefault ? defaultDeviceQueryIndex()
                                                  : static_cast<uint16_t>(index));
-    LOG_INFO("WebRTC") << "听筒已切到"
+    LOG_DEBUG("WebRTC") << "听筒已切到"
                        << (useDefault ? QStringLiteral("跟随系统默认:")
                                       : QString::number(index) + QStringLiteral(":"))
                        << (name.isEmpty() ? QStringLiteral("(取不到设备名)") : name)

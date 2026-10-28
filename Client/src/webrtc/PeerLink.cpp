@@ -487,7 +487,7 @@ void PeerLink::addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterf
 
     m_localAudioTrack = track;
 
-    LOG_INFO("PeerLink") << m_peerId << "已挂载本地音轨";
+    LOG_DEBUG("PeerLink") << m_peerId << "已挂载本地音轨";
 }
 
 void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterface> track,
@@ -525,7 +525,7 @@ void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterf
     m_videoSender = sender.value();
     pushVideoQuality(); // 新连接先把当前档位套上
 
-    LOG_INFO("PeerLink") << m_peerId << "已挂载本地视频轨"
+    LOG_DEBUG("PeerLink") << m_peerId << "已挂载本地视频轨"
                          << (sending ? "" : "(初始停发)");
 }
 
@@ -564,7 +564,7 @@ void PeerLink::addLocalMovieAudioTrack(
     // sender 留着：停发/恢复电影音轨要改它的 encodings[0].active
     m_movieAudioSender = sender.value();
 
-    LOG_INFO("PeerLink") << m_peerId << "已挂载本地电影音轨";
+    LOG_DEBUG("PeerLink") << m_peerId << "已挂载本地电影音轨";
 }
 
 void PeerLink::setAudioMuted(bool muted) {
@@ -1008,7 +1008,7 @@ void PeerLink::pushVideoQuality() {
             return;
         }
 
-        LOG_INFO("PeerLink") << m_peerId << "推送画质已设置: 码率上限"
+        LOG_DEBUG("PeerLink") << m_peerId << "推送画质已设置: 码率上限"
                              << (m_videoMaxBitrateBps > 0
                                      ? QString::number(m_videoMaxBitrateBps / 1000) + "kbps"
                                      : QStringLiteral("默认"))
@@ -1072,7 +1072,7 @@ void PeerLink::pushMovieAudioSending() {
             return;
         }
 
-        LOG_INFO("PeerLink") << m_peerId << (active ? "恢复发送电影音轨"
+        LOG_DEBUG("PeerLink") << m_peerId << (active ? "恢复发送电影音轨"
                                                     : "停止发送电影音轨");
     });
 }
@@ -1118,7 +1118,7 @@ void PeerLink::pushVideoSending() {
             return;
         }
 
-        LOG_INFO("PeerLink") << m_peerId << (active ? "恢复发送视频"
+        LOG_DEBUG("PeerLink") << m_peerId << (active ? "恢复发送视频"
                                                     : "停止发送视频");
     });
 }

@@ -55,6 +55,10 @@ bool isNoisy(absl::string_view message)
         "PacketBuffer is already at max size",
         "Clear PacketBuffer and request key frame",
         "Estimated available bandwidth",
+        "Packet received before we know if we are doing DTLS",
+        "DcSctpTransport",
+        "OnPeriodicRttUpdate",
+        "Failed to create histogram",
     };
     for (const char *pattern : patterns) {
         if (message.find(pattern) != absl::string_view::npos)
