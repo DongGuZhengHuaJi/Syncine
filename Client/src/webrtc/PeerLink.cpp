@@ -172,7 +172,7 @@ public:
                 dataBytes = bytes;
         }
 
-        LOG_INFO("WebRTCStats") << m_peerId << m_link
+        LOG_DEBUG("WebRTCStats") << m_peerId << m_link
                                 << "local=" << localType
                                 << "remote=" << remoteType
                                 << "rtt="
