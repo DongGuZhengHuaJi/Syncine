@@ -314,11 +314,13 @@ void UrlInspector::selectTier(const QString &spec)
 
 QString UrlInspector::selectionSpec() const
 {
-    // 手选的精确 id 优先（详情视图）
+    // 手选的精确 id 优先（详情视图）。加 id: 前缀，避免纯数字 id（30080/137）
+    // 被解析端当成分辨率档位，也避免 format_id 恰好等于 720/1080 时的歧义。
     if (!m_pickedVideoId.isEmpty()) {
-        return m_pickedAudioId.isEmpty() || m_pickedAudioId == m_pickedVideoId
+        const QString ids = m_pickedAudioId.isEmpty() || m_pickedAudioId == m_pickedVideoId
             ? m_pickedVideoId
             : QStringLiteral("%1+%2").arg(m_pickedVideoId, m_pickedAudioId);
+        return QStringLiteral("id:") + ids;
     }
 
     // 直播：档位 spec 就是某条流的 format_id,不带 HDR 后缀（直播的 HDR 由清单决定）。
