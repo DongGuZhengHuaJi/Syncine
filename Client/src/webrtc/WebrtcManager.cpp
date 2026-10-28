@@ -450,6 +450,28 @@ std::vector<webrtc::PeerConnectionInterface::IceServer> WebrtcManager::buildIceS
         servers.push_back(std::move(server));
     }
 
+    // 额外补一个双栈 STUN：服务端自建 coturn 的 STUN 往往只有 IPv4，
+    // libwebrtc 对 IPv6 host 候选会报 "STUN server address is incompatible"，
+    // 拿不到 IPv6 srflx。Cloudflare STUN 有 AAAA，能帮助两端走 IPv6 直连
+    // （尤其是手机热点这种 IPv4 在 CGNAT 后的网络）。不可达时只是多一条
+    // 候选错误，已在 WebRTC 日志里降噪。
+    bool hasDualStackStun = false;
+    for (const auto &server : servers) {
+        for (const std::string &url : server.urls) {
+            if (url.find("stun.cloudflare.com") != std::string::npos) {
+                hasDualStackStun = true;
+                break;
+            }
+        }
+        if (hasDualStackStun)
+            break;
+    }
+    if (!hasDualStackStun) {
+        webrtc::PeerConnectionInterface::IceServer extra;
+        extra.urls.push_back("stun:stun.cloudflare.com:3478");
+        servers.push_back(std::move(extra));
+    }
+
     return servers;
 }
 
@@ -1073,6 +1095,8 @@ void WebrtcManager::setVideoQuality(VideoQuality quality) {
         return;
 
     m_videoQuality = quality;
+    if (m_videoSource != nullptr)
+        m_videoSource->setMaxEncodeHeight(presetForQuality(quality).targetHeight);
     applyQualityToAll();
 
     const VideoQualityPreset preset = presetForQuality(quality);
@@ -1087,6 +1111,9 @@ void WebrtcManager::applyQualityToLink(PeerLink *link) {
         return;
 
     const VideoQualityPreset preset = presetForQuality(m_videoQuality);
+    // 发送端转换阶段也按同一目标缩小；Original(0) 保持源分辨率。
+    if (m_videoSource != nullptr)
+        m_videoSource->setMaxEncodeHeight(preset.targetHeight);
     int maxBitrate = preset.maxBitrateBps;
     // 文件传输期间给视频封顶；传输结束后 setTransferActive(false) 会恢复。
     if (m_transferActive)

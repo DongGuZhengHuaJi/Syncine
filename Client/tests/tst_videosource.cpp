@@ -32,14 +32,20 @@ public:
         if (m_count > 0 && ts <= m_lastTimestampUs)
             m_nonIncreasing = true;
         m_lastTimestampUs = ts;
+        m_lastWidth = frame.width();
+        m_lastHeight = frame.height();
         ++m_count;
     }
 
     int count() const { return m_count; }
     bool nonIncreasing() const { return m_nonIncreasing; }
+    int lastWidth() const { return m_lastWidth; }
+    int lastHeight() const { return m_lastHeight; }
 
 private:
     int m_count = 0;
+    int m_lastWidth = 0;
+    int m_lastHeight = 0;
     int64_t m_lastTimestampUs = 0;
     bool m_nonIncreasing = false;
 };
@@ -102,6 +108,13 @@ int main(int argc, char **argv)
         CHECK(waitFor(sink, kFrames));
         CHECK(sink.count() == kFrames);
         CHECK(!sink.nonIncreasing());
+
+        // 编码前缩放：64x48 的短边 48 → 24，输出 32x24。
+        source.setMaxEncodeHeight(24);
+        source.pushQtFrame(makeYuvFrame(64, 48));
+        CHECK(waitFor(sink, kFrames + 1));
+        CHECK(sink.lastWidth() == 32);
+        CHECK(sink.lastHeight() == 24);
 
         source.RemoveSink(&sink);
         CHECK(source.sinkCount() == 0);

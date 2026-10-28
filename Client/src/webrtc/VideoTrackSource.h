@@ -54,6 +54,10 @@ public:
     // 信号驱动（接线在 main.cpp）。GUI 线程调用。
     void pushQtFrame(const QVideoFrame &frame);
 
+    // 编码前的目标短边高度（例如 1080）。0 = 不缩放。
+    // 在转换阶段先把 4K 源缩到 1080p，避免整帧 I420 转换/分配拖垮 GUI/CPU。
+    void setMaxEncodeHeight(int height);
+
     // 当前订阅者数量
     int sinkCount() const {
         return m_sinkCount.load(std::memory_order_relaxed);
@@ -132,6 +136,7 @@ private:
     std::atomic<int> m_width{0};
     std::atomic<int> m_height{0};
     std::atomic<bool> m_hasReceivedFrame{false};
+    std::atomic<int> m_maxEncodeHeight{0};
 
     // 上一帧的单调时间戳，用于保证严格递增。只在 GUI 线程访问。
     int64_t m_lastTimestampUs = 0;
@@ -145,6 +150,7 @@ private:
     bool m_stopWorker = false;
     bool m_workerStarted = false;
     std::atomic<int> m_droppedJobs{0};
+    std::atomic<int> m_pushedFrames{0};
 };
 
 #endif //SYNCINE_VIDEOTRACKSOURCE_H

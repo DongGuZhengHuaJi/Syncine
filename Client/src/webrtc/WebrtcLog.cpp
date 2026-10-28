@@ -20,6 +20,34 @@ Log::Level levelOf(webrtc::LoggingSeverity severity)
     return Log::Level::Error;
 }
 
+// WebRTC 里有一批“预期内但每帧/每秒都刷”的消息：哑声卡没有 playout delay、
+// IPv4 STUN 服务器配 IPv6 host 候选、TURN 对私有 peer 地址的 403 等。
+// 它们不是我们要处理的故障，按 Trace 记录：默认 Info 看不到，开 trace 仍可查。
+bool isNoisy(absl::string_view message)
+{
+    static const char *patterns[] = {
+        "failed to retrieve the playout delay",
+        "Unable to set playout device",
+        "Failed to initialize recording",
+        "Can't query latency",
+        "STUN server address is incompatible",
+        "TURN allocate request",
+        "CreatePermission error response",
+        "create permission error response",
+        "Not adding candidate because the JsepTransport",
+        "Discarding candidate because port is already done gathering",
+        "COM already initialized with a different apartment model",
+        "AudioDeviceWindowsCore::~AudioDeviceWindowsCore",
+        "Will not log any `WebRTC.Audio",
+        "DataChannelObserver - adapter needed",
+    };
+    for (const char *pattern : patterns) {
+        if (message.find(pattern) != absl::string_view::npos)
+            return true;
+    }
+    return false;
+}
+
 class Sink : public webrtc::LogSink {
 public:
     // 带级别的那一版才是实际入口：分发时调的就是它（logging.cc:286，每个 sink
@@ -27,7 +55,9 @@ public:
     void OnLogMessage(const webrtc::LogLineRef &line) override
     {
         const absl::string_view message = line.message();
-        Log::write(levelOf(line.severity()), "WebRTC",
+        const Log::Level level = isNoisy(message) ? Log::Level::Trace
+                                                   : levelOf(line.severity());
+        Log::write(level, "WebRTC",
                    QString::fromUtf8(message.data(), static_cast<int>(message.size())));
     }
 

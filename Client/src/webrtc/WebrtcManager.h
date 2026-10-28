@@ -465,7 +465,9 @@ private:
     double m_remoteChatVolume = 1.0;
 
     // 当前推送画质。默认为原画（不额外设限）
-    VideoQuality m_videoQuality = VideoQuality::Original;
+    // 默认高清 1080p：4K 源在共享模式下会按目标分辨率前置缩小，
+    // 避免软件编码/整帧转换把普通机器拖垮。需要原画可在播放控制条切换。
+    VideoQuality m_videoQuality = VideoQuality::Hd;
 
     // 电影音轨是否真正发送。默认 true；启动后由 main 按房间模式对齐
     // （非共享模式会立刻置 false）。

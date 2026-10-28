@@ -9,6 +9,8 @@
 #include <string>
 #include <utility>
 
+#include <QTimer>
+
 #include "WebrtcManager.h"
 #include "core/Log.h"
 #include "transfer/TransferChannels.h"
@@ -72,12 +74,6 @@ QString formatBytes(uint64_t bytes) {
     return QStringLiteral("%1B").arg(bytes);
 }
 
-QString candidateType(const webrtc::RTCIceCandidateStats *candidate) {
-    if (candidate == nullptr)
-        return QStringLiteral("?");
-    return QString::fromStdString(candidate->candidate_type.value_or("?"));
-}
-
 // GetStats 回调。只在传输期间被低频调用，不持有 PeerLink，
 // 因此即使回调晚于 PeerLink 析构也不会踩到悬空指针。
 class StatsLogger : public webrtc::RTCStatsCollectorCallback {
@@ -112,6 +108,26 @@ public:
         uint64_t bytesSent = 0;
         uint64_t bytesReceived = 0;
         uint64_t discarded = 0;
+
+        // 把候选类型、协议、地址一起打出来：排查“是否走 IPv6 直连/中继”
+        // 时，只看 host/relay 不够，还要看到底是 v4 还是 v6。
+        auto describeCandidate = [](const webrtc::RTCIceCandidateStats *candidate) {
+            if (candidate == nullptr)
+                return QStringLiteral("?");
+            QString text = QString::fromStdString(
+                candidate->candidate_type.value_or("?"));
+            const std::string protocol = candidate->protocol.value_or("");
+            if (!protocol.empty())
+                text += QStringLiteral("/") + QString::fromStdString(protocol);
+            const std::string address = candidate->address.value_or("");
+            if (!address.empty()) {
+                text += QStringLiteral("@") + QString::fromStdString(address);
+                if (candidate->port.has_value())
+                    text += QStringLiteral(":") + QString::number(*candidate->port);
+            }
+            return text;
+        };
+
         if (pair != nullptr) {
             // candidate 对象有两种具体类型，GetAs<RTCIceCandidateStats> 会因
             // type() 不匹配而取不到，必须用 local/remote 子类。
@@ -119,8 +135,8 @@ public:
                 pair->local_candidate_id.value_or(""));
             const auto *remote = report->GetAs<webrtc::RTCRemoteIceCandidateStats>(
                 pair->remote_candidate_id.value_or(""));
-            localType = candidateType(local);
-            remoteType = candidateType(remote);
+            localType = describeCandidate(local);
+            remoteType = describeCandidate(remote);
             rtt = pair->current_round_trip_time.value_or(-1);
             outgoing = pair->available_outgoing_bitrate.value_or(-1);
             bytesSent = pair->bytes_sent.value_or(0);
@@ -645,6 +661,12 @@ void PeerLink::reportConnected() {
         return;
     m_connectedReported = true;
     emit connected(m_peerId, linkId());
+
+    // media 连接建立 3 秒后采一次 GetStats：无需文件传输也能看到最终选中的
+    // candidate 类型/协议/地址（IPv6 直连还是 relay）。只采一次，避免刷日志。
+    if (m_kind == LinkKind::Media) {
+        QTimer::singleShot(3000, this, [this]() { requestDataChannelStats(); });
+    }
 }
 
 void PeerLink::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState state) {

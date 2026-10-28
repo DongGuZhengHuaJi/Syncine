@@ -555,7 +555,14 @@ void RoomSession::handleVideoStatus(const Protocol::Message &message) {
     // 只有属于当前条目的状态才有效：切模式/切条目后，旧条目的延迟上报
     // （不论是 loaded=true 还是卸载）都会把成员表改回旧状态，误导门禁。
     const QString currentItem = m_playlist->currentItemId();
-    if (message.itemId != currentItem) {
+
+    // 例外：共享模式的观众按设计拿到的是空列表，没有 currentItem。它需要
+    // 接受房主上报的 duration/loaded 才能显示总时长并允许拖动进度条。
+    // 服务端已经按“房间当前条目 + seq”过滤，不会把旧条目的状态转过来。
+    const bool shareViewer = m_inRoom && m_roomMode == RoomMode::Share && !isHost();
+    const bool matchesCurrent = !currentItem.isEmpty() && message.itemId == currentItem;
+
+    if (!matchesCurrent && !shareViewer) {
         LOG_DEBUG("Room") << "忽略旧条目的视频状态: clientId=" << message.clientId
                           << " itemId=" << message.itemId.left(8);
         return;
@@ -564,8 +571,8 @@ void RoomSession::handleVideoStatus(const Protocol::Message &message) {
     m_members->setVideoStatus(message.clientId, message.loaded, message.duration);
 
     // 条目时长在添加时未知，由加载它的成员一并告知列表。
-    // video_status 现在带 itemId，只有当前条目的状态才会更新列表时长。
-    if (message.loaded && message.duration > 0 && !currentItem.isEmpty())
+    // 共享模式观众的列表为空，不需要（也无法）更新条目时长。
+    if (message.loaded && message.duration > 0 && matchesCurrent)
         m_playlist->setDuration(currentItem, message.duration);
 }
 

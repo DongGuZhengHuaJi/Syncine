@@ -14,6 +14,7 @@
 #include "api/video/i420_buffer.h"
 #include "api/video/nv12_buffer.h"
 #include "libyuv/convert.h"
+#include "libyuv/scale.h"
 #include "libyuv/video_common.h"
 #include "rtc_base/time_utils.h"
 
@@ -68,6 +69,10 @@ VideoTrackSource::VideoTrackSource() {
 
 VideoTrackSource::~VideoTrackSource() {
     shutdown();
+}
+
+void VideoTrackSource::setMaxEncodeHeight(int height) {
+    m_maxEncodeHeight.store(qMax(0, height), std::memory_order_relaxed);
 }
 
 void VideoTrackSource::shutdown() {
@@ -188,6 +193,20 @@ void VideoTrackSource::workerLoop() {
         } else if (job.readyFrame.has_value()) {
             pushFrame(*job.readyFrame);
         }
+
+        // 每 300 帧一条 Info（24fps 下约 12 秒）：排查“推流卡/内存涨”时，
+        // 队列深度和丢帧数比逐帧日志有用得多。
+        const int pushed = m_pushedFrames.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (pushed % 300 == 0) {
+            size_t queued = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_queueMutex);
+                queued = m_jobs.size();
+            }
+            LOG_INFO("VideoSource") << "已推送" << pushed << "帧, 队列" << queued
+                                    << "丢帧" << m_droppedJobs.load()
+                                    << "订阅者" << sinkCount();
+        }
     }
 }
 
@@ -263,9 +282,6 @@ std::optional<webrtc::VideoFrame> VideoTrackSource::convertQtFrame(
     // 缓冲区交给 WebRTC —— 必须按行搬一遍，把填充去掉。
     //
     // 行距传错的症状是画面逐行错位（斜切）,而且不会有任何报错。
-    webrtc::scoped_refptr<webrtc::I420Buffer> buffer =
-        webrtc::I420Buffer::Create(width, height);
-
     const uint8_t *srcY = mapped.bits(0);
     const int srcStrideY = mapped.bytesPerLine(0);
     const uint8_t *srcU = mapped.planeCount() > 1 ? mapped.bits(1) : nullptr;
@@ -273,90 +289,202 @@ std::optional<webrtc::VideoFrame> VideoTrackSource::convertQtFrame(
     const uint8_t *srcV = mapped.planeCount() > 2 ? mapped.bits(2) : nullptr;
     const int srcStrideV = mapped.planeCount() > 2 ? mapped.bytesPerLine(2) : 0;
 
+    // 编码前缩放：4K 源按目标短边（默认档位 1080p）缩到目标尺寸。
+    // 目的不是画质，而是避免每帧对 4096×2160 做完整 I420 转换/分配，
+    // 那会在 Windows 等机器上把 CPU/内存拖垮。
+    int outWidth = width;
+    int outHeight = height;
+    const int maxEncodeHeight = m_maxEncodeHeight.load(std::memory_order_relaxed);
+    if (maxEncodeHeight > 0) {
+        const int shortSide = qMin(width, height);
+        if (shortSide > maxEncodeHeight) {
+            const double factor = static_cast<double>(maxEncodeHeight) / shortSide;
+            outWidth = qMax(2, (static_cast<int>(width * factor) + 1) & ~1);
+            outHeight = qMax(2, (static_cast<int>(height * factor) + 1) & ~1);
+        }
+    }
+    const bool scaleNeeded = outWidth != width || outHeight != height;
+
+    // 前几帧打 Info：Windows 上 handleType 决定转换是否真的在 worker 里跑。
+    // 如果这里不是 NoHandle，说明转换回退到了 GUI 线程，4K 源会明显卡顿。
+    static std::atomic<int> frameInfoCount{0};
+    if (frameInfoCount.fetch_add(1, std::memory_order_relaxed) < 3) {
+        LOG_INFO("VideoSource") << "源帧" << width << "x" << height
+                                << "→ 编码" << outWidth << "x" << outHeight
+                                << " pixelFormat=" << static_cast<int>(pixelFormat)
+                                << " handleType=" << static_cast<int>(mapped.handleType())
+                                << (mapped.handleType() == QVideoFrame::NoHandle
+                                        ? "(worker 转换)"
+                                        : "(GUI 回退转换)");
+    }
+
+    webrtc::scoped_refptr<webrtc::I420Buffer> buffer;
     int ret = 0;
+    bool scaledDirectly = false;
 
-    if (pixelFormat == QVideoFrameFormat::Format_P010) {
-        // 10bit 半平面（P010），HDR 内容走这条。libyuv 无 P010→I420 的一步转换，
-        // 故先降为 8bit 的 NV12 再复用下方路径。此步只降位深、不做色调映射，
-        // 观众看到的是「HDR 当 SDR 用」（偏暗发灰），非本机的过曝。
-        // **步进单位为元素而非字节**：libyuv 的 16bit 函数将 stride 直接用于
-        // uint16_t* 指针运算，故须除以 2；传字节数会导致画面逐行错位且无任何报错。
-        auto nv12 = webrtc::NV12Buffer::Create(width, height);
-        ret = libyuv::P010ToNV12(
-            reinterpret_cast<const uint16_t *>(srcY), srcStrideY / 2,
-            reinterpret_cast<const uint16_t *>(srcU), srcStrideU / 2,
-            nv12->MutableDataY(), nv12->StrideY(),
-            nv12->MutableDataUV(), nv12->StrideUV(),
-            width, height);
-
+    // 常见格式直接在源平面上缩放，跳过整帧 4K I420 的分配与搬运。
+    if (scaleNeeded && fourcc == libyuv::FOURCC_I420) {
+        buffer = webrtc::I420Buffer::Create(outWidth, outHeight);
+        ret = libyuv::I420Scale(
+            srcY, srcStrideY, srcU, srcStrideU, srcV, srcStrideV, width, height,
+            buffer->MutableDataY(), buffer->StrideY(),
+            buffer->MutableDataU(), buffer->StrideU(),
+            buffer->MutableDataV(), buffer->StrideV(),
+            outWidth, outHeight, libyuv::kFilterBox);
+        scaledDirectly = true;
+    } else if (scaleNeeded && fourcc == libyuv::FOURCC_NV12) {
+        auto scaledNv12 = webrtc::NV12Buffer::Create(outWidth, outHeight);
+        ret = libyuv::NV12Scale(
+            srcY, srcStrideY, srcU, srcStrideU, width, height,
+            scaledNv12->MutableDataY(), scaledNv12->StrideY(),
+            scaledNv12->MutableDataUV(), scaledNv12->StrideUV(),
+            outWidth, outHeight, libyuv::kFilterBox);
         if (ret == 0) {
+            buffer = webrtc::I420Buffer::Create(outWidth, outHeight);
             ret = libyuv::NV12ToI420(
+                scaledNv12->MutableDataY(), scaledNv12->StrideY(),
+                scaledNv12->MutableDataUV(), scaledNv12->StrideUV(),
+                buffer->MutableDataY(), buffer->StrideY(),
+                buffer->MutableDataU(), buffer->StrideU(),
+                buffer->MutableDataV(), buffer->StrideV(),
+                outWidth, outHeight);
+        }
+        scaledDirectly = true;
+    } else if (scaleNeeded && fourcc == libyuv::FOURCC_NV21) {
+        // libyuv 没有 NV21Scale：Y/UV 平面各自 ScalePlane，UV 仍是 VU 顺序。
+        auto scaledNv21 = webrtc::NV12Buffer::Create(outWidth, outHeight);
+        const int srcChromaWidth = (width + 1) / 2;
+        const int srcChromaHeight = (height + 1) / 2;
+        const int dstChromaWidth = (outWidth + 1) / 2;
+        const int dstChromaHeight = (outHeight + 1) / 2;
+        ret = libyuv::ScalePlane(srcY, srcStrideY, width, height,
+                                 scaledNv21->MutableDataY(), scaledNv21->StrideY(),
+                                 outWidth, outHeight, libyuv::kFilterBox);
+        if (ret == 0) {
+            ret = libyuv::ScalePlane(srcU, srcStrideU, srcChromaWidth,
+                                     srcChromaHeight,
+                                     scaledNv21->MutableDataUV(),
+                                     scaledNv21->StrideUV(),
+                                     dstChromaWidth, dstChromaHeight,
+                                     libyuv::kFilterBox);
+        }
+        if (ret == 0) {
+            buffer = webrtc::I420Buffer::Create(outWidth, outHeight);
+            ret = libyuv::NV21ToI420(
+                scaledNv21->MutableDataY(), scaledNv21->StrideY(),
+                scaledNv21->MutableDataUV(), scaledNv21->StrideUV(),
+                buffer->MutableDataY(), buffer->StrideY(),
+                buffer->MutableDataU(), buffer->StrideU(),
+                buffer->MutableDataV(), buffer->StrideV(),
+                outWidth, outHeight);
+        }
+        scaledDirectly = true;
+    }
+
+    if (!scaledDirectly) {
+        buffer = webrtc::I420Buffer::Create(width, height);
+    }
+
+    if (!scaledDirectly) {
+        if (pixelFormat == QVideoFrameFormat::Format_P010) {
+            // 10bit 半平面（P010），HDR 内容走这条。libyuv 无 P010→I420 的一步转换，
+            // 故先降为 8bit 的 NV12 再复用下方路径。此步只降位深、不做色调映射，
+            // 观众看到的是「HDR 当 SDR 用」（偏暗发灰），非本机的过曝。
+            // **步进单位为元素而非字节**：libyuv 的 16bit 函数将 stride 直接用于
+            // uint16_t* 指针运算，故须除以 2；传字节数会导致画面逐行错位且无任何报错。
+            auto nv12 = webrtc::NV12Buffer::Create(width, height);
+            ret = libyuv::P010ToNV12(
+                reinterpret_cast<const uint16_t *>(srcY), srcStrideY / 2,
+                reinterpret_cast<const uint16_t *>(srcU), srcStrideU / 2,
                 nv12->MutableDataY(), nv12->StrideY(),
                 nv12->MutableDataUV(), nv12->StrideUV(),
+                width, height);
+
+            if (ret == 0) {
+                ret = libyuv::NV12ToI420(
+                    nv12->MutableDataY(), nv12->StrideY(),
+                    nv12->MutableDataUV(), nv12->StrideUV(),
+                    buffer->MutableDataY(), buffer->StrideY(),
+                    buffer->MutableDataU(), buffer->StrideU(),
+                    buffer->MutableDataV(), buffer->StrideV(),
+                    width, height);
+            }
+        } else if (pixelFormat == QVideoFrameFormat::Format_YUV420P10) {
+            // 10bit 三平面（I010）：三块 16bit 平面，同样为元素步进。
+            // 此处不涉及上方 NV12 的「显式传 UV 指针」问题——三平面各给各的指针，
+            // libyuv 无需推算偏移。
+            ret = libyuv::I010ToI420(
+                reinterpret_cast<const uint16_t *>(srcY), srcStrideY / 2,
+                reinterpret_cast<const uint16_t *>(srcU), srcStrideU / 2,
+                reinterpret_cast<const uint16_t *>(srcV), srcStrideV / 2,
+                buffer->MutableDataY(), buffer->StrideY(),
+                buffer->MutableDataU(), buffer->StrideU(),
+                buffer->MutableDataV(), buffer->StrideV(),
+                width, height);
+        } else if (fourcc == libyuv::FOURCC_I420) {
+            // 源已是 I420（三平面分离），行距可能大于宽度（存在填充）。
+            // **必须用 I420Copy，不可用 ConvertToI420**：后者在 FOURCC_I420 模式下
+            // 将三平面视为紧邻连续存放并自行计算平面偏移，从而忽略传入的行距、
+            // 把填充字节当作内容读取；症状为第 0 行正确、第 1 行起全错。
+            ret = libyuv::I420Copy(
+                srcY, srcStrideY,
+                srcU, srcStrideU,
+                srcV, srcStrideV,
+                buffer->MutableDataY(), buffer->StrideY(),
+                buffer->MutableDataU(), buffer->StrideU(),
+                buffer->MutableDataV(), buffer->StrideV(),
+                width, height);
+        } else if (fourcc == libyuv::FOURCC_NV12) {
+            // NV12：一个 Y 平面 + 一个 UV 交错平面。
+            // **必须显式传 UV 指针，不可用 ConvertToI420**：后者按
+            // src_uv = src_y + src_stride_y * src_height 自行推算 UV 位置，
+            // 该式仅在解码缓冲行数等于显示高度时成立。而 H.264 宏块为 16×16，
+            // 解码器按向上取整到 16 的倍数分配缓冲；显示尺寸非 16 倍数时
+            // （实测 1916×1036，缓冲为 1920×1040）UV 实际位置前移，
+            // 推算结果落在 Y 数据中，表现为色块错位甚至整幅斜切。
+            // NV12ToI420 直接接收 UV 指针、不做任何假设，两种情况均正确。
+            ret = libyuv::NV12ToI420(
+                srcY, srcStrideY,
+                srcU, srcStrideU,           // ← 用 Qt 给的实际 UV 指针,而不是推算出来的
+                buffer->MutableDataY(), buffer->StrideY(),
+                buffer->MutableDataU(), buffer->StrideU(),
+                buffer->MutableDataV(), buffer->StrideV(),
+                width, height);
+        } else if (fourcc == libyuv::FOURCC_NV21) {
+            // NV21 与 NV12 只差 UV 两个分量的先后顺序，同样的道理。
+            ret = libyuv::NV21ToI420(
+                srcY, srcStrideY,
+                srcU, srcStrideU,
+                buffer->MutableDataY(), buffer->StrideY(),
+                buffer->MutableDataU(), buffer->StrideU(),
+                buffer->MutableDataV(), buffer->StrideV(),
+                width, height);
+        } else {
+            // YUY2 是单平面打包格式，没有第二个平面可传，不存在上面那个问题。
+            ret = libyuv::YUY2ToI420(
+                srcY, srcStrideY,
                 buffer->MutableDataY(), buffer->StrideY(),
                 buffer->MutableDataU(), buffer->StrideU(),
                 buffer->MutableDataV(), buffer->StrideV(),
                 width, height);
         }
-    } else if (pixelFormat == QVideoFrameFormat::Format_YUV420P10) {
-        // 10bit 三平面（I010）：三块 16bit 平面，同样为元素步进。
-        // 此处不涉及上方 NV12 的「显式传 UV 指针」问题——三平面各给各的指针，
-        // libyuv 无需推算偏移。
-        ret = libyuv::I010ToI420(
-            reinterpret_cast<const uint16_t *>(srcY), srcStrideY / 2,
-            reinterpret_cast<const uint16_t *>(srcU), srcStrideU / 2,
-            reinterpret_cast<const uint16_t *>(srcV), srcStrideV / 2,
-            buffer->MutableDataY(), buffer->StrideY(),
-            buffer->MutableDataU(), buffer->StrideU(),
-            buffer->MutableDataV(), buffer->StrideV(),
-            width, height);
-    } else if (fourcc == libyuv::FOURCC_I420) {
-        // 源已是 I420（三平面分离），行距可能大于宽度（存在填充）。
-        // **必须用 I420Copy，不可用 ConvertToI420**：后者在 FOURCC_I420 模式下
-        // 将三平面视为紧邻连续存放并自行计算平面偏移，从而忽略传入的行距、
-        // 把填充字节当作内容读取；症状为第 0 行正确、第 1 行起全错。
-        ret = libyuv::I420Copy(
-            srcY, srcStrideY,
-            srcU, srcStrideU,
-            srcV, srcStrideV,
-            buffer->MutableDataY(), buffer->StrideY(),
-            buffer->MutableDataU(), buffer->StrideU(),
-            buffer->MutableDataV(), buffer->StrideV(),
-            width, height);
-    } else if (fourcc == libyuv::FOURCC_NV12) {
-        // NV12：一个 Y 平面 + 一个 UV 交错平面。
-        // **必须显式传 UV 指针，不可用 ConvertToI420**：后者按
-        // src_uv = src_y + src_stride_y * src_height 自行推算 UV 位置，
-        // 该式仅在解码缓冲行数等于显示高度时成立。而 H.264 宏块为 16×16，
-        // 解码器按向上取整到 16 的倍数分配缓冲；显示尺寸非 16 倍数时
-        // （实测 1916×1036，缓冲为 1920×1040）UV 实际位置前移，
-        // 推算结果落在 Y 数据中，表现为色块错位甚至整幅斜切。
-        // NV12ToI420 直接接收 UV 指针、不做任何假设，两种情况均正确。
-        ret = libyuv::NV12ToI420(
-            srcY, srcStrideY,
-            srcU, srcStrideU,           // ← 用 Qt 给的实际 UV 指针,而不是推算出来的
-            buffer->MutableDataY(), buffer->StrideY(),
-            buffer->MutableDataU(), buffer->StrideU(),
-            buffer->MutableDataV(), buffer->StrideV(),
-            width, height);
-    } else if (fourcc == libyuv::FOURCC_NV21) {
-        // NV21 与 NV12 只差 UV 两个分量的先后顺序，同样的道理。
-        ret = libyuv::NV21ToI420(
-            srcY, srcStrideY,
-            srcU, srcStrideU,
-            buffer->MutableDataY(), buffer->StrideY(),
-            buffer->MutableDataU(), buffer->StrideU(),
-            buffer->MutableDataV(), buffer->StrideV(),
-            width, height);
-    } else {
-        // YUY2 是单平面打包格式，没有第二个平面可传，不存在上面那个问题。
-        ret = libyuv::YUY2ToI420(
-            srcY, srcStrideY,
-            buffer->MutableDataY(), buffer->StrideY(),
-            buffer->MutableDataU(), buffer->StrideU(),
-            buffer->MutableDataV(), buffer->StrideV(),
-            width, height);
-    }
+
+        // 10bit / YUY2 等少见的格式：先按原尺寸转 I420，再缩到目标尺寸。
+        if (ret == 0 && scaleNeeded) {
+            webrtc::scoped_refptr<webrtc::I420Buffer> scaled =
+                webrtc::I420Buffer::Create(outWidth, outHeight);
+            ret = libyuv::I420Scale(
+                buffer->DataY(), buffer->StrideY(),
+                buffer->DataU(), buffer->StrideU(),
+                buffer->DataV(), buffer->StrideV(), width, height,
+                scaled->MutableDataY(), scaled->StrideY(),
+                scaled->MutableDataU(), scaled->StrideU(),
+                scaled->MutableDataV(), scaled->StrideV(),
+                outWidth, outHeight, libyuv::kFilterBox);
+            if (ret == 0)
+                buffer = scaled;
+        }
+    } // !scaledDirectly
 
     const int rotationAngle = mapped.rotationAngle();
 
