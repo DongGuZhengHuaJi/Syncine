@@ -244,7 +244,7 @@ jobs:
   # 避免多个 job 同时创建 Release / 上传资产时互相打架。
   # ====================================================================
   server:
-    name: 服务端包
+    name: Linux 服务端包
     needs: linux
     runs-on: ubuntu-24.04
     steps:

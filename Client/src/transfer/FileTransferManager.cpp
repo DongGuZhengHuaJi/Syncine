@@ -33,9 +33,11 @@ constexpr int kPumpIntervalMs = 10;
 constexpr int kNotifyIntervalMs = 200;
 
 // 发送窗口：已读出但尚未被接收端 ACK 的字节数上限。
-// 接收端每 128KB 或 100ms 回报一次。默认 2MB；可用环境变量
-// SYNCINE_TRANSFER_WINDOW_KB 覆盖（128–16384），方便在长 RTT 链路上做对照。
-constexpr qint64 kDefaultSendWindowBytes = 2 * 1024 * 1024;
+// 接收端每 128KB 或 100ms 回报一次。默认 512KB；可用环境变量
+// SYNCINE_TRANSFER_WINDOW_KB 覆盖（128–16384）。
+// 512KB 在 100ms RTT / 6Mbps 下约为 BDP 的 7 倍，足够填满链路，
+// 又不会像 2MB 那样把 relay/SCTP 队列压得过长。
+constexpr qint64 kDefaultSendWindowBytes = 512 * 1024;
 const qint64 kSendWindowBytes = [] {
     bool ok = false;
     const int kb = qEnvironmentVariableIntValue("SYNCINE_TRANSFER_WINDOW_KB", &ok);
@@ -49,9 +51,9 @@ constexpr qint64 kAckIntervalMs = 100;
 // 数据通道自己的 SCTP 发送缓冲水位。应用层窗口已经限制了在途量，
 // 这里只是第二道保险，避免 SCTP 队列无界增长。
 const qint64 kSendBufferHighWater =
-    qMax<qint64>(4 * 1024 * 1024, kSendWindowBytes + 1024 * 1024);
+    qMax<qint64>(1024 * 1024, kSendWindowBytes + 512 * 1024);
 const qint64 kSendBufferLowWater =
-    qMax<qint64>(1024 * 1024, kSendBufferHighWater / 4);
+    qMax<qint64>(256 * 1024, kSendBufferHighWater / 4);
 // 断线后等待 P2P 恢复/续传的最长时间
 constexpr qint64 kInterruptedGraceMs = 60 * 1000;
 
