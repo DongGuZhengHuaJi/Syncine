@@ -80,18 +80,21 @@ private:
     struct PendingFrame {
         QVideoFrame qtFrame;
         int64_t arrivalUs = 0;
+        int64_t mediaTimestampUs = 0;
     };
 
     // worker 线程：取帧 → ToI420/组装 → 投递到 GUI
     void workerLoop();
     // worker/GUI 回退路径共用：把一帧 WebRTC 画面转成 QVideoFrame。
     std::optional<QVideoFrame> convertToQtFrame(const webrtc::VideoFrame &frame);
-    // GUI 线程：worker 转换完成后入排期队列（generation 不匹配说明已 reset）。
-    void scheduleConverted(QVideoFrame frame, int64_t arrivalUs,
-                           int64_t mediaTimestampUs, uint64_t generation);
+    // GUI 线程：把 worker 已转换的帧搬到排期队列。
+    void drainConverted();
     // GUI 线程：worker 关闭时的回退路径，直接在 GUI 转换。
     void scheduleIncomingOnGui(IncomingFrame incoming);
-    void pushScheduled(QVideoFrame frame, int64_t arrivalUs);
+    // 更新到达间隔 vs RTP 时间戳间隔的 EWMA（GUI 线程）。
+    void noteFrameTiming(int64_t arrivalUs, int64_t mediaTimestampUs);
+    void pushScheduled(QVideoFrame frame, int64_t arrivalUs,
+                       int64_t mediaTimestampUs);
 
     // GUI 线程：按当前延迟启动单次定时器。
     void armTimer();
@@ -117,6 +120,14 @@ private:
     std::condition_variable m_workerCv;
     std::deque<IncomingFrame> m_workerQueue;
     bool m_stopWorker = false;
+
+    // worker 已转换、等待 GUI 搬运的帧。**必须有界**：如果每帧都 post 一个
+    // lambda，GUI 忙时事件队列会无限堆积 4K QVideoFrame（每帧约 12MB），
+    // 内存可以涨到数 GB。这里只保留一个待处理的唤醒事件。
+    std::mutex m_convertedMutex;
+    std::deque<PendingFrame> m_converted;
+    size_t m_convertedBytes = 0;
+    bool m_convertedPosted = false;
 
     // resetQueue 递增；worker 投递结果时据此丢弃 reset 前的旧帧。
     std::atomic<uint64_t> m_generation{0};

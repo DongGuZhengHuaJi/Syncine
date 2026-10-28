@@ -24,7 +24,11 @@
 namespace {
 
 // 排队上限。1080p I420 一帧约 3.1MB：24 帧 ≈ 74MB，再用 64MB 的字节上限兜底。
-constexpr int kMaxWorkerFrames = 24;
+constexpr int kMaxWorkerFrames = 8;
+constexpr int kMaxConvertedFrames = 16;
+// 转换后、尚未搬到 GUI 排期队列的帧上限。按字节兜底，避免 4K 帧（12.4MB）
+// 在 GUI 事件队列里无限堆积；1080p 帧约 3.1MB，16 帧约 50MB。
+constexpr size_t kMaxConvertedBytes = 48 * 1024 * 1024;
 constexpr int kMaxScheduledFrames = 24;
 constexpr size_t kMaxScheduledBytes = 64 * 1024 * 1024;
 constexpr double kMaxDelayMs = 300.0;
@@ -142,6 +146,12 @@ void RemoteVideoRenderer::resetQueue() {
         std::lock_guard<std::mutex> lock(m_workerMutex);
         m_workerQueue.clear();
     }
+    {
+        std::lock_guard<std::mutex> lock(m_convertedMutex);
+        m_converted.clear();
+        m_convertedBytes = 0;
+        m_convertedPosted = false;
+    }
     m_scheduled.clear();
     m_scheduledBytes = 0;
     m_jitterMs = 0.0;
@@ -203,14 +213,42 @@ void RemoteVideoRenderer::workerLoop() {
 
         const int64_t arrivalUs = incoming->arrivalUs;
         const int64_t mediaTimestampUs = incoming->mediaTimestampUs;
-        QMetaObject::invokeMethod(
-            this,
-            [this, qtFrame = std::move(*converted), arrivalUs, mediaTimestampUs,
-             generation]() mutable {
-                scheduleConverted(std::move(qtFrame), arrivalUs, mediaTimestampUs,
-                                  generation);
-            },
-            Qt::QueuedConnection);
+        const size_t bytes = frameBytes(*converted);
+
+        bool needPost = false;
+        {
+            std::lock_guard<std::mutex> lock(m_convertedMutex);
+            // resetQueue 之后才完成的旧帧直接丢弃。
+            if (generation != m_generation.load(std::memory_order_relaxed))
+                continue;
+
+            if (static_cast<int>(m_converted.size()) >= kMaxConvertedFrames
+                || m_convertedBytes + bytes > kMaxConvertedBytes) {
+                if (!m_converted.empty()) {
+                    m_convertedBytes -= frameBytes(m_converted.front().qtFrame);
+                    m_converted.pop_front();
+                    m_droppedForLag.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    m_droppedForLag.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
+            }
+
+            m_converted.push_back(PendingFrame{std::move(*converted), arrivalUs,
+                                               mediaTimestampUs});
+            m_convertedBytes += bytes;
+            if (!m_convertedPosted) {
+                m_convertedPosted = true;
+                needPost = true;
+            }
+        }
+
+        if (needPost) {
+            // **一帧一个 lambda 会在 GUI 忙时无限堆积**；这里只投一个搬运事件，
+            // 真正的帧放在有界 m_converted 里。
+            QMetaObject::invokeMethod(this, [this]() { drainConverted(); },
+                                      Qt::QueuedConnection);
+        }
     }
 }
 
@@ -295,33 +333,13 @@ void RemoteVideoRenderer::scheduleIncomingOnGui(IncomingFrame incoming) {
     if (!converted)
         return;
 
-    // 回退路径也更新抖动估计（与 worker 路径同一套规则）。
-    const int64_t mediaTimestampUs = incoming.mediaTimestampUs;
-    if (m_lastMediaTimestampUs != 0 && mediaTimestampUs > 0) {
-        const int64_t mediaDelta = mediaTimestampUs - m_lastMediaTimestampUs;
-        const int64_t arrivalDelta = incoming.arrivalUs - m_lastArrivalUs;
-        if (mediaDelta > 0 && arrivalDelta > 0) {
-            const double jitter =
-                std::abs(static_cast<double>(arrivalDelta - mediaDelta)) / 1000.0;
-            m_jitterMs += 0.1 * (jitter - m_jitterMs);
-            m_jitterMs = std::clamp(m_jitterMs, 0.0, kMaxDelayMs);
-        }
-    }
-    m_lastMediaTimestampUs = mediaTimestampUs;
-    m_lastArrivalUs = incoming.arrivalUs;
-
-    pushScheduled(std::move(*converted), incoming.arrivalUs);
+    noteFrameTiming(incoming.arrivalUs, incoming.mediaTimestampUs);
+    pushScheduled(std::move(*converted), incoming.arrivalUs,
+                  incoming.mediaTimestampUs);
 }
 
-void RemoteVideoRenderer::scheduleConverted(QVideoFrame frame, int64_t arrivalUs,
-                                            int64_t mediaTimestampUs,
-                                            uint64_t generation) {
-    // resetQueue 之后到达的旧转换结果直接丢弃。
-    if (generation != m_generation.load(std::memory_order_relaxed)
-        || !m_writingEnabled.load(std::memory_order_relaxed)) {
-        return;
-    }
-
+void RemoteVideoRenderer::noteFrameTiming(int64_t arrivalUs,
+                                          int64_t mediaTimestampUs) {
     if (m_lastMediaTimestampUs != 0 && mediaTimestampUs > 0) {
         const int64_t mediaDelta = mediaTimestampUs - m_lastMediaTimestampUs;
         const int64_t arrivalDelta = arrivalUs - m_lastArrivalUs;
@@ -334,11 +352,29 @@ void RemoteVideoRenderer::scheduleConverted(QVideoFrame frame, int64_t arrivalUs
     }
     m_lastMediaTimestampUs = mediaTimestampUs;
     m_lastArrivalUs = arrivalUs;
-
-    pushScheduled(std::move(frame), arrivalUs);
 }
 
-void RemoteVideoRenderer::pushScheduled(QVideoFrame frame, int64_t arrivalUs) {
+void RemoteVideoRenderer::drainConverted() {
+    std::deque<PendingFrame> frames;
+    {
+        std::lock_guard<std::mutex> lock(m_convertedMutex);
+        frames.swap(m_converted);
+        m_convertedBytes = 0;
+        m_convertedPosted = false;
+    }
+
+    if (!m_writingEnabled.load(std::memory_order_relaxed))
+        return;
+
+    for (PendingFrame &frame : frames) {
+        noteFrameTiming(frame.arrivalUs, frame.mediaTimestampUs);
+        pushScheduled(std::move(frame.qtFrame), frame.arrivalUs,
+                      frame.mediaTimestampUs);
+    }
+}
+
+void RemoteVideoRenderer::pushScheduled(QVideoFrame frame, int64_t arrivalUs,
+                                        int64_t mediaTimestampUs) {
     if (m_targetSink.isNull())
         return;
 
@@ -358,7 +394,8 @@ void RemoteVideoRenderer::pushScheduled(QVideoFrame frame, int64_t arrivalUs) {
     }
 
     m_scheduledBytes += bytes;
-    m_scheduled.push_back(PendingFrame{std::move(frame), arrivalUs});
+    m_scheduled.push_back(PendingFrame{std::move(frame), arrivalUs,
+                                       mediaTimestampUs});
     armTimer();
 }
 
