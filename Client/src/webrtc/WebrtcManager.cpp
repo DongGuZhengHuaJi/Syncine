@@ -234,7 +234,7 @@ void applyFactoryNetworkOptions(
     options.network_ignore_mask =
         webrtc::kDefaultNetworkIgnoreMask | webrtc::ADAPTER_TYPE_VPN;
     factory->SetOptions(options);
-    LOG_INFO("WebRTC") << "已忽略 VPN/虚拟网卡候选(SYNCINE_ICE_IGNORE_VPN)";
+    LOG_DEBUG("WebRTC") << "已忽略 VPN/虚拟网卡候选(SYNCINE_ICE_IGNORE_VPN)";
 }
 
 // ---- 音频设备的两个小工具 ----
@@ -389,7 +389,7 @@ bool WebrtcManager::initialize() {
     }
 
     m_initialized = true;
-    LOG_INFO("WebRTC") << "WebRTC 初始化成功";
+    LOG_DEBUG("WebRTC") << "WebRTC 初始化成功";
 
     // 预创建各条轨道
     if (getOrCreateAudioTrack() == nullptr) {
@@ -440,7 +440,7 @@ void WebrtcManager::setIceServers(const QList<IceServerConfig> &servers) {
     }
 
     // 只记录条数：username/credential 是临时密钥，任何级别都不写入日志
-    LOG_INFO("WebRTC") << "ICE 配置已更新:" << servers.size() << "组服务器 /"
+    LOG_DEBUG("WebRTC") << "ICE 配置已更新:" << servers.size() << "组服务器 /"
                        << urlCount << "个 URL" << (hasTurn ? "（含 TURN）" : "（仅 STUN）");
 }
 
@@ -606,7 +606,7 @@ bool WebrtcManager::createPeerConnection(const QString &peerId, bool createDataC
     // 插入前先判断：是否为本次进房的第一条连接（引擎即在此刻初始化）
     const bool firstPeer = m_peers.isEmpty();
     m_peers.insert(peerId, links);
-    LOG_INFO("WebRTC") << "已建立对端连接:" << peerId << "（两条：voice + media，当前共"
+    LOG_DEBUG("WebRTC") << "已建立对端连接:" << peerId << "（两条：voice + media，当前共"
                        << m_peers.size() << "个对端）";
 
     if (firstPeer) {
@@ -637,7 +637,7 @@ void WebrtcManager::removePeer(const QString &peerId) {
     }
 
     if (links.voice != nullptr || links.media != nullptr) {
-        LOG_INFO("WebRTC") << "已移除对端连接:" << peerId << "(剩余" << m_peers.size()
+        LOG_DEBUG("WebRTC") << "已移除对端连接:" << peerId << "(剩余" << m_peers.size()
                            << "个对端)";
         // 数据通道随之消失。通知上层结束进行中的文件传输
         emit peerRemoved(peerId);
@@ -722,7 +722,7 @@ webrtc::scoped_refptr<webrtc::AudioTrackInterface> WebrtcManager::getOrCreateAud
 
     m_localAudioTrack->set_enabled(false);
 
-    LOG_INFO("WebRTC") << "推流语音轨已创建";
+    LOG_DEBUG("WebRTC") << "推流语音轨已创建";
     return m_localAudioTrack;
 }
 
@@ -738,7 +738,7 @@ void WebrtcManager::setAudioEnabled(bool enabled) {
 
     track->set_enabled(enabled);
 
-    LOG_INFO("WebRTC") << (enabled ? "麦克风已开启" : "麦克风已关闭")
+    LOG_DEBUG("WebRTC") << (enabled ? "麦克风已开启" : "麦克风已关闭")
                        << "(当前" << m_peers.size() << "个对端)";
     emit audioEnabledChanged(enabled);
 }
@@ -803,7 +803,7 @@ bool WebrtcManager::ensureVoiceAdmOnWorker() {
         return false;
     }
 
-    LOG_INFO("WebRTC") << "声卡已初始化";
+    LOG_DEBUG("WebRTC") << "声卡已初始化";
     return true;
 }
 
@@ -965,7 +965,7 @@ const std::vector<WebrtcManager::DeviceInfo> &WebrtcManager::deviceList(bool rec
 
 bool WebrtcManager::applyDevice(bool recording, const QString &name, bool force) {
     if (m_voiceAdm == nullptr || !m_initialized) {
-        LOG_INFO("WebRTC") << (recording ? "麦克风" : "听筒")
+        LOG_DEBUG("WebRTC") << (recording ? "麦克风" : "听筒")
                            << "设备选择已记下,进房间后再套用";
         return false;
     }
@@ -1087,7 +1087,7 @@ void WebrtcManager::setLocalVideoEnabled(bool enabled) {
     m_localVideoTrack->set_enabled(enabled);
 
     // 切模式时才会走这里，频率很低，放 Info
-    LOG_INFO("WebRTC") << (enabled ? "推送视频已开启" : "推送视频已关闭")
+    LOG_DEBUG("WebRTC") << (enabled ? "推送视频已开启" : "推送视频已关闭")
                        << "(当前" << m_peers.size() << "个对端)";
 }
 
@@ -1103,7 +1103,7 @@ void WebrtcManager::setLocalVideoSending(bool enabled) {
             it.value().media->applyVideoSending(enabled);
     }
 
-    LOG_INFO("WebRTC") << (enabled ? "视频恢复发送" : "视频停止发送")
+    LOG_DEBUG("WebRTC") << (enabled ? "视频恢复发送" : "视频停止发送")
                        << "(当前" << m_peers.size() << "个对端)";
 }
 
@@ -1117,7 +1117,7 @@ void WebrtcManager::setVideoQuality(VideoQuality quality) {
     applyQualityToAll();
 
     const VideoQualityPreset preset = presetForQuality(quality);
-    LOG_INFO("WebRTC") << "推送画质设为" << qualityName(quality)
+    LOG_DEBUG("WebRTC") << "推送画质设为" << qualityName(quality)
                        << "(码率上限" << (preset.maxBitrateBps / 1000) << "kbps)"
                        << "目标高度" << preset.targetHeight << "p";
     emit videoQualityChanged(quality);
@@ -1171,7 +1171,7 @@ void WebrtcManager::setTransferActive(bool active) {
     m_transferActive = active;
     applyQualityToAll();
 
-    LOG_INFO("WebRTC") << (active
+    LOG_DEBUG("WebRTC") << (active
                                ? "文件传输进行中，共享视频码率上限降至 1.2Mbps"
                                : "文件传输结束，恢复共享视频画质档位");
 }
@@ -1242,7 +1242,7 @@ webrtc::scoped_refptr<webrtc::AudioTrackInterface> WebrtcManager::getOrCreateMov
 
     m_localMovieAudioTrack->set_enabled(false);
 
-    LOG_INFO("WebRTC") << "推流音频轨已创建";
+    LOG_DEBUG("WebRTC") << "推流音频轨已创建";
     return m_localMovieAudioTrack;
 }
 
@@ -1356,7 +1356,7 @@ webrtc::scoped_refptr<webrtc::VideoTrackInterface> WebrtcManager::getOrCreateVid
         return nullptr;
     }
 
-    LOG_INFO("WebRTC") << "推流视频轨已创建";
+    LOG_DEBUG("WebRTC") << "推流视频轨已创建";
     return m_localVideoTrack;
 }
 
@@ -1409,7 +1409,7 @@ bool WebrtcManager::initializeVoiceFactory() {
         m_voiceFactory->CreatePeerConnectionOrError(keepAliveConfig, std::move(keepAliveDeps));
     if (keepAliveResult.ok()) {
         m_voiceKeepAlive = keepAliveResult.value();
-        LOG_INFO("WebRTC") << "已建立常驻保活连接(防止退房时声卡被永久关掉)";
+        LOG_DEBUG("WebRTC") << "已建立常驻保活连接(防止退房时声卡被永久关掉)";
     } else {
         // 没建成也不算致命：只是"离开房间后再进房会没声音"那个老问题会回来
         LOG_WARN("WebRTC") << "保活连接创建失败:"

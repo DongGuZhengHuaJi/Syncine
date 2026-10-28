@@ -6,10 +6,10 @@
 // 且默认写 stderr。Windows 上双击启动根本没有控制台，这些行等于不存在。
 // 本项目已经踩过一次：远端语音播到了 Steam 虚拟声卡上，全程没有一行报错。
 //
-// 与 SYNCINE_WEBRTC_LOG 的关系：
-//   未设置   → 只接管警告及以上（内部故障都在这一级），文件里多出的行很少
-//   设置了   → 连同 INFO 一起接管，并保留原有的 stderr 输出，供现场排障
-// 级别过滤交给 Log 那一层做（见 Log::write），此处不做二次过滤。
+// 所有 WebRTC 消息统一记为 Trace：默认 info 级别完全不输出，不刷日志。
+// 排查时把日志级别调到 trace（SYNCINE_LOG_LEVEL=trace 或设置页）即可看到。
+// SYNCINE_WEBRTC_LOG=1 只决定是否连 WebRTC 的 VERBOSE 级也接进来。
+// 此处不再按消息内容做过滤，避免漏掉意外错误。
 //
 
 #ifndef SYNCINE_WEBRTCLOG_H

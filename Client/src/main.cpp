@@ -43,20 +43,11 @@ int main(int argc, char *argv[]) {
     LOG_INFO("Log") << "Syncine" << SYNCINE_VERSION << "提交"
                     << SYNCINE_GIT_COMMIT << "构建于" << __DATE__ << __TIME__;
 
-    // WebRTC 自己的日志一律接进日志文件（警告及以上），见 WebrtcLog.h 的说明。
+    // WebRTC 自己的日志接进 Log，但全部记为 Trace：默认 info 不输出。
+    // 排查时把 SYNCINE_LOG_LEVEL 调到 trace 即可看到；SYNCINE_WEBRTC_LOG=1
+    // 只决定是否连 WebRTC 的 VERBOSE 级也接进来（仍然只在 trace 下可见）。
     // 必须在 Log::init 之后：接收器直接写 Log。
-    const bool webRtcVerbose = qEnvironmentVariableIsSet("SYNCINE_WEBRTC_LOG");
-    WebrtcLog::install(webRtcVerbose);
-
-    // 诊断开关：设了 SYNCINE_WEBRTC_LOG=1 再额外把它打到终端。
-    //
-    // 用来查"数据进了适配器却没发出去"这一类问题 —— WebRTC 内部很多失败
-    // 是静默的（比如 SetSend 失败只在 LS_ERROR 级别留一行）,平时不该刷屏，
-    // 需要时再开。日志文件那份由 WebrtcLog 负责，这里只管终端。
-    if (webRtcVerbose) {
-        webrtc::LogMessage::LogToDebug(webrtc::LS_INFO);
-        webrtc::LogMessage::LogTimestamps(true);
-    }
+    WebrtcLog::install(qEnvironmentVariableIsSet("SYNCINE_WEBRTC_LOG"));
 
     // 应用对象放进内层作用域：它们析构时的收尾日志（尤其是 WebrtcManager
     // 停止 WebRTC 线程）仍然能落进文件。作用域结束后才关闭日志系统。
