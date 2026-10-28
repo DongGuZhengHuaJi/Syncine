@@ -1,7 +1,9 @@
 // 由 CMake 从 cmake/version.h.in 生成，勿直接编辑。
 // 版本号的唯一来源是 Client/CMakeLists.txt 里的 project(... VERSION x.y.z)。
+// 提交号由 CMake 配置时执行 git rev-parse 生成。
 #pragma once
 
+#define SYNCINE_GIT_COMMIT "@SYNCINE_GIT_COMMIT@"
 #define SYNCINE_VERSION "@PROJECT_VERSION@"
 #define SYNCINE_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
 #define SYNCINE_VERSION_MINOR @PROJECT_VERSION_MINOR@

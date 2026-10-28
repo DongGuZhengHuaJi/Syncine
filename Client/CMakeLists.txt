@@ -119,6 +119,19 @@ find_package(WebRTC REQUIRED)
 # 把 CMake 里的版本号导出给 C++ 代码（「关于」对话框等）。
 # ----------------------------------------------------------------------
 
+# 联调时用提交号区分“同为 1.5.0 但来自不同提交”的构建。
+# CI 在 checkout 后配置，拿到的就是该 tag/commit 的哈希。
+execute_process(
+        COMMAND git rev-parse --short HEAD
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE SYNCINE_GIT_COMMIT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+)
+if(NOT SYNCINE_GIT_COMMIT)
+    set(SYNCINE_GIT_COMMIT "unknown")
+endif()
+
 configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/version.h.in"
         "${CMAKE_CURRENT_BINARY_DIR}/version.h"

@@ -40,8 +40,8 @@ int main(int argc, char *argv[]) {
     // 目录用 SYNCINE_LOG_DIR 覆盖。
     Log::init(QStringLiteral("syncine"));
     // 联调时先确认两端跑的是不是同一份构建；版本号相同也可能来自不同提交。
-    LOG_INFO("Log") << "Syncine" << SYNCINE_VERSION << "构建于"
-                    << __DATE__ << __TIME__;
+    LOG_INFO("Log") << "Syncine" << SYNCINE_VERSION << "提交"
+                    << SYNCINE_GIT_COMMIT << "构建于" << __DATE__ << __TIME__;
 
     // WebRTC 自己的日志一律接进日志文件（警告及以上），见 WebrtcLog.h 的说明。
     // 必须在 Log::init 之后：接收器直接写 Log。
