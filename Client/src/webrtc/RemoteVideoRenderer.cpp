@@ -15,6 +15,7 @@
 #include <QVideoFrame>
 #include <QVideoFrameFormat>
 #include <QVideoSink>
+#include <QtGlobal>
 
 #include "core/Log.h"
 
@@ -23,7 +24,7 @@
 namespace {
 
 // 排队上限。1080p I420 一帧约 3.1MB：24 帧 ≈ 74MB，再用 64MB 的字节上限兜底。
-constexpr int kMaxIncomingFrames = 24;
+constexpr int kMaxWorkerFrames = 24;
 constexpr int kMaxScheduledFrames = 24;
 constexpr size_t kMaxScheduledBytes = 64 * 1024 * 1024;
 constexpr double kMaxDelayMs = 300.0;
@@ -40,14 +41,11 @@ int64_t steadyNowUs()
         .count();
 }
 
-size_t frameBytes(const webrtc::VideoFrame &frame)
+size_t frameBytes(const QVideoFrame &frame)
 {
-    const auto *buffer = frame.video_frame_buffer().get();
-    if (buffer == nullptr)
+    if (!frame.isValid())
         return 0;
-    const size_t pixels = static_cast<size_t>(buffer->width())
-                          * static_cast<size_t>(buffer->height());
-    return pixels * 3 / 2;
+    return static_cast<size_t>(frame.width()) * static_cast<size_t>(frame.height()) * 3 / 2;
 }
 
 } // namespace
@@ -58,12 +56,37 @@ RemoteVideoRenderer::RemoteVideoRenderer(QObject *parent)
     m_presentTimer->setSingleShot(true);
     m_presentTimer->setTimerType(Qt::PreciseTimer);
     connect(m_presentTimer, &QTimer::timeout, this, &RemoteVideoRenderer::deliverDueFrames);
+
+    // 默认启用转换 worker；SYNCINE_RENDER_WORKER=0 回退到 GUI 转换。
+    m_workerEnabled = !(qEnvironmentVariableIsSet("SYNCINE_RENDER_WORKER")
+                        && qEnvironmentVariableIntValue("SYNCINE_RENDER_WORKER") == 0);
+    if (m_workerEnabled) {
+        m_worker = std::thread(&RemoteVideoRenderer::workerLoop, this);
+        m_workerStarted.store(true);
+    }
 }
 
 RemoteVideoRenderer::~RemoteVideoRenderer() {
+    stopWorker();
     if (m_presentTimer != nullptr)
         m_presentTimer->stop();
-    resetQueue();
+}
+
+void RemoteVideoRenderer::stopWorker() {
+    {
+        std::lock_guard<std::mutex> lock(m_workerMutex);
+        m_stopWorker = true;
+    }
+    m_workerCv.notify_all();
+
+    if (m_worker.joinable())
+        m_worker.join();
+    m_workerStarted.store(false);
+
+    {
+        std::lock_guard<std::mutex> lock(m_workerMutex);
+        m_workerQueue.clear();
+    }
 }
 
 void RemoteVideoRenderer::setTargetSink(QVideoSink *sink) {
@@ -97,10 +120,12 @@ void RemoteVideoRenderer::setPlayoutDelayProvider(std::function<int()> provider)
 }
 
 void RemoteVideoRenderer::resetQueue() {
+    // 代次递增：worker 里正在转换、还没投递的旧帧到达 GUI 时会被丢弃。
+    m_generation.fetch_add(1, std::memory_order_relaxed);
+
     {
-        std::lock_guard<std::mutex> lock(m_frameMutex);
-        m_incoming.clear();
-        m_deliveryPosted = false;
+        std::lock_guard<std::mutex> lock(m_workerMutex);
+        m_workerQueue.clear();
     }
     m_scheduled.clear();
     m_scheduledBytes = 0;
@@ -109,36 +134,182 @@ void RemoteVideoRenderer::resetQueue() {
 }
 
 // ============================
-// 接收侧：解码线程 → GUI
+// 接收侧：解码线程 → worker → GUI
 // ============================
 
 void RemoteVideoRenderer::OnFrame(const webrtc::VideoFrame &frame) {
     if (!m_writingEnabled.load(std::memory_order_relaxed))
         return;
 
-    const PendingFrame pending{frame, steadyNowUs()};
+    IncomingFrame incoming{frame, steadyNowUs()};
 
-    bool needPost = false;
+    if (!m_workerStarted.load(std::memory_order_relaxed)) {
+        // 回退开关：在 GUI 线程转换（旧行为）。
+        QMetaObject::invokeMethod(this,
+                                  [this, incoming = std::move(incoming)]() mutable {
+                                      scheduleIncomingOnGui(std::move(incoming));
+                                  },
+                                  Qt::QueuedConnection);
+        return;
+    }
+
     {
-        std::lock_guard<std::mutex> lock(m_frameMutex);
-        if (static_cast<int>(m_incoming.size()) >= kMaxIncomingFrames) {
-            m_incoming.pop_front();
+        std::lock_guard<std::mutex> lock(m_workerMutex);
+        if (static_cast<int>(m_workerQueue.size()) >= kMaxWorkerFrames) {
+            m_workerQueue.pop_front();
             m_droppedForLag.fetch_add(1, std::memory_order_relaxed);
         }
-        m_incoming.push_back(pending);
-        if (!m_deliveryPosted) {
-            m_deliveryPosted = true;
-            needPost = true;
+        m_workerQueue.push_back(std::move(incoming));
+    }
+    m_workerCv.notify_one();
+}
+
+void RemoteVideoRenderer::workerLoop() {
+    for (;;) {
+        std::optional<IncomingFrame> incoming;
+        {
+            std::unique_lock<std::mutex> lock(m_workerMutex);
+            m_workerCv.wait(lock, [this] {
+                return m_stopWorker || !m_workerQueue.empty();
+            });
+            if (m_stopWorker)
+                break;
+            incoming.emplace(m_workerQueue.front());
+            m_workerQueue.pop_front();
         }
+
+        const uint64_t generation = m_generation.load(std::memory_order_relaxed);
+        auto converted = convertToQtFrame(incoming->frame);
+        if (!converted)
+            continue;
+
+        const int64_t arrivalUs = incoming->arrivalUs;
+        QMetaObject::invokeMethod(
+            this,
+            [this, qtFrame = std::move(*converted), arrivalUs, generation]() mutable {
+                scheduleConverted(std::move(qtFrame), arrivalUs, generation);
+            },
+            Qt::QueuedConnection);
+    }
+}
+
+std::optional<QVideoFrame> RemoteVideoRenderer::convertToQtFrame(
+    const webrtc::VideoFrame &frame) {
+    // 统一拿到 I420 视图。收到的可能是 I420/I420A/NV12 等，
+    // ToI420() 会在需要时做一次转换，之后按统一方式取平面。
+    if (frame.video_frame_buffer() == nullptr)
+        return std::nullopt;
+
+    webrtc::scoped_refptr<webrtc::I420BufferInterface> i420 =
+        frame.video_frame_buffer()->ToI420();
+    if (i420 == nullptr)
+        return std::nullopt;
+
+    const int width = i420->width();
+    const int height = i420->height();
+    const int chromaWidth = (width + 1) / 2;
+    const int chromaHeight = (height + 1) / 2;
+
+    // ---- 组装一个 Qt 认的 YUV420P 帧 ----
+    QVideoFrameFormat format(QSize(width, height),
+                             QVideoFrameFormat::Format_YUV420P);
+
+    // 旋转属于**元数据**而非像素：发送端只把旋转角度写入 WebRTC 帧，由渲染方负责应用。
+    // 手工组装 QVideoFrame 时必须写回该元数据——否则带旋转信息的竖屏视频，
+    // 房主端显示为正向而观众端显示为横向。
+    switch (frame.rotation()) {
+    case webrtc::kVideoRotation_90:
+        format.setRotation(QtVideo::Rotation::Clockwise90);
+        break;
+    case webrtc::kVideoRotation_180:
+        format.setRotation(QtVideo::Rotation::Clockwise180);
+        break;
+    case webrtc::kVideoRotation_270:
+        format.setRotation(QtVideo::Rotation::Clockwise270);
+        break;
+    default:
+        break; // kVideoRotation_0:保持默认
     }
 
-    if (needPost) {
-        // 用 invokeMethod 而不是 Qt 信号：webrtc::VideoFrame 不是 Qt 类型，
-        // 走队列连接需要注册元类型，而这里只是内部转发。
-        QMetaObject::invokeMethod(this,
-                                  [this]() { drainIncoming(); },
-                                  Qt::QueuedConnection);
+    QVideoFrame qtFrame(format);
+    if (!qtFrame.map(QVideoFrame::WriteOnly))
+        return std::nullopt;
+
+    // Y 平面
+    uchar *dstY = qtFrame.bits(0);
+    const int dstStrideY = qtFrame.bytesPerLine(0);
+    for (int row = 0; row < height; ++row) {
+        std::memcpy(dstY + static_cast<ptrdiff_t>(row) * dstStrideY,
+                    i420->DataY() + static_cast<ptrdiff_t>(row) * i420->StrideY(),
+                    static_cast<size_t>(width));
     }
+
+    // U 平面
+    uchar *dstU = qtFrame.bits(1);
+    const int dstStrideU = qtFrame.bytesPerLine(1);
+    for (int row = 0; row < chromaHeight; ++row) {
+        std::memcpy(dstU + static_cast<ptrdiff_t>(row) * dstStrideU,
+                    i420->DataU() + static_cast<ptrdiff_t>(row) * i420->StrideU(),
+                    static_cast<size_t>(chromaWidth));
+    }
+
+    // V 平面
+    uchar *dstV = qtFrame.bits(2);
+    const int dstStrideV = qtFrame.bytesPerLine(2);
+    for (int row = 0; row < chromaHeight; ++row) {
+        std::memcpy(dstV + static_cast<ptrdiff_t>(row) * dstStrideV,
+                    i420->DataV() + static_cast<ptrdiff_t>(row) * i420->StrideV(),
+                    static_cast<size_t>(chromaWidth));
+    }
+
+    qtFrame.unmap();
+    return qtFrame;
+}
+
+void RemoteVideoRenderer::scheduleIncomingOnGui(IncomingFrame incoming) {
+    if (!m_writingEnabled.load(std::memory_order_relaxed))
+        return;
+
+    auto converted = convertToQtFrame(incoming.frame);
+    if (!converted)
+        return;
+
+    pushScheduled(std::move(*converted), incoming.arrivalUs);
+}
+
+void RemoteVideoRenderer::scheduleConverted(QVideoFrame frame, int64_t arrivalUs,
+                                            uint64_t generation) {
+    // resetQueue 之后到达的旧转换结果直接丢弃。
+    if (generation != m_generation.load(std::memory_order_relaxed)
+        || !m_writingEnabled.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    pushScheduled(std::move(frame), arrivalUs);
+}
+
+void RemoteVideoRenderer::pushScheduled(QVideoFrame frame, int64_t arrivalUs) {
+    if (m_targetSink.isNull())
+        return;
+
+    const size_t bytes = frameBytes(frame);
+
+    if (static_cast<int>(m_scheduled.size()) >= kMaxScheduledFrames
+        || m_scheduledBytes + bytes > kMaxScheduledBytes) {
+        // 队列满：丢最老的一帧；如果排期队列为空，只能丢新来的这一帧。
+        if (!m_scheduled.empty()) {
+            m_scheduledBytes -= frameBytes(m_scheduled.front().qtFrame);
+            m_scheduled.pop_front();
+        } else {
+            m_droppedForLag.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        m_droppedForLag.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    m_scheduledBytes += bytes;
+    m_scheduled.push_back(PendingFrame{std::move(frame), arrivalUs});
+    armTimer();
 }
 
 void RemoteVideoRenderer::OnDiscardedFrame() {
@@ -148,42 +319,6 @@ void RemoteVideoRenderer::OnDiscardedFrame() {
         LOG_DEBUG("RemoteVideo") << "已丢弃" << m_discardedCount.load()
                                  << "帧(拥塞)";
     }
-}
-
-void RemoteVideoRenderer::drainIncoming() {
-    std::deque<PendingFrame> incoming;
-    {
-        std::lock_guard<std::mutex> lock(m_frameMutex);
-        incoming.swap(m_incoming);
-        m_deliveryPosted = false;
-    }
-
-    if (!m_writingEnabled.load(std::memory_order_relaxed)) {
-        armTimer();
-        return;
-    }
-
-    for (PendingFrame &pending : incoming) {
-        const size_t bytes = frameBytes(pending.frame);
-
-        if (static_cast<int>(m_scheduled.size()) >= kMaxScheduledFrames
-            || m_scheduledBytes + bytes > kMaxScheduledBytes) {
-            // 队列满：丢最老的一帧；如果排期队列为空，只能丢新来的这一帧。
-            if (!m_scheduled.empty()) {
-                m_scheduledBytes -= frameBytes(m_scheduled.front().frame);
-                m_scheduled.pop_front();
-            } else {
-                m_droppedForLag.fetch_add(1, std::memory_order_relaxed);
-                continue;
-            }
-            m_droppedForLag.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        m_scheduledBytes += bytes;
-        m_scheduled.push_back(std::move(pending));
-    }
-
-    armTimer();
 }
 
 // ============================
@@ -281,91 +416,26 @@ void RemoteVideoRenderer::deliverDueFrames() {
     if (newestDue >= 0) {
         // 先按未移动的帧扣字节数，再 move：不然被移走的那帧 buffer 为空，会少扣。
         for (int i = 0; i <= newestDue; ++i)
-            m_scheduledBytes -= frameBytes(m_scheduled[i].frame);
+            m_scheduledBytes -= frameBytes(m_scheduled[i].qtFrame);
         PendingFrame chosen = std::move(m_scheduled[newestDue]);
         m_scheduled.erase(m_scheduled.begin(), m_scheduled.begin() + newestDue + 1);
-        renderFrame(chosen.frame);
+        presentFrame(chosen.qtFrame);
     }
 
     armTimer();
 }
 
-void RemoteVideoRenderer::renderFrame(const webrtc::VideoFrame &frame) {
+void RemoteVideoRenderer::presentFrame(const QVideoFrame &frame) {
     if (m_targetSink.isNull())
         return;
 
-    // 统一拿到 I420 视图。收到的可能是 I420/I420A/NV12 等，
-    // ToI420() 会在需要时做一次转换，之后按统一方式取平面。
-    webrtc::scoped_refptr<webrtc::I420BufferInterface> i420 =
-        frame.video_frame_buffer()->ToI420();
-    if (i420 == nullptr)
-        return;
-
-    const int width = i420->width();
-    const int height = i420->height();
-    const int chromaWidth = (width + 1) / 2;
-    const int chromaHeight = (height + 1) / 2;
-
-    // ---- 组装一个 Qt 认的 YUV420P 帧 ----
-    QVideoFrameFormat format(QSize(width, height),
-                             QVideoFrameFormat::Format_YUV420P);
-
-    // 旋转属于**元数据**而非像素：发送端只把旋转角度写入 WebRTC 帧，由渲染方负责应用。
-    // 手工组装 QVideoFrame 时必须写回该元数据——否则带旋转信息的竖屏视频，
-    // 房主端显示为正向而观众端显示为横向。
-    switch (frame.rotation()) {
-    case webrtc::kVideoRotation_90:
-        format.setRotation(QtVideo::Rotation::Clockwise90);
-        break;
-    case webrtc::kVideoRotation_180:
-        format.setRotation(QtVideo::Rotation::Clockwise180);
-        break;
-    case webrtc::kVideoRotation_270:
-        format.setRotation(QtVideo::Rotation::Clockwise270);
-        break;
-    default:
-        break; // kVideoRotation_0:保持默认
-    }
-
-    QVideoFrame qtFrame(format);
-    if (!qtFrame.map(QVideoFrame::WriteOnly))
-        return;
-
-    // Y 平面
-    uchar *dstY = qtFrame.bits(0);
-    const int dstStrideY = qtFrame.bytesPerLine(0);
-    for (int row = 0; row < height; ++row) {
-        std::memcpy(dstY + static_cast<ptrdiff_t>(row) * dstStrideY,
-                    i420->DataY() + static_cast<ptrdiff_t>(row) * i420->StrideY(),
-                    static_cast<size_t>(width));
-    }
-
-    // U 平面
-    uchar *dstU = qtFrame.bits(1);
-    const int dstStrideU = qtFrame.bytesPerLine(1);
-    for (int row = 0; row < chromaHeight; ++row) {
-        std::memcpy(dstU + static_cast<ptrdiff_t>(row) * dstStrideU,
-                    i420->DataU() + static_cast<ptrdiff_t>(row) * i420->StrideU(),
-                    static_cast<size_t>(chromaWidth));
-    }
-
-    // V 平面
-    uchar *dstV = qtFrame.bits(2);
-    const int dstStrideV = qtFrame.bytesPerLine(2);
-    for (int row = 0; row < chromaHeight; ++row) {
-        std::memcpy(dstV + static_cast<ptrdiff_t>(row) * dstStrideV,
-                    i420->DataV() + static_cast<ptrdiff_t>(row) * i420->StrideV(),
-                    static_cast<size_t>(chromaWidth));
-    }
-
-    qtFrame.unmap();
-
     // 交给界面。QVideoSink 会把它推给正在渲染的那个 VideoOutput。
-    m_targetSink->setVideoFrame(qtFrame);
+    m_targetSink->setVideoFrame(frame);
 
     const int count = m_frameCount.fetch_add(1, std::memory_order_relaxed) + 1;
     if (count == 1) {
-        LOG_INFO("RemoteVideo") << "收到第一帧远端画面:" << width << "x" << height;
+        LOG_INFO("RemoteVideo") << "收到第一帧远端画面:" << frame.width()
+                                << "x" << frame.height();
     } else if (count % 300 == 0) {
         LOG_TRACE("RemoteVideo") << "已显示" << count << "帧, 当前延迟"
                                  << m_delayMs << "ms, 排队"

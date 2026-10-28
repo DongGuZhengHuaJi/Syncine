@@ -7,6 +7,7 @@
 #include <QDebug>
 #include <QVideoFrame>
 #include <QVideoFrameFormat>
+#include <QtGlobal>
 
 #include "core/Log.h"
 
@@ -16,14 +17,11 @@
 #include "libyuv/video_common.h"
 #include "rtc_base/time_utils.h"
 
-VideoTrackSource::VideoTrackSource() = default;
-VideoTrackSource::~VideoTrackSource() = default;
-
-// ============================
-// Qt 帧 → I420 的格式映射
-// ============================
-
 namespace {
+
+// 队列上限：1080p 30fps 下 5 帧约 150ms，够吸收一次转换抖动；
+// 再多说明转换/编码跟不上，丢帧比延迟增长好。
+constexpr size_t kMaxQueuedJobs = 5;
 
 // 把 Qt 的像素格式翻译成 libyuv 的 FourCC
 // 返回 0 表示不支持
@@ -57,6 +55,38 @@ bool isTenBit(QVideoFrameFormat::PixelFormat format) {
 
 } // namespace
 
+VideoTrackSource::VideoTrackSource() {
+    // 默认启用 worker；SYNCINE_VIDEO_WORKER=0 回退到 GUI 同步转换，便于排查。
+    m_workerEnabled = !(qEnvironmentVariableIsSet("SYNCINE_VIDEO_WORKER")
+                        && qEnvironmentVariableIntValue("SYNCINE_VIDEO_WORKER") == 0);
+
+    if (m_workerEnabled) {
+        m_worker = std::thread(&VideoTrackSource::workerLoop, this);
+        m_workerStarted = true;
+    }
+}
+
+VideoTrackSource::~VideoTrackSource() {
+    shutdown();
+}
+
+void VideoTrackSource::shutdown() {
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_stopWorker = true;
+    }
+    m_queueCv.notify_all();
+
+    if (m_worker.joinable())
+        m_worker.join();
+    m_workerStarted = false;
+
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_jobs.clear();
+    }
+}
+
 // ============================
 // 喂帧
 // ============================
@@ -65,17 +95,110 @@ void VideoTrackSource::pushFrame(const webrtc::VideoFrame &frame) {
     if (frame.video_frame_buffer() == nullptr)
         return;
 
-    m_width = frame.width();
-    m_height = frame.height();
-    m_hasReceivedFrame = true;
+    m_width.store(frame.width(), std::memory_order_relaxed);
+    m_height.store(frame.height(), std::memory_order_relaxed);
+    m_hasReceivedFrame.store(true, std::memory_order_relaxed);
 
     // 广播给所有订阅者（编码器） —— 他们会各自去编码，然后发 RTP
     m_broadcaster.OnFrame(frame);
 }
 
+int64_t VideoTrackSource::nextTimestampUs() {
+    // 时间戳必须使用单调时钟，不可用媒体的 startTime：
+    // startTime 是媒体内时间，换源/重播时从 0 重新开始、往回 seek 时跳回更早的值，
+    // 而 RTP 时间轴要求单调递增。时间戳回退会导致观众端解码器将新帧当作旧帧丢弃，
+    // 直到时间轴追上（表现为卡住）；重播或换源时从 120s 跳回 0 则永远追不上，
+    // 表现为永久卡死。本应用的画面同步依赖控制消息（play/pause/seek），
+    // 不依赖 RTP 时间戳，故改用单调时钟：帧间隔照实、时间轴永远递增。
+    // +1 兜底：两帧落在同一微秒时保证严格递增（编码器会丢弃时间戳相等的帧）。
+    int64_t timestampUs = webrtc::TimeMicros();
+    if (timestampUs <= m_lastTimestampUs)
+        timestampUs = m_lastTimestampUs + 1;
+    m_lastTimestampUs = timestampUs;
+    return timestampUs;
+}
+
 void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
     if (!frame.isValid())
         return;
+
+    // 没有订阅者（没有对端/观众）时不做任何转换与分配。
+    if (sinkCount() == 0)
+        return;
+
+    // 时间戳在 GUI 线程到达时打；worker 排队不能改变 RTP 时间轴。
+    const int64_t timestampUs = nextTimestampUs();
+
+    if (!m_workerStarted) {
+        // 回退开关：完全同步转换（旧行为）。
+        if (auto converted = convertQtFrame(frame, timestampUs))
+            pushFrame(*converted);
+        return;
+    }
+
+    Job job;
+    job.timestampUs = timestampUs;
+
+    if (frame.handleType() == QVideoFrame::NoHandle) {
+        // CPU 帧：把它交给 worker map，GUI 只递一个隐式共享的句柄。
+        job.kind = JobKind::QtFrame;
+        job.qtFrame = frame;
+    } else {
+        // GPU 帧的 map 线程安全性取决于后端；留在 GUI 转换，但转换结果仍然
+        // 进入同一个 FIFO，避免它插到更老的 worker 帧前面。
+        auto converted = convertQtFrame(frame, timestampUs);
+        if (!converted)
+            return;
+        job.kind = JobKind::ReadyFrame;
+        job.readyFrame = std::move(*converted);
+    }
+
+    enqueueJob(std::move(job));
+}
+
+void VideoTrackSource::enqueueJob(Job job) {
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        if (m_jobs.size() >= kMaxQueuedJobs) {
+            m_jobs.pop_front();
+            m_droppedJobs.fetch_add(1, std::memory_order_relaxed);
+        }
+        m_jobs.push_back(std::move(job));
+    }
+    m_queueCv.notify_one();
+}
+
+void VideoTrackSource::workerLoop() {
+    for (;;) {
+        Job job;
+        {
+            std::unique_lock<std::mutex> lock(m_queueMutex);
+            m_queueCv.wait(lock, [this] {
+                return m_stopWorker || !m_jobs.empty();
+            });
+            if (m_stopWorker)
+                break;
+            job = std::move(m_jobs.front());
+            m_jobs.pop_front();
+        }
+
+        if (job.kind == JobKind::QtFrame) {
+            if (auto converted = convertQtFrame(job.qtFrame, job.timestampUs))
+                pushFrame(*converted);
+        } else if (job.readyFrame.has_value()) {
+            pushFrame(*job.readyFrame);
+        }
+    }
+}
+
+// ============================
+// Qt 帧 → I420
+// ============================
+
+std::optional<webrtc::VideoFrame> VideoTrackSource::convertQtFrame(
+    const QVideoFrame &frame, int64_t timestampUs) {
+    if (!frame.isValid())
+        return std::nullopt;
 
     // map() 不是 const 方法，而且必须和 unmap() 配对。
     // 拷一份出来（隐式共享，很廉价）,并保证所有出口都会 unmap。
@@ -86,33 +209,33 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
     const bool tenBit = isTenBit(pixelFormat);
 
     if (fourcc == 0 && !tenBit) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
             LOG_ERROR("VideoSource") << "不支持的像素格式"
                                      << static_cast<int>(pixelFormat)
                                      << "—— 这一路视频不会发送。需要为它补一条到 libyuv 的映射。";
         }
-        return;
+        return std::nullopt;
     }
 
     if (!mapped.map(QVideoFrame::ReadOnly))
-        return;
+        return std::nullopt;
 
     const int width = mapped.width();
     const int height = mapped.height();
 
     if (width <= 0 || height <= 0) {
         mapped.unmap();
-        return;
+        return std::nullopt;
     }
 
     // 诊断：记录源帧的真实像素格式与行距。
     // 画面「斜切/撕裂」是行距算错的典型症状，颜色错位则是平面偏移算错的症状，
     // 两者均不报错，只能依靠这几个数值定位。Qt 6.5 起媒体后端由 GStreamer
     // 改为 FFmpeg，同一文件给出的像素格式可能与以往不同（见 CMakePresets）。
-    static int diagCount = 0;
-    if (diagCount < 3 || diagCount % 300 == 0) {
+    static std::atomic<int> diagCount{0};
+    const int diag = diagCount.fetch_add(1, std::memory_order_relaxed);
+    if (diag < 3 || diag % 300 == 0) {
         LOG_TRACE("VideoSource") << "源帧: pixelFormat=" << mapped.surfaceFormat().pixelFormat()
                  << " handleType=" << mapped.handleType()
                  << " 平面数=" << mapped.planeCount()
@@ -134,15 +257,12 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
                      << (actualUvOffset == assumedUvOffset ? "(一致)" : "(!! 不一致,会读错 !!)");
         }
     }
-    ++diagCount;
 
     // WebRTC 要的是**紧凑**的 I420:每个平面的行距等于宽度。
     // 而 Qt 给的帧行距往往更大（内存对齐填充）,所以不能直接把 Qt 的
     // 缓冲区交给 WebRTC —— 必须按行搬一遍，把填充去掉。
     //
     // 行距传错的症状是画面逐行错位（斜切）,而且不会有任何报错。
-    const int chromaWidth = (width + 1) / 2;
-
     webrtc::scoped_refptr<webrtc::I420Buffer> buffer =
         webrtc::I420Buffer::Create(width, height);
 
@@ -240,28 +360,15 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
 
     const int rotationAngle = mapped.rotationAngle();
 
-    // 时间戳必须使用单调时钟，不可用媒体的 startTime：
-    // startTime 是媒体内时间，换源/重播时从 0 重新开始、往回 seek 时跳回更早的值，
-    // 而 RTP 时间轴要求单调递增。时间戳回退会导致观众端解码器将新帧当作旧帧丢弃，
-    // 直到时间轴追上（表现为卡住）；重播或换源时从 120s 跳回 0 则永远追不上，
-    // 表现为永久卡死。本应用的画面同步依赖控制消息（play/pause/seek），
-    // 不依赖 RTP 时间戳，故改用单调时钟：帧间隔照实、时间轴永远递增。
-    // +1 兜底：两帧落在同一微秒时保证严格递增（编码器会丢弃时间戳相等的帧）。
-    int64_t timestampUs = webrtc::TimeMicros();
-    if (timestampUs <= m_lastTimestampUs)
-        timestampUs = m_lastTimestampUs + 1;
-    m_lastTimestampUs = timestampUs;
-
     mapped.unmap();
 
     if (ret != 0) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
             LOG_ERROR("VideoSource") << "帧格式转换失败，libyuv 返回" << ret
                                      << " pixelFormat=" << pixelFormat;
         }
-        return;
+        return std::nullopt;
     }
 
     webrtc::VideoRotation rotation = webrtc::kVideoRotation_0;
@@ -272,11 +379,11 @@ void VideoTrackSource::pushQtFrame(const QVideoFrame &frame) {
     else if (rotationAngle == 270)
         rotation = webrtc::kVideoRotation_270;
 
-    pushFrame(webrtc::VideoFrame::Builder()
-                  .set_video_frame_buffer(buffer)
-                  .set_rotation(rotation)
-                  .set_timestamp_us(timestampUs)
-                  .build());
+    return webrtc::VideoFrame::Builder()
+        .set_video_frame_buffer(buffer)
+        .set_rotation(rotation)
+        .set_timestamp_us(timestampUs)
+        .build();
 }
 
 // ============================
@@ -291,17 +398,27 @@ void VideoTrackSource::AddOrUpdateSink(webrtc::VideoSinkInterface<webrtc::VideoF
 
     // 编码器在这里注册自己。同一根轨道重复注册时本函数会被再次调用，
     // 所以按指针去重，否则计数会越加越多。
-    if (m_registeredSinks.insert(sink).second) {
-        ++m_sinkCount;
-        LOG_INFO("VideoSource") << "编码器已接入,当前订阅者 =" << m_sinkCount;
+    bool inserted = false;
+    {
+        std::lock_guard<std::mutex> lock(m_sinkMutex);
+        inserted = m_registeredSinks.insert(sink).second;
+        if (inserted)
+            m_sinkCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (inserted) {
+        LOG_INFO("VideoSource") << "编码器已接入,当前订阅者 ="
+                                << m_sinkCount.load();
     }
 
     m_broadcaster.AddOrUpdateSink(sink, wants);
 }
 
 void VideoTrackSource::RemoveSink(webrtc::VideoSinkInterface<webrtc::VideoFrame> *sink) {
-    if (m_registeredSinks.erase(sink) > 0)
-        --m_sinkCount;
+    {
+        std::lock_guard<std::mutex> lock(m_sinkMutex);
+        if (m_registeredSinks.erase(sink) > 0)
+            m_sinkCount.fetch_sub(1, std::memory_order_relaxed);
+    }
 
     m_broadcaster.RemoveSink(sink);
 }
@@ -318,7 +435,7 @@ void VideoTrackSource::RequestRefreshFrame() {
 VideoTrackSource::SourceState VideoTrackSource::state() const {
     // kLive 表示"源是活的、可以随时出帧"。
     // 用 kEnded 会让 WebRTC 认为流已结束，不再发送。
-    return m_hasReceivedFrame ? kLive : kInitializing;
+    return m_hasReceivedFrame.load(std::memory_order_relaxed) ? kLive : kInitializing;
 }
 
 bool VideoTrackSource::remote() const {
@@ -345,8 +462,8 @@ bool VideoTrackSource::GetStats(Stats *stats) {
     if (stats == nullptr)
         return false;
 
-    stats->input_width = m_width;
-    stats->input_height = m_height;
+    stats->input_width = m_width.load(std::memory_order_relaxed);
+    stats->input_height = m_height.load(std::memory_order_relaxed);
     return true;
 }
 

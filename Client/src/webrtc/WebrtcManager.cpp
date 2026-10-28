@@ -1382,6 +1382,9 @@ void WebrtcManager::destroy() {
     m_localVideoTrack = nullptr;
     m_localAudioTrack = nullptr;
     m_localMovieAudioTrack = nullptr;
+    // 源不会被 Release() 析构（永远 kOtherRefsRemained），worker 线程必须显式停。
+    if (m_videoSource != nullptr)
+        m_videoSource->shutdown();
     m_videoSource = nullptr;
     m_audioSource = nullptr;
     m_movieAudioSource = nullptr;

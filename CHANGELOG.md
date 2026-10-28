@@ -20,6 +20,8 @@
 - **暂停误报**：卸载/换源/播完不再广播 Pause；用户主动暂停仍正常同步。
 - **重连稳定性**：同一次连接的多个 `connected` 回调只上报一次，ICE 重试计数不再被反复清零；首次 ICE 失败也走 2s/5s/10s 退避重试；PeerConnection 进入 Closed 后拆掉旧连接重建（带防重入/2 秒冷却）。
 - **退出崩溃**：`WebrtcManager::destroy()` 在停 WebRTC 线程前处理 `DeferredDelete`，确保 PeerLink 在信令线程还活着时析构。
+- **编码转换搬离 GUI**：发送端 `VideoTrackSource` 改为 GUI 只打时间戳入有界 FIFO，worker 做 map/libyuv/I420 分配；GPU 帧在 GUI 回退转换后仍进入同一 FIFO，保证编码器收到的时间戳顺序不乱。`sinkCount()==0` 时不做任何转换。新增显式 `shutdown()`（源不会被 Release 析构，worker 必须手动停）。
+- **解码转换搬离 GUI**：接收端 `RemoteVideoRenderer` 增加转换 worker（ToI420 + QVideoFrame 组装），GUI 只做排期与 `setVideoFrame`；`SYNCINE_RENDER_WORKER=0` / `SYNCINE_VIDEO_WORKER=0` 可回退。
 
 ### 网链
 
