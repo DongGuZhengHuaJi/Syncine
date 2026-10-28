@@ -40,6 +40,11 @@ bool isNoisy(absl::string_view message)
         "AudioDeviceWindowsCore::~AudioDeviceWindowsCore",
         "Will not log any `WebRTC.Audio",
         "DataChannelObserver - adapter needed",
+        "Socket::OPT_DSCP not supported",
+        "PhysicalSocketServer got FD_CONNECT_BIT error",
+        "Connection with server failed with error",
+        "Binding request timed out from",
+        "Recording should be stopped before playout",
     };
     for (const char *pattern : patterns) {
         if (message.find(pattern) != absl::string_view::npos)

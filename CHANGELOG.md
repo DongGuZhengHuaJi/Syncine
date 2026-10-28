@@ -31,7 +31,7 @@
 - **共享模式观众端总时长一直为 0、无法拖动进度条**：共享模式观众按设计拿到空播放列表，`video_status` 的条目过滤会把房主上报的 duration 一并丢弃。现在共享模式观众放行房主的视频状态（服务端已按当前条目/seq 过滤），成员表能拿到时长，进度条恢复可拖动。
 - **共享模式默认画质改为高清 1080p**：4K 源不再默认按原画整帧转换/编码；发送端在转换阶段按目标短边前置缩放（I420/NV12/NV21 直接在源平面缩放），显著降低 Windows 主机的 CPU/内存压力。需要 4K 原画可在播放控制条切换。
 - **WebRTC 日志降噪**：哑声卡 playout delay、IPv4 STUN 配 IPv6 候选、TURN 私有 peer 403、JsepTransport 候选等预期内高频消息降到 trace；默认 info 日志不再被刷屏。
-- **网络路径诊断**：media 连接建立 3 秒后自动采一次 GetStats；`WebRTCStats` 现在带候选类型/协议/地址（可判断 IPv6 直连还是 relay）。客户端额外补一个双栈 STUN（Cloudflare），帮助 IPv6 host 候选拿到 srflx。
+- **网络路径诊断**：media 连接建立 3 秒后自动采一次 GetStats；`WebRTCStats` 现在带候选类型/协议/地址（可判断 IPv6 直连还是 relay）。客户端额外补一个双栈 STUN（Cloudflare），帮助 IPv6 host 候选拿到 srflx。新增 `SYNCINE_ICE_IGNORE_VPN=1`，可排除 Radmin/ZeroTier/Tailscale 等虚拟网卡候选。
 
 ### 网链
 

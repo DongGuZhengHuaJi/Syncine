@@ -21,6 +21,7 @@
 #include "api/environment/environment_factory.h"
 #include "api/make_ref_counted.h"
 #include "rtc_base/checks.h"
+#include "rtc_base/network.h"
 
 // ----------------------------------------------------------------------
 // ABI 护栏：客户端看到的类布局必须与 libwebrtc.a 编译时一致。
@@ -218,6 +219,22 @@ QString qualityName(WebrtcManager::VideoQuality quality) {
     case WebrtcManager::VideoQuality::Original: return QStringLiteral("原画");
     }
     return {};
+}
+
+// 诊断开关：SYNCINE_ICE_IGNORE_VPN=1 时不收集 VPN/虚拟网卡候选。
+// Radmin/ZeroTier/Tailscale 这类网卡常被 ICE 选中但实际不通，表现为
+// “换热点/校园网才正常”。默认不开启：有人确实只能走 VPN。
+void applyFactoryNetworkOptions(
+    const webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> &factory)
+{
+    if (factory == nullptr || !qEnvironmentVariableIsSet("SYNCINE_ICE_IGNORE_VPN"))
+        return;
+
+    webrtc::PeerConnectionFactoryInterface::Options options;
+    options.network_ignore_mask =
+        webrtc::kDefaultNetworkIgnoreMask | webrtc::ADAPTER_TYPE_VPN;
+    factory->SetOptions(options);
+    LOG_INFO("WebRTC") << "已忽略 VPN/虚拟网卡候选(SYNCINE_ICE_IGNORE_VPN)";
 }
 
 // ---- 音频设备的两个小工具 ----
@@ -1373,6 +1390,7 @@ bool WebrtcManager::initializeVoiceFactory() {
         stopThreadSet(m_voiceNetworkThread, m_voiceWorkerThread, m_voiceSignalingThread);
         return false;
     }
+    applyFactoryNetworkOptions(m_voiceFactory);
 
     // ---- 保活连接（声卡不被关闭的唯一理由）----
     // WebRTC 的 media engine（持有本端真声卡）按引用计数关闭，引用者只有
@@ -1426,6 +1444,7 @@ bool WebrtcManager::initializeMediaFactory() {
         stopThreadSet(m_mediaNetworkThread, m_mediaWorkerThread, m_mediaSignalingThread);
         return false;
     }
+    applyFactoryNetworkOptions(m_mediaFactory);
     return true;
 }
 
