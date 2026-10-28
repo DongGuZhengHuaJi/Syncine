@@ -779,7 +779,9 @@ void PeerLink::OnStandardizedIceConnectionChange(webrtc::PeerConnectionInterface
 
 void PeerLink::OnIceCandidateError(const std::string &address, int port, const std::string &url,
                                    int error_code, const std::string &error_text) {
-    LOG_ERROR("PeerLink") << m_peerId << "ICE candidate 出错:" << url << error_code
+    // 候选收集失败是常态：每个 STUN/TURN URL 会按网卡各试一遍，远距离测试
+    // 一次能刷几百行。降到 Debug，默认 Info 级别不输出。
+    LOG_DEBUG("PeerLink") << m_peerId << "ICE candidate 出错:" << url << error_code
                           << error_text << "(地址" << address << ":" << port << ")";
 }
 

@@ -2,6 +2,15 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 日志
+
+- **异步写入**：客户端与服务端改为“调用线程入队 + 单写线程批量落盘”，每 100ms 或 64KB flush 一次；队列有界，满时丢弃 trace/debug 并计数，Warn 及以上保留，Fatal 同步落盘。`SYNCINE_LOG_SYNC=1` 可回退到旧的逐行同步模式。
+- **降噪**：直播弹幕的逐包/逐通知日志降到 trace，ICE 候选收集错误降到 debug；文件传输进度和 GetStats 频率不变。
+- **WebRTC 日志**：恢复 `SYNCINE_WEBRTC_LOG` 开关，默认只接 warning 及以上。
+- **收尾日志**：客户端应用对象在 `Log::shutdown()` 之前析构，WebRTC 停线程等收尾日志不会丢。
+
 ## [1.4.0] — 2026-10-28
 
 > 本版客户端与服务端需要一起升级：`video_status` 新增 `itemId/seq`，文件传输的

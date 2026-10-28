@@ -10,10 +10,14 @@
 #include <QMutexLocker>
 #include <QStandardPaths>
 #include <QThread>
+#include <QWaitCondition>
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
+#include <thread>
 #ifdef _WIN32
 #  include <io.h> // _isatty / _fileno
 #  define isatty _isatty
@@ -30,16 +34,45 @@ constexpr int kMaxRolls = 3;                      // 同一天最多保留 .1 .2
 constexpr int kKeepDays = 7;                      // 启动时删除超过 7 天的旧日志
 constexpr int kTagWidth = 10;                     // 标签对齐宽度
 
+// ── 异步队列策略 ────────────────────────────────────────────
+// 4MB 约等于几万条普通日志；写线程每 100ms 或 64KB 落盘一次。
+constexpr qint64 kMaxQueueBytes = 4 * 1024 * 1024;
+constexpr qint64 kFlushBytes = 64 * 1024;
+constexpr int kFlushMs = 100;
+
 struct State {
     QString prefix = QStringLiteral("syncine");
     QString dir;
     QString path;
     QFile file;
+    qint64 writtenBytes = 0;
     bool console = true;
+    bool colorOut = false;
+    bool colorErr = false;
+};
+
+struct Entry {
+    QByteArray plain;
+    QByteArray colored; // 仅在终端且需要颜色时非空
+    Log::Level level = Log::Level::Info;
 };
 
 State g_state;
-QMutex g_fileMutex; // 保护 g_state 中的文件与路径
+QMutex g_fileMutex; // 保护 g_state 中的文件、路径与写入
+
+// 队列：所有线程入队，单个写线程出队。队列锁与文件锁分开，
+// 生产者不会被磁盘/终端 I/O 阻塞。
+QMutex g_queueMutex;
+QWaitCondition g_queueCv;
+std::deque<Entry> g_queue;
+qint64 g_queueBytes = 0;
+bool g_stopWriter = false;
+bool g_writerRunning = false;
+bool g_accepting = false;
+std::thread g_writer;
+std::atomic<bool> g_syncMode{false};
+std::atomic<qint64> g_droppedLow{0};
+
 std::atomic<int> g_level{static_cast<int>(Log::Level::Info)};
 
 // 线程编号：Qt::HANDLE → 1,2,3……，日志中显示为 [t2]，用于确认回调所在线程。
@@ -50,7 +83,7 @@ int g_nextThreadNumber = 1;
 thread_local int t_threadNumber = -1;
 
 QtMessageHandler g_previousHandler = nullptr;
-bool g_initialized = false;
+std::atomic<bool> g_initialized{false};
 
 const char *levelLetter(Log::Level level)
 {
@@ -135,24 +168,30 @@ void openFileLocked()
         return;
     }
 
-    const QString banner = QStringLiteral("\n──────── %1 启动 ────────\n")
-                               .arg(QDateTime::currentDateTime().toString(
-                                   QStringLiteral("yyyy-MM-dd HH:mm:ss")));
-    g_state.file.write(banner.toUtf8());
+    const QByteArray banner = QStringLiteral("\n──────── %1 启动 ────────\n")
+                                  .arg(QDateTime::currentDateTime().toString(
+                                      QStringLiteral("yyyy-MM-dd HH:mm:ss")))
+                                  .toUtf8();
+    g_state.file.write(banner);
     g_state.file.flush();
+    g_state.writtenBytes = g_state.file.size();
 }
 
 void rotateIfNeededLocked(qint64 incoming)
 {
     if (!g_state.file.isOpen())
         return;
-    if (g_state.file.size() + incoming <= kMaxFileBytes)
+    if (g_state.writtenBytes + incoming <= kMaxFileBytes)
         return;
 
     g_state.file.close();
     QFile::remove(rollPath(kMaxRolls)); // 最旧的直接扔
-    for (int i = kMaxRolls - 1; i >= 1; --i)
+    for (int i = kMaxRolls - 1; i >= 1; --i) {
+        // Windows 上 rename 目标存在会失败；先删再改名。
+        QFile::remove(rollPath(i + 1));
         QFile::rename(rollPath(i), rollPath(i + 1));
+    }
+    QFile::remove(rollPath(1));
     QFile::rename(g_state.path, rollPath(1));
     openFileLocked();
 }
@@ -169,6 +208,146 @@ void cleanupOldFilesLocked()
     for (const QFileInfo &info : files) {
         if (info.lastModified() < deadline)
             QFile::remove(info.absoluteFilePath());
+    }
+}
+
+Entry makeEntry(Log::Level level, const char *tag, const QString &message)
+{
+    // 行在这里就完整定型：时间戳是“事件发生的时间”，不是写线程落盘的时间。
+    // tag 必须立刻拷贝——Qt message handler 传进来的 constData() 指向临时 QByteArray。
+    const int number = threadNumber();
+    const QString stamp = QDateTime::currentDateTime().toString(
+        QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"));
+    const QString letter = QString::fromLatin1(levelLetter(level));
+    const QString paddedTag = QString::fromLatin1(tag).leftJustified(kTagWidth);
+    const QString tail = QStringLiteral(" [%1] [t%2] %3")
+                             .arg(paddedTag, QString::number(number), message);
+    const QString plain = stamp + QStringLiteral(" [") + letter + QStringLiteral("]") + tail;
+
+    const bool wantedColor = static_cast<int>(level) >= static_cast<int>(Log::Level::Warn)
+                                 ? g_state.colorErr
+                                 : g_state.colorOut;
+
+    Entry entry;
+    entry.level = level;
+    entry.plain = plain.toUtf8();
+    if (wantedColor) {
+        entry.colored = (stamp + QStringLiteral(" [")
+                         + QString::fromLatin1(levelColor(level)) + letter
+                         + QStringLiteral("\033[0m]") + tail).toUtf8();
+    }
+    return entry;
+}
+
+// 写一条到控制台/文件；调用方必须持有 g_fileMutex。
+// flush=true 时立即刷盘（Fatal、同步模式、批次结束）。
+void writeEntryLocked(const Entry &entry, bool flush)
+{
+    if (g_state.console) {
+        // 警告及以上走 stderr，其余走 stdout，使错误输出与普通输出分离
+        FILE *out = static_cast<int>(entry.level) >= static_cast<int>(Log::Level::Warn)
+                        ? stderr : stdout;
+        const QByteArray &bytes = entry.colored.isEmpty() ? entry.plain : entry.colored;
+        std::fprintf(out, "%s\n", bytes.constData());
+        if (flush)
+            std::fflush(out);
+    }
+
+    if (g_state.file.isOpen()) {
+        rotateIfNeededLocked(entry.plain.size() + 1);
+        g_state.file.write(entry.plain);
+        g_state.file.write("\n", 1);
+        g_state.writtenBytes += entry.plain.size() + 1;
+        if (flush)
+            g_state.file.flush();
+    }
+}
+
+void flushLocked()
+{
+    if (g_state.console) {
+        std::fflush(stdout);
+        std::fflush(stderr);
+    }
+    if (g_state.file.isOpen())
+        g_state.file.flush();
+}
+
+void writeImmediate(const Entry &entry)
+{
+    QMutexLocker locker(&g_fileMutex);
+    writeEntryLocked(entry, /*flush=*/true);
+}
+
+bool enqueueEntry(const Entry &entry)
+{
+    QMutexLocker locker(&g_queueMutex);
+    if (!g_accepting)
+        return false;
+
+    const qint64 size = entry.plain.size();
+    if (g_queueBytes + size > kMaxQueueBytes) {
+        // 队列满：低级别直接丢；Warn 及以上走慢路径，保证不被淹没。
+        if (static_cast<int>(entry.level) < static_cast<int>(Log::Level::Warn)) {
+            g_droppedLow.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        return false;
+    }
+
+    g_queue.push_back(entry);
+    g_queueBytes += size;
+    g_queueCv.wakeOne();
+    return true;
+}
+
+void writerLoop()
+{
+    constexpr auto kBatchWait = std::chrono::milliseconds(20);
+
+    for (;;) {
+        std::deque<Entry> batch;
+        bool stopping = false;
+        {
+            QMutexLocker locker(&g_queueMutex);
+            const auto start = std::chrono::steady_clock::now();
+            while (!g_stopWriter && g_queueBytes < kFlushBytes) {
+                if (std::chrono::steady_clock::now() - start
+                    >= std::chrono::milliseconds(kFlushMs)) {
+                    break;
+                }
+                g_queueCv.wait(&g_queueMutex, kBatchWait.count());
+            }
+
+            batch.swap(g_queue);
+            g_queueBytes = 0;
+            stopping = g_stopWriter;
+        }
+
+        if (!batch.empty()) {
+            QMutexLocker fileLocker(&g_fileMutex);
+            for (const Entry &entry : batch)
+                writeEntryLocked(entry, /*flush=*/false);
+            flushLocked();
+        } else {
+            // 即使没有日志也定期 flush，保证控制台不长时间不刷新
+            QMutexLocker fileLocker(&g_fileMutex);
+            flushLocked();
+        }
+
+        const qint64 dropped = g_droppedLow.exchange(0, std::memory_order_relaxed);
+        if (dropped > 0) {
+            Entry summary;
+            summary.level = Log::Level::Warn;
+            const QString message = QStringLiteral("日志队列已满，丢弃 %1 条 trace/debug 日志")
+                                        .arg(dropped);
+            summary.plain = makeEntry(Log::Level::Warn, "Log", message).plain;
+            QMutexLocker fileLocker(&g_fileMutex);
+            writeEntryLocked(summary, /*flush=*/true);
+        }
+
+        if (stopping)
+            break;
     }
 }
 
@@ -212,13 +391,15 @@ void qtMessageHandler(QtMsgType type, const QMessageLogContext &context,
 
 void Log::init(const QString &filePrefix)
 {
-    if (g_initialized)
+    if (g_initialized.load())
         return;
-    g_initialized = true;
+    g_initialized.store(true);
 
     const QByteArray envLevel = qgetenv("SYNCINE_LOG_LEVEL");
     if (!envLevel.isEmpty())
         g_level.store(static_cast<int>(levelFromName(QString::fromLatin1(envLevel))));
+
+    g_syncMode.store(qEnvironmentVariableIsSet("SYNCINE_LOG_SYNC"));
 
     g_state.prefix = filePrefix;
 
@@ -233,6 +414,8 @@ void Log::init(const QString &filePrefix)
     g_state.path = QStringLiteral("%1/%2-%3.log")
                        .arg(g_state.dir, filePrefix,
                             QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd")));
+    g_state.colorOut = isatty(fileno(stdout)) != 0;
+    g_state.colorErr = isatty(fileno(stderr)) != 0;
 
     {
         QMutexLocker locker(&g_fileMutex);
@@ -242,23 +425,55 @@ void Log::init(const QString &filePrefix)
 
     g_previousHandler = qInstallMessageHandler(qtMessageHandler);
 
+    if (!g_syncMode.load()) {
+        {
+            QMutexLocker locker(&g_queueMutex);
+            g_stopWriter = false;
+            g_accepting = true;
+            g_queue.clear();
+            g_queueBytes = 0;
+        }
+        g_writer = std::thread(writerLoop);
+        g_writerRunning = true;
+    } else {
+        QMutexLocker locker(&g_queueMutex);
+        g_accepting = true;
+    }
+
     // 注意 QDebug 会在每个 << 之间插入一个空格，故此处字符串不带尾随空格
-    LOG_INFO("Log") << "日志级别:" << levelName(level()) << "文件:" << g_state.path;
+    LOG_INFO("Log") << "日志级别:" << levelName(level()) << "文件:" << g_state.path
+                    << (g_syncMode.load() ? "(同步模式)" : "(异步模式)");
 }
 
 void Log::shutdown()
 {
-    QMutexLocker locker(&g_fileMutex);
-
-    if (g_state.file.isOpen()) {
-        g_state.file.flush();
-        g_state.file.close();
+    // 先停止接收新日志，再恢复 Qt handler；写线程此时可能还在排空队列。
+    {
+        QMutexLocker locker(&g_queueMutex);
+        g_accepting = false;
     }
+
     if (g_previousHandler) {
         qInstallMessageHandler(g_previousHandler);
         g_previousHandler = nullptr;
     }
-    g_initialized = false;
+
+    if (g_writerRunning) {
+        {
+            QMutexLocker locker(&g_queueMutex);
+            g_stopWriter = true;
+            g_queueCv.wakeAll();
+        }
+        g_writer.join();
+        g_writerRunning = false;
+    }
+
+    QMutexLocker locker(&g_fileMutex);
+    if (g_state.file.isOpen()) {
+        g_state.file.flush();
+        g_state.file.close();
+    }
+    g_initialized.store(false);
 }
 
 void Log::setLevel(Level level)
@@ -293,39 +508,17 @@ void Log::write(Level level, const char *tag, const QString &message)
     if (!isEnabled(level))
         return;
 
-    // 先取线程号（内部会锁线程表），最后才获取文件锁。顺序必须固定：
-    // nameCurrentThread 同样是先线程表后写日志，保持此顺序不会死锁。
-    const int number = threadNumber();
-    const QString stamp = QDateTime::currentDateTime().toString(
-        QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"));
-    const QString letter = QString::fromLatin1(levelLetter(level));
-    const QString tail = QStringLiteral(" [%1] [t%2] %3")
-                             .arg(QString::fromLatin1(tag).leftJustified(kTagWidth),
-                                  QString::number(number), message);
-    const QString plain = stamp + QStringLiteral(" [") + letter + QStringLiteral("]") + tail;
+    const Entry entry = makeEntry(level, tag, message);
 
-    QMutexLocker locker(&g_fileMutex);
-
-    if (g_state.console) {
-        // 警告及以上走 stderr，其余走 stdout，使错误输出与普通输出分离
-        FILE *out = static_cast<int>(level) >= static_cast<int>(Level::Warn) ? stderr : stdout;
-        if (isatty(fileno(out))) {
-            const QString colored = stamp + QStringLiteral(" [")
-                + QString::fromLatin1(levelColor(level)) + letter
-                + QStringLiteral("\033[0m]") + tail;
-            std::fprintf(out, "%s\n", qPrintable(colored));
-        } else {
-            std::fprintf(out, "%s\n", qPrintable(plain));
-        }
-        std::fflush(out);
+    // Fatal 必须同步落盘，否则随后的 abort 会把队列里的最后一行带走。
+    if (level == Level::Fatal || g_syncMode.load() || !g_initialized.load()) {
+        writeImmediate(entry);
+        return;
     }
 
-    if (g_state.file.isOpen()) {
-        const QByteArray bytes = plain.toUtf8() + '\n';
-        rotateIfNeededLocked(bytes.size());
-        g_state.file.write(bytes);
-        // 每行都 flush：日志文件的价值在于程序崩溃后仍能看到最后一行
-        g_state.file.flush();
+    if (!enqueueEntry(entry)) {
+        // 队列满且是 Warn 及以上，或 shutdown 已经开始：走同步慢路径。
+        writeImmediate(entry);
     }
 }
 

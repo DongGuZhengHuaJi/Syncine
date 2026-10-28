@@ -630,7 +630,7 @@ void LiveDanmakuSession::onBinaryMessage(const QByteArray &message)
     m_batch.clear();
     parsePackets(message, 0);
     if (!m_batch.isEmpty()) {
-        LOG_DEBUG("LiveDanmaku") << "一批直播弹幕:" << m_batch.size();
+        LOG_TRACE("LiveDanmaku") << "一批直播弹幕:" << m_batch.size();
         emit danmakuBatch(m_batch);
     }
 }
@@ -660,7 +660,7 @@ void LiveDanmakuSession::parsePackets(const QByteArray &data, int depth)
         const QByteArray body = data.mid(offset + headerLength,
                                          total - headerLength);
 
-        LOG_DEBUG("LiveDanmaku") << "弹幕包 ver=" << version
+        LOG_TRACE("LiveDanmaku") << "弹幕包 ver=" << version
                                  << " op=" << operation
                                  << " body=" << body.size();
 
@@ -711,7 +711,7 @@ void LiveDanmakuSession::handleNotification(const QByteArray &body)
 {
     const QJsonObject object = QJsonDocument::fromJson(body).object();
     const QString cmd = object.value(QStringLiteral("cmd")).toString();
-    LOG_DEBUG("LiveDanmaku") << "cmd=" << cmd;
+    LOG_TRACE("LiveDanmaku") << "cmd=" << cmd;
 
     if (cmd.startsWith(QLatin1String("DANMU_MSG"))) {
         const QJsonArray info = object.value(QStringLiteral("info")).toArray();
