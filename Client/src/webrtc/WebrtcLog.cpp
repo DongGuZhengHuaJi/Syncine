@@ -45,6 +45,16 @@ bool isNoisy(absl::string_view message)
         "Connection with server failed with error",
         "Binding request timed out from",
         "Recording should be stopped before playout",
+        // 编码/接收侧的周期性统计与拥塞反馈：量大、单条无行动价值。
+        "Multiple playout delays set",
+        "Frame scheduled out of order",
+        "Same/old NTP timestamp",
+        "Playout underflow",
+        "NACK list full",
+        "No decodable frame in",
+        "PacketBuffer is already at max size",
+        "Clear PacketBuffer and request key frame",
+        "Estimated available bandwidth",
     };
     for (const char *pattern : patterns) {
         if (message.find(pattern) != absl::string_view::npos)
