@@ -119,7 +119,9 @@ public:
     // 注意这只是**上限**:实际码率仍由拥塞控制在这个上限内跑，
     // "不设限"也不等于无限 —— 那样拿到的是 WebRTC 的默认上限（540p 以上约 2.5Mbps）。
     // 可随时调用（界面线程）,内部会投递到信令线程。
-    void applyVideoQuality(int maxBitrateBps, double maxFramerate);
+    // maxWidth/maxHeight 为 0 表示不限制分辨率（scale_resolution_down_to）。
+    void applyVideoQuality(int maxBitrateBps, double maxFramerate,
+                           int maxWidth = 0, int maxHeight = 0);
 
     // 显式调用 setPlayoutEnabled(false)，让 NullAudioPoller 每隔约 10 毫秒请求一次音频数据
     void setPlayoutEnabled(bool enabled);
@@ -265,6 +267,8 @@ private:
     webrtc::scoped_refptr<webrtc::RtpSenderInterface> m_videoSender;
     int m_videoMaxBitrateBps = 0;    // 0 = 不设上限(用 WebRTC 默认)
     double m_videoMaxFramerate = 0;  // 0 = 不设上限
+    int m_videoMaxWidth = 0;         // 0 = 不限制分辨率
+    int m_videoMaxHeight = 0;
     // 主线程与信令线程都会读：连接建立后要按它补设一次参数
     bool m_videoSending = true;
 

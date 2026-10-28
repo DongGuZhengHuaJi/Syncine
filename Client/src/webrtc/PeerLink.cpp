@@ -661,6 +661,8 @@ void PeerLink::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnect
         // 两个回调都补一次是幂等的。
         pushMovieAudioSending();
         pushVideoSending();
+        // 协商会重启发送流，画质参数在连上后必须再落一次。
+        pushVideoQuality();
         reportConnected();
         break;
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionFailed:
@@ -790,6 +792,8 @@ void PeerLink::OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectio
         // 连上后补一次。Media 连接的电影音轨就是靠这里真正停发的。
         pushMovieAudioSending();
         pushVideoSending();
+        // 协商会重启发送流，画质参数在连上后必须再落一次。
+        pushVideoQuality();
         reportConnected();
         break;
     case webrtc::PeerConnectionInterface::PeerConnectionState::kFailed:
@@ -920,9 +924,12 @@ void PeerLink::createAnswer() {
     m_connection->CreateAnswer(this, options);
 }
 
-void PeerLink::applyVideoQuality(int maxBitrateBps, double maxFramerate) {
+void PeerLink::applyVideoQuality(int maxBitrateBps, double maxFramerate,
+                                 int maxWidth, int maxHeight) {
     m_videoMaxBitrateBps = maxBitrateBps;
     m_videoMaxFramerate = maxFramerate;
+    m_videoMaxWidth = maxWidth;
+    m_videoMaxHeight = maxHeight;
     pushVideoQuality();
 }
 
@@ -948,8 +955,12 @@ void PeerLink::pushVideoQuality() {
         //                    拥塞控制在这个上限内自适应。
         //   max_framerate    帧率上限。观影场景很划算：电影本来 24fps,
         //                    网络差时降到 15 肉眼几乎无感，码率却能省一半。
-        //   分辨率           不在这里设 —— 让编码器按码率自己降(过载时它会
-        //                    先降分辨率），比自行推测缩放系数更准确。
+        //   scale_resolution_down_to  目标分辨率上限。低档位显式压到 480p/720p，
+        //                    不再把“降到多少”完全交给编码器。
+        // 降级策略写死为保帧率、降分辨率，行为可预期。
+        parameters.degradation_preference =
+            webrtc::DegradationPreference::MAINTAIN_FRAMERATE;
+
         webrtc::RtpEncodingParameters &encoding = parameters.encodings[0];
 
         if (m_videoMaxBitrateBps > 0)
@@ -961,6 +972,13 @@ void PeerLink::pushVideoQuality() {
             encoding.max_framerate = m_videoMaxFramerate;
         else
             encoding.max_framerate.reset();
+
+        if (m_videoMaxWidth > 0 && m_videoMaxHeight > 0) {
+            encoding.scale_resolution_down_to =
+                webrtc::Resolution{m_videoMaxWidth, m_videoMaxHeight};
+        } else {
+            encoding.scale_resolution_down_to.reset();
+        }
 
         const webrtc::RTCError error = m_videoSender->SetParameters(parameters);
         if (!error.ok()) {
@@ -975,7 +993,12 @@ void PeerLink::pushVideoQuality() {
                              << "帧率上限"
                              << (m_videoMaxFramerate > 0
                                      ? QString::number(m_videoMaxFramerate) + "fps"
-                                     : QStringLiteral("默认"));
+                                     : QStringLiteral("默认"))
+                             << "分辨率上限"
+                             << (m_videoMaxWidth > 0
+                                     ? QStringLiteral("%1x%2").arg(m_videoMaxWidth)
+                                           .arg(m_videoMaxHeight)
+                                     : QStringLiteral("不限制"));
     });
 }
 

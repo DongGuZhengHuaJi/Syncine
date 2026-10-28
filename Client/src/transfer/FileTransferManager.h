@@ -68,6 +68,8 @@ signals:
     void errorOccurred(const QString &peerId, const QString &message);
     // 数据通道的连通状态变化（窗口用来启停发送按钮）
     void connectionChanged(const QString &peerId);
+    // 是否有进行中的传输（供共享视频临时降低码率）
+    void transferActivityChanged(bool active);
 
 private slots:
     void onDataChannelOpened(const QString &peerId, const QString &channel);
@@ -140,6 +142,20 @@ private:
     static QString sanitizeFileName(const QString &name);
     static QString uniquePath(const QString &directory, const QString &name);
 
+    // ---- 应用层发送窗口 ----
+    // 默认固定 512KB；SYNCINE_TRANSFER_ADAPTIVE=1 时按 ACK 速率在 256KB~1MB
+    // 之间 AIMD。**不用 availableOutgoingBitrate**（实测不可信）。
+    qint64 sendWindowForPeer(const QString &peerId) const;
+    qint64 highWaterForPeer(const QString &peerId) const;
+    void noteAdaptiveAck(const QString &peerId, qint64 confirmed);
+    void noteAdaptiveStall(const QString &peerId);
+
+    struct AdaptiveWindow {
+        qint64 window = 512 * 1024;
+        qint64 lastConfirmed = 0;
+        qint64 lastUpdateMs = 0;
+    };
+
     WebrtcManager *m_webrtc = nullptr;
     RoomSession *m_session = nullptr;
 
@@ -165,6 +181,10 @@ private:
     QSet<QString> m_statsPeers;
     qint64 m_lastStatsMs = 0;
     quint32 m_nextId = 1;
+
+    QHash<QString, AdaptiveWindow> m_adaptiveWindows;
+    bool m_adaptiveWindowEnabled = false;
+    bool m_lastActivity = false;
 };
 
 #endif //SYNCINE_FILETRANSFERMANAGER_H

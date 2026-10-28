@@ -189,6 +189,10 @@ public:
 
     void setVideoQuality(VideoQuality quality);
 
+    // 文件传输进行中：把共享视频码率压到约 1.2Mbps，结束后恢复用户档位。
+    void setTransferActive(bool active);
+    bool transferActive() const { return m_transferActive; }
+
     VideoQuality videoQuality() const {
         return m_videoQuality;
     }
@@ -340,6 +344,10 @@ private:
     PeerLink *createLink(const QString &peerId, LinkKind kind,
                          bool createDataChannel);
 
+    // 把当前档位（含传输期码率上限、横竖屏目标分辨率）套到一条/所有 media 连接。
+    void applyQualityToLink(PeerLink *link);
+    void applyQualityToAll();
+
     // 将 m_iceServers 转换为 libwebrtc 的形状。全项目唯一的转换点——
     // libwebrtc 侧字段名为 password、协议中为 credential，对应关系只在此处定义。
     // 列表为空时退回一个公共 STUN（见 .cpp 中的 defaultIceServers）。
@@ -463,6 +471,10 @@ private:
     // （非共享模式会立刻置 false）。
     bool m_movieAudioSending = true;
     bool m_videoSending = true;
+    bool m_transferActive = false;
+    // 最近一次从 GUI 帧看到的源尺寸，用于在 worker 还没更新统计时计算横/竖屏目标。
+    int m_lastQualityWidth = 0;
+    int m_lastQualityHeight = 0;
 
     // 接收侧：WebRTC 帧 → QVideoFrame → QVideoSink。
     // 所有对端共用一个——房间里同时只显示一路视频。

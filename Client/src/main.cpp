@@ -112,6 +112,15 @@ int main(int argc, char *argv[]) {
         // 状态全部保存在这里，QML 的传输窗口只是视图，关掉不影响任务
         FileTransferManager fileTransferManager(&webrtcManager, &roomSession);
 
+        // 文件传输进行中时给共享视频封一个较低的码率上限，传输结束再恢复。
+        // 只影响房主的 media 连接；观众端没有发送流，调用是空操作。
+        QObject::connect(&fileTransferManager,
+                         &FileTransferManager::transferActivityChanged,
+                         &webrtcManager,
+                         [&webrtcManager](bool active) {
+                             webrtcManager.setTransferActive(active);
+                         });
+
         // ICE 配置不在此处提供：它随房间下发（服务端在 room_created / room_joined 中
         // 给出，含 Cloudflare 兑换的临时 TURN 凭据），由 SignalingChannel 在每次建连前
         // 交给 WebrtcManager，从而更换服务端或 TURN 供应商都无需修改客户端。

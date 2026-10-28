@@ -22,6 +22,9 @@
 - **退出崩溃**：`WebrtcManager::destroy()` 在停 WebRTC 线程前处理 `DeferredDelete`，确保 PeerLink 在信令线程还活着时析构。
 - **编码转换搬离 GUI**：发送端 `VideoTrackSource` 改为 GUI 只打时间戳入有界 FIFO，worker 做 map/libyuv/I420 分配；GPU 帧在 GUI 回退转换后仍进入同一 FIFO，保证编码器收到的时间戳顺序不乱。`sinkCount()==0` 时不做任何转换。新增显式 `shutdown()`（源不会被 Release 析构，worker 必须手动停）。
 - **解码转换搬离 GUI**：接收端 `RemoteVideoRenderer` 增加转换 worker（ToI420 + QVideoFrame 组装），GUI 只做排期与 `setVideoFrame`；`SYNCINE_RENDER_WORKER=0` / `SYNCINE_VIDEO_WORKER=0` 可回退。
+- **jitter buffer**：排期延迟取 `max(音频积压, 到达抖动×2, 最小缓冲)`；有电影声时默认最小 100ms，`SYNCINE_SHARE_JITTER_MS` 可覆盖，无音频时只按抖动估计。
+- **画质档位**：显式 `MAINTAIN_FRAMERATE` 降级策略 + 按档位设置 480p/720p/1080p 目标分辨率（竖屏自动交换宽高）；协商完成后补写一次，修复 media 连接可能从未真正应用画质的问题。
+- **传输与视频争用**：文件传输进行中把共享视频码率上限压到 1.2Mbps，结束后恢复；传输窗口默认仍为 512KB，`SYNCINE_TRANSFER_ADAPTIVE=1` 时按 ACK 增量在 256KB~1MB 间 AIMD，不使用不可信的 availableOutgoingBitrate。
 
 ### 网链
 

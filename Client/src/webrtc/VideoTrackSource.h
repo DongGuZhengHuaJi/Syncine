@@ -59,6 +59,14 @@ public:
         return m_sinkCount.load(std::memory_order_relaxed);
     }
 
+    // 最近一帧的源尺寸；还没收到帧时为 0。画质档位据此决定横/竖屏目标分辨率。
+    int inputWidth() const {
+        return m_width.load(std::memory_order_relaxed);
+    }
+    int inputHeight() const {
+        return m_height.load(std::memory_order_relaxed);
+    }
+
     // ---- VideoSourceInterface<VideoFrame> ----
     void AddOrUpdateSink(webrtc::VideoSinkInterface<webrtc::VideoFrame> *sink,
                          const webrtc::VideoSinkWants &wants) override;

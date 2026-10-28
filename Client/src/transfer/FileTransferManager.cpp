@@ -48,12 +48,8 @@ const qint64 kSendWindowBytes = [] {
 constexpr qint64 kAckEveryBytes = 128 * 1024;
 constexpr qint64 kAckIntervalMs = 100;
 
-// 数据通道自己的 SCTP 发送缓冲水位。应用层窗口已经限制了在途量，
-// 这里只是第二道保险，避免 SCTP 队列无界增长。
-const qint64 kSendBufferHighWater =
-    qMax<qint64>(1024 * 1024, kSendWindowBytes + 512 * 1024);
-const qint64 kSendBufferLowWater =
-    qMax<qint64>(256 * 1024, kSendBufferHighWater / 4);
+// 数据通道自己的 SCTP 发送缓冲水位由 highWaterForPeer()/lowWater 动态计算
+// （默认窗口下等价于 max(1MB, window+512KB)），避免自适应窗口时写死。
 // 断线后等待 P2P 恢复/续传的最长时间
 constexpr qint64 kInterruptedGraceMs = 60 * 1000;
 
@@ -117,6 +113,15 @@ FileTransferManager::FileTransferManager(WebrtcManager *webrtc,
 
     m_healthTimer.setInterval(kHealthIntervalMs);
     connect(&m_healthTimer, &QTimer::timeout, this, &FileTransferManager::onHealthTimer);
+
+    // 默认固定窗口；自适应需要显式开启，避免在还没实测的路径上引入抖动。
+    m_adaptiveWindowEnabled = qEnvironmentVariableIsSet("SYNCINE_TRANSFER_ADAPTIVE")
+                              && qEnvironmentVariableIntValue("SYNCINE_TRANSFER_ADAPTIVE") != 0;
+    LOG_INFO("Transfer") << "发送窗口:"
+                         << (m_adaptiveWindowEnabled
+                                 ? QStringLiteral("自适应 256KB~1MB")
+                                 : QStringLiteral("%1KB(固定)")
+                                       .arg(kSendWindowBytes / 1024));
 }
 
 FileTransferManager::~FileTransferManager() {
@@ -465,8 +470,13 @@ void FileTransferManager::onRoomLeft() {
     m_lastPongMs.clear();
     m_pendingControl.clear();
     m_sendPaused.clear();
+    m_adaptiveWindows.clear();
     m_statsPeers.clear();
     m_lastStatsMs = 0;
+    if (m_lastActivity) {
+        m_lastActivity = false;
+        emit transferActivityChanged(false);
+    }
     m_pumpTimer.stop();
     m_notifyTimer.stop();
     m_healthTimer.stop();
@@ -740,6 +750,8 @@ void FileTransferManager::handleAccept(const QString &peerId, const QJsonObject 
     record->lastAckMs = record->lastProgressMs;
     record->lastResumeMs = 0;
     record->lastLogMs = 0;
+    // 新传输重新从基线窗口开始采样。
+    m_adaptiveWindows.remove(peerId);
     record->state = TransferState::Transferring;
 
     ensureModel(peerId)->updateRecord(record);
@@ -864,6 +876,7 @@ void FileTransferManager::handleAck(const QString &peerId, const QJsonObject &me
     }
 
     record->peerReceived = qMax(record->peerReceived, confirmed);
+    noteAdaptiveAck(peerId, record->peerReceived);
 
     // 所有数据都已被接收端确认，才发 complete。控制通道是无序的，
     // 过早发 complete 会在最后几个数据块之前到达接收端。
@@ -1037,14 +1050,16 @@ void FileTransferManager::onPumpTimer() {
         // 只要还有发送任务，节拍就必须继续跑；即使当前因为水位被暂停。
         active = true;
 
+        const qint64 highWater = highWaterForPeer(peerId);
+        const qint64 lowWater = qMax<qint64>(256 * 1024, highWater / 4);
         const qint64 buffered = static_cast<qint64>(
             m_webrtc->dataChannelBufferedAmount(
                 peerId, QString::fromLatin1(TransferChannel::DataId)));
         bool &paused = m_sendPaused[peerId];
         if (paused) {
-            if (buffered <= kSendBufferLowWater)
+            if (buffered <= lowWater)
                 paused = false;
-        } else if (buffered >= kSendBufferHighWater) {
+        } else if (buffered >= highWater) {
             paused = true;
             LOG_TRACE("Transfer") << "发送缓冲达到高水位，暂停:" << peerId
                                   << buffered << "字节";
@@ -1053,7 +1068,7 @@ void FileTransferManager::onPumpTimer() {
             continue;
 
         // 只发送到高水位为止；实际速率仍由 SCTP 拥塞控制决定。
-        qint64 budget = qMin(kSendBudgetPerTick, kSendBufferHighWater - buffered);
+        qint64 budget = qMin(kSendBudgetPerTick, highWater - buffered);
         if (budget <= 0)
             continue;
 
@@ -1078,6 +1093,65 @@ void FileTransferManager::onPumpTimer() {
 
     if (!active)
         m_pumpTimer.stop();
+}
+
+qint64 FileTransferManager::sendWindowForPeer(const QString &peerId) const {
+    if (!m_adaptiveWindowEnabled)
+        return kSendWindowBytes;
+    return m_adaptiveWindows.value(peerId, AdaptiveWindow{}).window;
+}
+
+qint64 FileTransferManager::highWaterForPeer(const QString &peerId) const {
+    // 与固定窗口时的 max(1MB, window + 512KB) 保持一致。
+    return qMax<qint64>(1024 * 1024, sendWindowForPeer(peerId) + 512 * 1024);
+}
+
+void FileTransferManager::noteAdaptiveAck(const QString &peerId, qint64 confirmed) {
+    if (!m_adaptiveWindowEnabled)
+        return;
+
+    AdaptiveWindow &state = m_adaptiveWindows[peerId];
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (state.lastUpdateMs == 0) {
+        state.lastUpdateMs = now;
+        state.lastConfirmed = confirmed;
+        return;
+    }
+
+    const qint64 elapsed = now - state.lastUpdateMs;
+    if (elapsed < 2000)
+        return;
+
+    const qint64 acked = confirmed - state.lastConfirmed;
+    const qint64 oldWindow = state.window;
+    if (acked >= state.window / 2)
+        state.window = qMin<qint64>(1024 * 1024, state.window * 5 / 4);
+    else if (acked < state.window / 8)
+        state.window = qMax<qint64>(256 * 1024, state.window * 3 / 4);
+
+    state.lastConfirmed = confirmed;
+    state.lastUpdateMs = now;
+
+    if (state.window != oldWindow) {
+        LOG_DEBUG("Transfer") << "自适应窗口:" << peerId
+                              << oldWindow / 1024 << "KB →" << state.window / 1024
+                              << "KB (2 秒 ACK" << acked / 1024 << "KB)";
+    }
+}
+
+void FileTransferManager::noteAdaptiveStall(const QString &peerId) {
+    if (!m_adaptiveWindowEnabled)
+        return;
+
+    AdaptiveWindow &state = m_adaptiveWindows[peerId];
+    if (state.window <= 256 * 1024)
+        return;
+
+    const qint64 oldWindow = state.window;
+    state.window = qMax<qint64>(256 * 1024, state.window / 2);
+    state.lastUpdateMs = 0; // 重新开始采样
+    LOG_WARN("Transfer") << "传输停滞，自适应窗口减半:" << peerId
+                         << oldWindow / 1024 << "KB →" << state.window / 1024 << "KB";
 }
 
 bool FileTransferManager::sendNextChunk(const TransferRecordPtr &record, qint64 *budget) {
@@ -1127,11 +1201,12 @@ bool FileTransferManager::sendNextChunk(const TransferRecordPtr &record, qint64 
         return false;
     }
 
-    // 应用层发送窗口：未被 ACK 的字节不超过 kSendWindowBytes
+    // 应用层发送窗口：未被 ACK 的字节不超过该对端的窗口
+    const qint64 window = sendWindowForPeer(record->peerId);
     const qint64 inFlight = record->transferred - record->peerReceived;
-    if (inFlight >= kSendWindowBytes)
+    if (inFlight >= window)
         return false;
-    const qint64 windowLeft = kSendWindowBytes - inFlight;
+    const qint64 windowLeft = window - inFlight;
 
     const qint64 want = qMin<qint64>(
         kChunkSize, qMin(remaining, qMin(*budget, windowLeft)));
@@ -1469,6 +1544,12 @@ void FileTransferManager::onNotifyTimer() {
         }
     }
 
+    // 传输开始/结束时通知共享视频限速；只在状态变化时发一次。
+    if (active != m_lastActivity) {
+        m_lastActivity = active;
+        emit transferActivityChanged(active);
+    }
+
     if (!active)
         m_notifyTimer.stop();
 }
@@ -1496,6 +1577,7 @@ void FileTransferManager::markInterrupted(const TransferRecordPtr &record) {
     record->interruptedFrom = record->state;
     record->state = TransferState::Interrupted;
     record->interruptedAtMs = QDateTime::currentMSecsSinceEpoch();
+    noteAdaptiveStall(record->peerId);
     record->resumeRequested = false;
     record->lastResumeMs = 0;
     // **不要清 hashReplayRemaining**：发送端可能正在重算前缀哈希，

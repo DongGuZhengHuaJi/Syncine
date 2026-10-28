@@ -57,6 +57,15 @@ RemoteVideoRenderer::RemoteVideoRenderer(QObject *parent)
     m_presentTimer->setTimerType(Qt::PreciseTimer);
     connect(m_presentTimer, &QTimer::timeout, this, &RemoteVideoRenderer::deliverDueFrames);
 
+    // 有电影声时的最小视频缓冲。默认 100ms；测试/调试时可用环境变量关掉。
+    const QByteArray jitterEnv = qgetenv("SYNCINE_SHARE_JITTER_MS");
+    if (!jitterEnv.isEmpty()) {
+        bool ok = false;
+        const int value = jitterEnv.toInt(&ok);
+        if (ok)
+            m_jitterFloorMs = std::clamp(value, 0, 300);
+    }
+
     // 默认启用转换 worker；SYNCINE_RENDER_WORKER=0 回退到 GUI 转换。
     m_workerEnabled = !(qEnvironmentVariableIsSet("SYNCINE_RENDER_WORKER")
                         && qEnvironmentVariableIntValue("SYNCINE_RENDER_WORKER") == 0);
@@ -109,6 +118,9 @@ void RemoteVideoRenderer::setWritingEnabled(bool enabled) {
     m_lastDelayUpdateUs = 0;
     m_lastAudioUs = 0;
     m_hasSeenAudio = false;
+    m_jitterMs = 0.0;
+    m_lastMediaTimestampUs = 0;
+    m_lastArrivalUs = 0;
 }
 
 void RemoteVideoRenderer::setPlayoutDelayProvider(std::function<int()> provider) {
@@ -117,6 +129,9 @@ void RemoteVideoRenderer::setPlayoutDelayProvider(std::function<int()> provider)
     m_lastDelayUpdateUs = 0;
     m_lastAudioUs = 0;
     m_hasSeenAudio = false;
+    m_jitterMs = 0.0;
+    m_lastMediaTimestampUs = 0;
+    m_lastArrivalUs = 0;
 }
 
 void RemoteVideoRenderer::resetQueue() {
@@ -129,6 +144,9 @@ void RemoteVideoRenderer::resetQueue() {
     }
     m_scheduled.clear();
     m_scheduledBytes = 0;
+    m_jitterMs = 0.0;
+    m_lastMediaTimestampUs = 0;
+    m_lastArrivalUs = 0;
     if (m_presentTimer != nullptr)
         m_presentTimer->stop();
 }
@@ -141,7 +159,7 @@ void RemoteVideoRenderer::OnFrame(const webrtc::VideoFrame &frame) {
     if (!m_writingEnabled.load(std::memory_order_relaxed))
         return;
 
-    IncomingFrame incoming{frame, steadyNowUs()};
+    IncomingFrame incoming{frame, steadyNowUs(), frame.timestamp_us()};
 
     if (!m_workerStarted.load(std::memory_order_relaxed)) {
         // 回退开关：在 GUI 线程转换（旧行为）。
@@ -184,10 +202,13 @@ void RemoteVideoRenderer::workerLoop() {
             continue;
 
         const int64_t arrivalUs = incoming->arrivalUs;
+        const int64_t mediaTimestampUs = incoming->mediaTimestampUs;
         QMetaObject::invokeMethod(
             this,
-            [this, qtFrame = std::move(*converted), arrivalUs, generation]() mutable {
-                scheduleConverted(std::move(qtFrame), arrivalUs, generation);
+            [this, qtFrame = std::move(*converted), arrivalUs, mediaTimestampUs,
+             generation]() mutable {
+                scheduleConverted(std::move(qtFrame), arrivalUs, mediaTimestampUs,
+                                  generation);
             },
             Qt::QueuedConnection);
     }
@@ -274,16 +295,45 @@ void RemoteVideoRenderer::scheduleIncomingOnGui(IncomingFrame incoming) {
     if (!converted)
         return;
 
+    // 回退路径也更新抖动估计（与 worker 路径同一套规则）。
+    const int64_t mediaTimestampUs = incoming.mediaTimestampUs;
+    if (m_lastMediaTimestampUs != 0 && mediaTimestampUs > 0) {
+        const int64_t mediaDelta = mediaTimestampUs - m_lastMediaTimestampUs;
+        const int64_t arrivalDelta = incoming.arrivalUs - m_lastArrivalUs;
+        if (mediaDelta > 0 && arrivalDelta > 0) {
+            const double jitter =
+                std::abs(static_cast<double>(arrivalDelta - mediaDelta)) / 1000.0;
+            m_jitterMs += 0.1 * (jitter - m_jitterMs);
+            m_jitterMs = std::clamp(m_jitterMs, 0.0, kMaxDelayMs);
+        }
+    }
+    m_lastMediaTimestampUs = mediaTimestampUs;
+    m_lastArrivalUs = incoming.arrivalUs;
+
     pushScheduled(std::move(*converted), incoming.arrivalUs);
 }
 
 void RemoteVideoRenderer::scheduleConverted(QVideoFrame frame, int64_t arrivalUs,
+                                            int64_t mediaTimestampUs,
                                             uint64_t generation) {
     // resetQueue 之后到达的旧转换结果直接丢弃。
     if (generation != m_generation.load(std::memory_order_relaxed)
         || !m_writingEnabled.load(std::memory_order_relaxed)) {
         return;
     }
+
+    if (m_lastMediaTimestampUs != 0 && mediaTimestampUs > 0) {
+        const int64_t mediaDelta = mediaTimestampUs - m_lastMediaTimestampUs;
+        const int64_t arrivalDelta = arrivalUs - m_lastArrivalUs;
+        if (mediaDelta > 0 && arrivalDelta > 0) {
+            const double jitter =
+                std::abs(static_cast<double>(arrivalDelta - mediaDelta)) / 1000.0;
+            m_jitterMs += 0.1 * (jitter - m_jitterMs);
+            m_jitterMs = std::clamp(m_jitterMs, 0.0, kMaxDelayMs);
+        }
+    }
+    m_lastMediaTimestampUs = mediaTimestampUs;
+    m_lastArrivalUs = arrivalUs;
 
     pushScheduled(std::move(frame), arrivalUs);
 }
@@ -328,10 +378,17 @@ void RemoteVideoRenderer::OnDiscardedFrame() {
 int RemoteVideoRenderer::currentDelayMs() {
     const int64_t now = steadyNowUs();
 
-    double target = 0.0;
+    double audioTarget = 0.0;
     if (m_delayProvider) {
-        target = std::clamp(static_cast<double>(m_delayProvider()), 0.0, kMaxDelayMs);
+        audioTarget = std::clamp(static_cast<double>(m_delayProvider()), 0.0, kMaxDelayMs);
     }
+
+    // 网络抖动需要额外的视频缓冲；有电影声时再保底 m_jitterFloorMs。
+    // 没有音频时只按抖动估计，不强行加固定延迟。
+    const double jitterTarget = std::min(kMaxDelayMs, m_jitterMs * 2.0);
+    double target = audioTarget > 0.0
+                        ? std::max(audioTarget, std::max(m_jitterFloorMs, jitterTarget))
+                        : jitterTarget;
 
     if (target > 0.0) {
         m_lastAudioUs = now;

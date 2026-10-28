@@ -68,11 +68,13 @@ public:
 
 private:
     struct IncomingFrame {
-        IncomingFrame(const webrtc::VideoFrame &frame_, int64_t arrival)
-            : frame(frame_), arrivalUs(arrival) {}
+        IncomingFrame(const webrtc::VideoFrame &frame_, int64_t arrival,
+                      int64_t mediaTimestamp)
+            : frame(frame_), arrivalUs(arrival), mediaTimestampUs(mediaTimestamp) {}
 
         webrtc::VideoFrame frame;
         int64_t arrivalUs = 0;
+        int64_t mediaTimestampUs = 0;
     };
 
     struct PendingFrame {
@@ -85,7 +87,8 @@ private:
     // worker/GUI 回退路径共用：把一帧 WebRTC 画面转成 QVideoFrame。
     std::optional<QVideoFrame> convertToQtFrame(const webrtc::VideoFrame &frame);
     // GUI 线程：worker 转换完成后入排期队列（generation 不匹配说明已 reset）。
-    void scheduleConverted(QVideoFrame frame, int64_t arrivalUs, uint64_t generation);
+    void scheduleConverted(QVideoFrame frame, int64_t arrivalUs,
+                           int64_t mediaTimestampUs, uint64_t generation);
     // GUI 线程：worker 关闭时的回退路径，直接在 GUI 转换。
     void scheduleIncomingOnGui(IncomingFrame incoming);
     void pushScheduled(QVideoFrame frame, int64_t arrivalUs);
@@ -129,6 +132,14 @@ private:
     int64_t m_lastDelayUpdateUs = 0;
     int64_t m_lastAudioUs = 0;
     bool m_hasSeenAudio = false;
+
+    // 到达抖动：到达间隔与 RTP 时间戳间隔之差的 EWMA。只用于决定视频
+    // 额外缓冲，不改变音频侧 NetEq 的行为。
+    double m_jitterMs = 0.0;
+    int64_t m_lastMediaTimestampUs = 0;
+    int64_t m_lastArrivalUs = 0;
+    // 有电影声时的最小视频缓冲；SYNCINE_SHARE_JITTER_MS 可覆盖。
+    double m_jitterFloorMs = 100.0;
 
     std::atomic<bool> m_writingEnabled{true};
 

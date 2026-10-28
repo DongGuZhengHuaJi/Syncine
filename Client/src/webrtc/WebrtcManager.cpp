@@ -182,32 +182,32 @@ private:
 };
 
 // 画质档位 → 编码参数。
-// 只调整码率上限与帧率上限，不改变分辨率——让编码器按码率自行下调（过载时它本就会
-// 优先降低分辨率），比自行推测缩放系数更准确。
+// 码率/帧率上限 + 显式目标分辨率。低档位不再让编码器自己猜降到多少。
 // 关于「原画」：WebRTC 中不设上限并非无限，未设置时会采用按分辨率计算的默认上限
 // （encoder_stream_factory.cc 的 GetMaxDefaultVideoBitrateKbps：540p 以上一律
 // 2500kbps），比「高清」还低；故「原画」须显式给出较高上限，实际上限交由带宽估计。
 struct VideoQualityPreset {
     int maxBitrateBps = 0;   // 0 = 用 WebRTC 默认上限
     double maxFramerate = 0; // 0 = 不限制
+    int targetHeight = 0;    // 0 = 不限制分辨率（按源尺寸）
 };
 
 VideoQualityPreset presetForQuality(WebrtcManager::VideoQuality quality) {
     switch (quality) {
     case WebrtcManager::VideoQuality::Smooth:
-        // 流畅：320~480p 观感，帧率留 24(电影本身也就 24)
-        return {800'000, 24.0};
+        // 流畅：480p，帧率留 24(电影本身也就 24)
+        return {800'000, 24.0, 480};
     case WebrtcManager::VideoQuality::Standard:
-        // 标准：720p 观感
-        return {2'000'000, 30.0};
+        // 标准：720p
+        return {2'000'000, 30.0, 720};
     case WebrtcManager::VideoQuality::Hd:
-        // 高清：1080p 观感。已高于 WebRTC 的默认上限（2.5Mbps）
-        return {4'000'000, 30.0};
+        // 高清：1080p。已高于 WebRTC 的默认上限（2.5Mbps）
+        return {4'000'000, 30.0, 1080};
     case WebrtcManager::VideoQuality::Original:
-        // 原画：上限设得很高，实际速率由网络决定；不限制帧率
-        return {10'000'000, 0.0};
+        // 原画：上限设得很高，实际速率由网络决定；不限制帧率/分辨率
+        return {10'000'000, 0.0, 0};
     }
-    return {10'000'000, 0.0};
+    return {10'000'000, 0.0, 0};
 }
 
 QString qualityName(WebrtcManager::VideoQuality quality) {
@@ -505,8 +505,7 @@ PeerLink *WebrtcManager::createLink(const QString &peerId, LinkKind kind,
         if (m_localVideoTrack != nullptr) {
             link->addLocalVideoTrack(m_localVideoTrack, m_videoSending);
             // 新连接套用当前画质档位（观众可能在房主修改档位之后才进入）
-            const VideoQualityPreset preset = presetForQuality(m_videoQuality);
-            link->applyVideoQuality(preset.maxBitrateBps, preset.maxFramerate);
+            applyQualityToLink(link);
         }
         if (m_localMovieAudioTrack != nullptr) {
             // 初始 active 直接写进 init_send_encodings，协商时发送流
@@ -1074,17 +1073,63 @@ void WebrtcManager::setVideoQuality(VideoQuality quality) {
         return;
 
     m_videoQuality = quality;
+    applyQualityToAll();
 
     const VideoQualityPreset preset = presetForQuality(quality);
-    for (auto it = m_peers.constBegin(); it != m_peers.constEnd(); ++it) {
-        if (it.value().media != nullptr)
-            it.value().media->applyVideoQuality(preset.maxBitrateBps,
-                                                preset.maxFramerate);
+    LOG_INFO("WebRTC") << "推送画质设为" << qualityName(quality)
+                       << "(码率上限" << (preset.maxBitrateBps / 1000) << "kbps)"
+                       << "目标高度" << preset.targetHeight << "p";
+    emit videoQualityChanged(quality);
+}
+
+void WebrtcManager::applyQualityToLink(PeerLink *link) {
+    if (link == nullptr)
+        return;
+
+    const VideoQualityPreset preset = presetForQuality(m_videoQuality);
+    int maxBitrate = preset.maxBitrateBps;
+    // 文件传输期间给视频封顶；传输结束后 setTransferActive(false) 会恢复。
+    if (m_transferActive)
+        maxBitrate = maxBitrate > 0 ? qMin(maxBitrate, 1'200'000) : 1'200'000;
+
+    int maxWidth = 0;
+    int maxHeight = 0;
+    if (preset.targetHeight > 0) {
+        int sourceWidth = m_videoSource != nullptr ? m_videoSource->inputWidth() : 0;
+        int sourceHeight = m_videoSource != nullptr ? m_videoSource->inputHeight() : 0;
+        // worker 还没更新统计时，用 GUI 最近一帧的尺寸兜底。
+        if (sourceWidth <= 0 || sourceHeight <= 0) {
+            sourceWidth = m_lastQualityWidth;
+            sourceHeight = m_lastQualityHeight;
+        }
+        if (sourceWidth > 0 && sourceHeight > 0) {
+            const bool portrait = sourceHeight > sourceWidth;
+            const int longSide = preset.targetHeight * 16 / 9;
+            maxWidth = portrait ? preset.targetHeight : longSide;
+            maxHeight = portrait ? longSide : preset.targetHeight;
+        }
     }
 
-    LOG_INFO("WebRTC") << "推送画质设为" << qualityName(quality)
-                       << "(码率上限" << (preset.maxBitrateBps / 1000) << "kbps)";
-    emit videoQualityChanged(quality);
+    link->applyVideoQuality(maxBitrate, preset.maxFramerate, maxWidth, maxHeight);
+}
+
+void WebrtcManager::applyQualityToAll() {
+    for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it) {
+        if (it.value().media != nullptr)
+            applyQualityToLink(it.value().media);
+    }
+}
+
+void WebrtcManager::setTransferActive(bool active) {
+    if (m_transferActive == active)
+        return;
+
+    m_transferActive = active;
+    applyQualityToAll();
+
+    LOG_INFO("WebRTC") << (active
+                               ? "文件传输进行中，共享视频码率上限降至 1.2Mbps"
+                               : "文件传输结束，恢复共享视频画质档位");
 }
 
 void WebrtcManager::setMovieAudioEnabled(bool enabled) {
@@ -1215,6 +1260,16 @@ void WebrtcManager::pushQtVideoFrame(const QVideoFrame &frame) {
 
     if (m_videoSource == nullptr)
         return;
+
+    // 第一帧/换源后才能知道横竖屏与真实尺寸；此时把目标分辨率补套一次。
+    const int width = frame.width();
+    const int height = frame.height();
+    if (width > 0 && height > 0
+        && (width != m_lastQualityWidth || height != m_lastQualityHeight)) {
+        m_lastQualityWidth = width;
+        m_lastQualityHeight = height;
+        applyQualityToAll();
+    }
 
     m_videoSource->pushQtFrame(frame);
 }
