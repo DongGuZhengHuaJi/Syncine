@@ -99,6 +99,7 @@ Item {
 
         fileTransferDialog.close()
         messageDialog.close()
+        mismatchDialog.close()
 
         // 先把麦克风关掉再走。否则人已经离开房间了，麦克风还在采集 ——
         // 系统托盘上的录音指示灯会一直亮着，是用户最先注意到的异常。
@@ -147,6 +148,12 @@ Item {
 
     MessageDialog {
         id: messageDialog
+    }
+
+    // 视频不一致单独一个弹窗：状态恢复一致时要自动关掉，
+    // 不能和房间错误共用（否则误关正在显示的错误）
+    MessageDialog {
+        id: mismatchDialog
     }
 
     // 网链模式加条目：选来源 → 粘链接 + 挑画质。
@@ -220,8 +227,10 @@ Item {
 
         function onVideoMismatchChanged() {
             if (roomSession.videoMismatched) {
-                messageDialog.message = "检测到成员加载的视频不一致,同步将适配较短视频的时长"
-                messageDialog.open()
+                mismatchDialog.message = "检测到成员加载的视频不一致，同步将适配较短视频的时长"
+                mismatchDialog.open()
+            } else {
+                mismatchDialog.close()
             }
         }
 
@@ -231,6 +240,7 @@ Item {
             audioSettingsDialog.close() // 同理
             fileTransferDialog.close()
             messageDialog.close()
+            mismatchDialog.close()
             if (leaving)
                 return
             const win = root.Window.window

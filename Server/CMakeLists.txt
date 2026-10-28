@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(Server VERSION 1.3.0 LANGUAGES CXX)
+project(Server VERSION 1.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -62,3 +62,8 @@ target_link_libraries(Server
 # 部署时 `cmake --install` 会把可执行文件放到 <prefix>/bin/Server。
 include(GNUInstallDirs)
 install(TARGETS Server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# Linux 服务端包同时带 coturn 部署脚本；Windows 服务端不使用 coturn。
+if(UNIX)
+    install(DIRECTORY deploy/coturn DESTINATION deploy USE_SOURCE_PERMISSIONS)
+endif()

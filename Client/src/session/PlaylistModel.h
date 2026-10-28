@@ -94,9 +94,16 @@ public:
 signals:
     void countChanged();
     void currentChanged();
+    // 某个条目从列表里消失（服务端 playlist_changed）。
+    // wasCurrent 表示它在删除前是不是当前条目 —— PlaybackSync 据此决定
+    // 是只停后台下载，还是同时卸载播放器/弹幕。
+    void itemRemoved(const QString &itemId, bool wasCurrent);
 
 private:
     int indexOf(const QString &itemId) const;
+    // 对比旧列表和新列表，发出 itemRemoved()。调用时 m_entries 必须已是新列表。
+    void emitRemovedItems(const QList<PlaylistEntry> &oldEntries,
+                          const QString &oldCurrentId);
     // spec → 列表里那行小字（"1080P" / "手选" / "最高画质"）
     QString specLabelOf(const PlaylistEntry &entry) const;
 

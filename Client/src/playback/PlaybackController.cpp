@@ -5,6 +5,7 @@
 #include "PlaybackController.h"
 #include <QCryptographicHash>
 #include <QFile>
+#include <QImage>
 #include <QUrl>
 #include <QMediaPlayer>
 #include <QAudioOutput>
@@ -397,6 +398,10 @@ void PlaybackController::applyVideoSink() {
         if (m_webrtcManager != nullptr)
             m_webrtcManager->setRemoteVideoEnabled(true);
 
+        // 先清掉切换前本地画面的最后一帧；远端首帧到达前显示黑屏，
+        // 否则会短暂停留在上一路画面上。
+        clearVideoFrame();
+
         LOG_DEBUG("Playback") << "applyVideoSink: 显示远端,播放器已脱钩";
     } else {
         // 显示本地画面，播放器往 sink 送帧
@@ -406,9 +411,25 @@ void PlaybackController::applyVideoSink() {
         if (m_webrtcManager != nullptr)
             m_webrtcManager->setRemoteVideoEnabled(false);
 
+        // **必须主动清一帧**：VideoOutput 不会因为远端渲染器停手就自动变黑，
+        // 房主切走共享模式后观众端会一直残留最后一帧。
+        // 本地播放器有画面时，下一帧会立刻覆盖这帧黑色。
+        clearVideoFrame();
+
         LOG_DEBUG("Playback") << "applyVideoSink: 显示本地,播放器 →" << m_outputSink
                               << "实际生效:" << m_player->videoSink();
     }
+}
+
+void PlaybackController::clearVideoFrame() {
+    if (m_outputSink == nullptr)
+        return;
+
+    // 用一帧 2×2 纯黑图像清屏。QVideoSink 没有“clear”接口，
+    // 而 VideoOutput 自己不会在无人送帧时重绘黑色。
+    QImage black(2, 2, QImage::Format_RGB32);
+    black.fill(Qt::black);
+    m_outputSink->setVideoFrame(QVideoFrame(black));
 }
 
 

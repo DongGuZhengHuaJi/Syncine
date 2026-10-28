@@ -299,7 +299,12 @@ void RoomSession::reportVideoStatus(bool loaded, const QString &hash, qint64 dur
     // 先更新本地成员表
     m_members->setVideoStatus(m_clientId, loaded, duration);
 
-    send(Protocol::encodeVideoStatus(loaded, hash, duration));
+    // itemId 让服务端只比较当前条目；切模式/切条目时旧条目的状态会被忽略。
+    // seq 处理同一连接内的乱序：一次切条目会连发「卸载旧条目」「新条目未就绪」
+    // 「新条目已加载」几条状态，工作线程抢锁的顺序不保证与发送顺序一致。
+    send(Protocol::encodeVideoStatus(loaded, hash, duration,
+                                     m_playlist->currentItemId(),
+                                     ++m_videoStatusSeq));
 }
 
 // ============================
@@ -547,15 +552,21 @@ void RoomSession::handlePlayback(const Protocol::Message &message) {
 }
 
 void RoomSession::handleVideoStatus(const Protocol::Message &message) {
+    // 只有属于当前条目的状态才有效：切模式/切条目后，旧条目的延迟上报
+    // （不论是 loaded=true 还是卸载）都会把成员表改回旧状态，误导门禁。
+    const QString currentItem = m_playlist->currentItemId();
+    if (message.itemId != currentItem) {
+        LOG_DEBUG("Room") << "忽略旧条目的视频状态: clientId=" << message.clientId
+                          << " itemId=" << message.itemId.left(8);
+        return;
+    }
+
     m_members->setVideoStatus(message.clientId, message.loaded, message.duration);
 
     // 条目时长在添加时未知，由加载它的成员一并告知列表。
-    // video_status 不带 itemId，但只有当前条目会被加载，故对应到当前条目。
-    if (message.loaded && message.duration > 0) {
-        const QString itemId = m_playlist->currentItemId();
-        if (!itemId.isEmpty())
-            m_playlist->setDuration(itemId, message.duration);
-    }
+    // video_status 现在带 itemId，只有当前条目的状态才会更新列表时长。
+    if (message.loaded && message.duration > 0 && !currentItem.isEmpty())
+        m_playlist->setDuration(currentItem, message.duration);
 }
 
 void RoomSession::handlePlaylistChanged(const Protocol::Message &message) {

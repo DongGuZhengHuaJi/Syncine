@@ -61,6 +61,9 @@ struct TransferRecord {
 
     qint64 totalBytes = 0;
     qint64 transferred = 0;
+    // 发送端：接收方已确认连续收到的字节数（应用层 ACK），窗口据此推进。
+    // 发送端 transferred 是“已读出发送”的数量，可能领先于它。
+    qint64 peerReceived = 0;
     qint64 speedBps = 0;
     QString error;
     bool verified = false;
@@ -76,6 +79,17 @@ struct TransferRecord {
     qint64 lastSampleBytes = 0;
     qint64 lastSampleMs = 0;
 
+    // 最近一次有真实进展（收到数据块 / 收到 ACK）的时间。
+    // 超过阈值没有任何进展即视为停滞，转入 Interrupted 并尝试续传。
+    qint64 lastProgressMs = 0;
+    // 接收端最近一次回报 ACK 的字节数与时间，用来合并 ACK，避免每块一条
+    qint64 lastAckBytes = 0;
+    qint64 lastAckMs = 0;
+    // 停滞恢复时最近一次发出 resume 的时间，按间隔重试
+    qint64 lastResumeMs = 0;
+    // 最近一次写进度日志的时间
+    qint64 lastLogMs = 0;
+
     // ---- 断线续传 ----
     // 进入 Interrupted 前的状态，恢复时据此决定重发 offer / resume / complete
     TransferState interruptedFrom = TransferState::Failed;
@@ -84,6 +98,10 @@ struct TransferRecord {
     qint64 hashReplayRemaining = 0;
     // 已发出 resume，等待 resume_ack
     bool resumeRequested = false;
+    // 这次 resume 是否发生在通道重建之后。只有重建后的新通道才允许
+    // 回退到接收端偏移重发；在仍存活的旧通道上回退会与 SCTP 里
+    // 正在重传的旧数据块重复，导致文件损坏。
+    bool resumeAllowsRewind = false;
     // 发送完成时的 SHA-256，用于断线后重发 complete
     QString finalHash;
 };

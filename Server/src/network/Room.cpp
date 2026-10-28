@@ -217,26 +217,50 @@ Room::offlineMembers() const {
     return result;
 }
 
-void Room::setMemberVideo(const std::shared_ptr<Session> &session, bool loaded,
-                          const std::string &hash, long long duration) {
+bool Room::setMemberVideo(const std::shared_ptr<Session> &session, bool loaded,
+                          const std::string &hash, long long duration,
+                          const std::string &itemId, long long seq) {
     for (Member &member : m_members) {
         if (member.session == session) {
+            if (seq > 0 && seq <= member.videoSeq) {
+                LOG_DEBUG("Room") << "忽略乱序的视频状态: " << member.nickname
+                                  << " seq=" << seq << " last=" << member.videoSeq;
+                return false;
+            }
+            member.videoSeq = seq;
             LOG_DEBUG("Room") << "成员视频状态: " << member.nickname
                               << " loaded=" << (loaded ? 1 : 0)
                               << " duration=" << duration
+                              << " itemId=" << (itemId.empty() ? "-" : itemId.substr(0, 8))
                               << " hash=" << (hash.empty() ? "-" : hash.substr(0, 8));
             member.loaded = loaded;
             member.hash = loaded ? hash : std::string();
             member.duration = loaded ? duration : 0;
-            return;
+            member.itemId = loaded ? itemId : std::string();
+            return true;
         }
     }
     LOG_DEBUG("Room") << "视频状态上报来自非成员: clientId=" << session->id();
+    return false;
+}
+
+void Room::clearMemberVideoStates() {
+    for (Member &member : m_members) {
+        member.loaded = false;
+        member.hash.clear();
+        member.duration = 0;
+        member.itemId.clear();
+    }
+    LOG_DEBUG("Room") << "清空成员视频状态：当前条目已变化";
 }
 
 bool Room::updateMismatch() {
     bool mismatched = false;
     long long shortest = 0;
+
+    // 只比较「当前条目」的状态。切换模式/切条目时，成员可能还持有上一条
+    // 的 loaded/hash/duration；不按 itemId 过滤就会把不同视频误判为不一致。
+    const std::string currentItem = currentItemId();
 
     std::string commonHash;
     bool haveHash = false;
@@ -247,6 +271,9 @@ bool Room::updateMismatch() {
     for (const Member &member : m_members) {
         if (!member.loaded)
             continue;
+        if (currentItem.empty() || member.itemId != currentItem)
+            continue;
+
         ++loadedCount;
 
         if (!member.hash.empty()) {

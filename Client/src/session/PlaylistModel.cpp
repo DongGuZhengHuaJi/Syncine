@@ -72,6 +72,9 @@ QHash<int, QByteArray> PlaylistModel::roleNames() const {
 // ============================
 
 void PlaylistModel::reset(const QList<PlaylistEntry> &entries, int currentIndex) {
+    const QList<PlaylistEntry> oldEntries = m_entries;
+    const QString oldCurrent = currentItemId();
+
     beginResetModel();
     m_entries = entries;
 
@@ -87,6 +90,7 @@ void PlaylistModel::reset(const QList<PlaylistEntry> &entries, int currentIndex)
     emit countChanged();
     if (currentDidChange)
         emit currentChanged();
+    emitRemovedItems(oldEntries, oldCurrent);
 }
 
 void PlaylistModel::setEntries(const QList<PlaylistEntry> &entries, int currentIndex) {
@@ -101,6 +105,9 @@ void PlaylistModel::setEntries(const QList<PlaylistEntry> &entries, int currentI
         if (row >= 0)
             entry.duration = m_entries.at(row).duration;
     }
+
+    const QList<PlaylistEntry> oldEntries = m_entries;
+    const QString oldCurrent = currentItemId();
 
     // 条目数很少（几十条），整体替换比增量 diff 简单得多，也不易算错
     beginResetModel();
@@ -118,6 +125,7 @@ void PlaylistModel::setEntries(const QList<PlaylistEntry> &entries, int currentI
     emit countChanged();
     if (currentDidChange)
         emit currentChanged();
+    emitRemovedItems(oldEntries, oldCurrent);
 }
 
 void PlaylistModel::setCurrentIndex(int index) {
@@ -265,4 +273,18 @@ int PlaylistModel::indexOf(const QString &itemId) const {
             return i;
     }
     return -1;
+}
+
+void PlaylistModel::emitRemovedItems(const QList<PlaylistEntry> &oldEntries,
+                                     const QString &oldCurrentId) {
+    // 只在服务端确认后的新列表上比对；调用时 m_entries 已经是新列表。
+    for (const PlaylistEntry &entry : oldEntries) {
+        if (contains(entry.itemId))
+            continue;
+
+        const bool wasCurrent = entry.itemId == oldCurrentId;
+        LOG_INFO("Playlist") << "条目已移除: itemId=" << entry.itemId
+                             << " wasCurrent=" << wasCurrent;
+        emit itemRemoved(entry.itemId, wasCurrent);
+    }
 }

@@ -253,6 +253,8 @@ private:
     RoomMode m_roomMode = RoomMode::Sync;
     bool m_videoMismatched = false;
     qint64 m_shortestDuration = 0;
+    // 每次上报 video_status 递增；服务端据此丢弃乱序到达的旧状态
+    qint64 m_videoStatusSeq = 0;
     QList<IceServerConfig> m_iceServers;
 };
 

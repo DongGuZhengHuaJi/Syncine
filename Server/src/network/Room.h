@@ -100,9 +100,14 @@ public:
     std::vector<std::pair<std::string, std::chrono::steady_clock::time_point>>
     offlineMembers() const;
 
-    // 成员视频信息（加载状态/内容哈希/时长）
-    void setMemberVideo(const std::shared_ptr<Session> &session, bool loaded,
-                        const std::string &hash, long long duration);
+    // 成员视频信息（加载状态/内容哈希/时长/所属条目/序号）。
+    // 序号不大于该成员上次已处理的值说明是乱序到达的旧状态，丢弃并返回 false。
+    bool setMemberVideo(const std::shared_ptr<Session> &session, bool loaded,
+                        const std::string &hash, long long duration,
+                        const std::string &itemId, long long seq);
+
+    // 当前条目变化后，所有成员旧的 loaded/hash/duration 都不再属于当前条目
+    void clearMemberVideoStates();
 
     // 重新计算成员视频是否一致；返回状态是否发生变化
     bool updateMismatch();
@@ -163,6 +168,12 @@ private:
         bool loaded = false;
         std::string hash;
         long long duration = 0;
+        // loaded 状态属于哪个播放列表条目。切模式/切条目后，旧 item 的
+        // loaded/hash/duration 不能再参与一致性比较。
+        std::string itemId;
+        // 已处理的最大 video_status 序号。同一连接的状态由多个工作线程
+        // 并发处理，可能乱序；序号更小的那条必须丢掉。
+        long long videoSeq = 0;
     };
 
     std::string m_roomName;

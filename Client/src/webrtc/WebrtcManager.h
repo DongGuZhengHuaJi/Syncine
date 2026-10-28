@@ -89,15 +89,23 @@ public:
 
     // 为 peerId 创建两条连接（voice + media）。已存在则直接返回 true（幂等）。
     // createDataChannel 只应为 true 的一侧（offer 方）传入：数据通道随 offer
-    // 协商，answer 方通过 OnDataChannel 拿到同一条，无需自行创建。
+    // 协商，answer 方通过 OnDataChannel 拿到同样的两条，无需自行创建。
     bool createPeerConnection(const QString &peerId, bool createDataChannel = false);
 
     // ---- 数据通道（文件传输）----
-    // 通道挂在 voice 连接上（该连接在所有模式下都会建立）
-    bool isDataChannelOpen(const QString &peerId) const;
-    // 数据通道里尚未发出的字节数，供文件传输做发送节流
-    quint64 dataChannelBufferedAmount(const QString &peerId) const;
-    bool sendDataChannelMessage(const QString &peerId, const QByteArray &data, bool binary);
+    // 两条通道都挂在 voice 连接上（该连接在所有模式下都会建立）：
+    //   "ctl"  -> 控制 JSON（reliable + unordered）
+    //   "data" -> 文件块（reliable + ordered）
+    bool isDataChannelOpen(const QString &peerId, const QString &channel) const;
+    // 指定通道里尚未发出的字节数，供文件传输做发送节流
+    quint64 dataChannelBufferedAmount(const QString &peerId,
+                                      const QString &channel) const;
+    bool sendDataChannelMessage(const QString &peerId, const QString &channel,
+                                const QByteArray &data, bool binary);
+
+    // 采集一次某对端 voice 链路的 WebRTC 统计并写日志。
+    // 由 FileTransferManager 在传输期间低频调用（默认 15 秒一次）。
+    void requestDataChannelStats(const QString &peerId);
 
     // 关闭并销毁某对端的两条连接。对端离开房间时调用。
     void removePeer(const QString &peerId);
@@ -293,11 +301,12 @@ signals:
     void playoutDeviceChanged(const QString &name);
 
     // ---- 数据通道 ----
-    // 接收可能来自 WebRTC 信令线程，连接方在主线程时由 Qt 排队投递
-    void dataChannelOpened(const QString &peerId);
-    void dataChannelClosed(const QString &peerId);
-    void dataChannelMessageReceived(const QString &peerId, bool binary,
-                                    const QByteArray &data);
+    // 接收可能来自 WebRTC 信令线程，连接方在主线程时由 Qt 排队投递。
+    // channel 为 "ctl"（控制）或 "data"（文件块）
+    void dataChannelOpened(const QString &peerId, const QString &channel);
+    void dataChannelClosed(const QString &peerId, const QString &channel);
+    void dataChannelMessageReceived(const QString &peerId, const QString &channel,
+                                    bool binary, const QByteArray &data);
     // 对端连接被移除（离开房间 / 重建）。文件传输据此结束进行中的任务
     void peerRemoved(const QString &peerId);
 

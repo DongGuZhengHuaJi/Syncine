@@ -2,16 +2,40 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [1.4.0] — 2026-10-28
+
+> 本版客户端与服务端需要一起升级：`video_status` 新增 `itemId/seq`，文件传输的
+> DataChannel 名称改为 `syncine-file-ctl` / `syncine-file-data`，新旧客户端不能互传文件。
+
+### TURN
+
+- **自建 coturn 优先**：服务端配置 `SYNCINE_COTURN_URLS` / `SYNCINE_COTURN_SECRET` 后，用 coturn 的 `use-auth-secret` 本地生成 HMAC-SHA1 临时凭据；不再启动 Cloudflare 兑换线程。
+- **Cloudflare 回退**：未配置 coturn 时继续使用原来的 Cloudflare TURN 换取流程，配置和密钥保持不变。
+- **部署脚本**：新增 `Server/deploy/coturn/install-coturn.sh`，安装并配置 coturn、写入 `/opt/syncine/env`、保留 Cloudflare 配置；Linux 服务端包会带上该脚本。
+- 启动日志会明确输出“使用自建 coturn”或“未启用自建 coturn，使用 Cloudflare TURN”；不会记录 secret 或 credential。
+
+### 文件传输
+
+- **控制与数据分离**：控制 JSON 走 `syncine-file-ctl`（reliable + unordered），文件块走 `syncine-file-data`（reliable + ordered）。取消、校验和心跳不再排在大文件块的重传队列后面。
+- **应用层 ACK 窗口**：接收端每 128KB 或 100ms 合并回报 `ack`，发送端最多允许 512KB 未确认数据在途，文件块降为 32KB；所有字节确认后才发送 `complete`，避免无序控制通道上 complete 先于最后几块到达接收端。
+- **停滞与健康检查**：15 秒没有 ACK / 数据块就转入 Interrupted 并主动 `resume`；控制通道每 5 秒 ping，15 秒没有任何控制消息判定无响应；60 秒仍无法恢复才失败，不再无限卡住。
+- **更安全的断点续传**：通道重建后允许按接收端偏移回退重算前缀 SHA-256；仍在存活的旧通道上只从已发送位置继续，避免与 SCTP 中重传的旧块重复写坏文件；重连/恢复时重发丢失的 offer / resume / complete。
+- **发送窗口与诊断**：默认发送窗口 512KB（可用 `SYNCINE_TRANSFER_WINDOW_KB` 覆盖，128–16384）；在 100ms RTT 的中继路径上约为 BDP 的 7 倍，减少 relay/SCTP 队列积压和 RTT 尖峰。传输期间每 15 秒输出一条 `WebRTCStats` 诊断日志（选中 candidate 类型、RTT、可用带宽、DataChannel 字节），只在有传输时运行；进度日志从每 2 秒降为每 10 秒。
+- **重复发送保护**：同一文件正在传输时直接提示，不再产生多条同名记录。
+- **兼容性**：数据通道名由 `syncine-file` 改为 `syncine-file-ctl` / `syncine-file-data`，新旧客户端之间不能互传文件，两端需要一起升级。
 
 ### 变更
 
+- **`video_status` 必须携带 `itemId` 与 `seq`**：服务端按当前播放列表条目过滤视频状态、按序号丢弃乱序状态，客户端与服务端需一起升级。
 - **移除 HDR 离线转码**：不再生成 `_SDR.mkv`，播放器也不会自动切换到转码产物
 - **HDR 下载改为硬约束**：设置关闭时只选 SDR；档位只考虑不超过目标高度的流，没有 SDR 时向更低分辨率退，而不是回退 HDR；下载后用 ffprobe 复核 `color_transfer`，发现 HDR 直接删除并报错
 - 条目 spec 的 `:h` 现在也会缀在详情视图手选的 HDR 视频上；手选 HDR 流同样受本地开关和 spec 的双重限制，没有 `:h` 的手选 HDR 流会被拒绝
 
 ### 修复
 
+- **切换房间模式误报「视频不匹配」**：`video_status` 增加 `itemId` 与递增的 `seq`，服务端只比较当前条目的状态，并在当前条目变化时清空成员旧的 loaded/hash/时长；迟到或乱序（旧条目、序号更小）的状态直接丢弃。观众端的提示改用独立弹窗，状态恢复一致时自动关闭。
+- **房主切换共享模式后观众端残留画面**：`PlaybackController::applyVideoSink()` 在远端/本地画面切换时向 `QVideoSink` 送一帧黑色，清掉上一路留下的最后一帧；`VideoOutput` 不会因为远端渲染器停手就自动变黑。
+- **删除播放列表条目时未终止下载**：服务端确认删除后，`PlaylistModel` 发出 `itemRemoved`；`PlaybackSync` 如果发现该条目正是当前解析/下载/合并任务，立即 `cancel()` 并清理进度与失败状态。删除当前条目时同时卸载播放器与弹幕，后续由 `playlist_switched` 加载新的当前条目。
 - **下载器 cancel/start 竞态**：`cancel()` 现在同步 kill + waitForFinished + 置空，紧接着的 `start()` 不会再被静默吞掉
 - **yt-dlp 卡死**：探测 30 秒、下载 60 秒、合并 3 分钟无输出即主动终止；`FailedToStart` 会清理进程指针，不再永久锁死下载器
 - **离开房间不再白起一次 yt-dlp**：修正 clearRoomState 中间状态触发的无意义解析

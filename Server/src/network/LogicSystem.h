@@ -53,6 +53,8 @@ private:
     void sendPlaylistMessage(const std::shared_ptr<Room> &room, const nlohmann::json &message);
     // 同步模式下把各条目的匹配状态（未匹配/已匹配/不同步）推给所有人
     void broadcastPlaylistStatus(const std::shared_ptr<Room> &room);
+    // 当前条目变化后重新计算视频一致性；状态有变化才广播 video_mismatch。
+    void broadcastMismatchIfChanged(const std::shared_ptr<Room> &room);
     // 要求调用方持有 m_roomsMutex
     bool removeMemberFromRoomLocked(const std::shared_ptr<Session> &session);
     // 按稳定 clientId 移除成员并处理广播/解散。要求持有 m_roomsMutex。

@@ -7,6 +7,8 @@
 
 #include <atomic>
 #include <memory>
+#include <optional>
+#include <string>
 
 #include <QByteArray>
 #include <QObject>
@@ -124,13 +126,21 @@ public:
     void setAudioMuted(bool muted);
 
     // ---- 数据通道（文件传输）----
-    // 只在 offer 方创建，answer 方通过 OnDataChannel 拿到同一条通道。
-    // 消息分文本（控制 JSON）与二进制（文件块）两种，通道本身可靠且保序。
-    bool isDataChannelOpen() const;
-    // 数据通道里还没发出去的字节数（SCTP 发送缓冲）。文件传输据此节流。
-    quint64 dataChannelBufferedAmount() const;
+    // 两条通道，只在 offer 方创建，answer 方通过 OnDataChannel 拿到：
+    //   "ctl"  -> syncine-file-ctl，reliable + unordered，走控制 JSON
+    //   "data" -> syncine-file-data，reliable + ordered，走文件块
+    // 控制与数据分开后，控制消息不会被大量文件块的重传队列堵住。
+    bool isDataChannelOpen(const QString &channel) const;
+    // 指定通道里还没发出去的字节数（SCTP 发送缓冲）。文件传输据此节流。
+    quint64 dataChannelBufferedAmount(const QString &channel) const;
     // 发送一条消息。通道未打开或队列已满时返回 false
-    bool sendDataChannelMessage(const QByteArray &data, bool binary);
+    bool sendDataChannelMessage(const QString &channel, const QByteArray &data,
+                                bool binary);
+
+    // 采集一次 WebRTC GetStats，输出一条诊断日志：
+    // 选中 candidate 类型、RTT、可用带宽、DataChannel 收发字节。
+    // 由 FileTransferManager 在传输期间低频调用（默认 15 秒一次）。
+    void requestDataChannelStats();
 
     // 生命周期由 WebrtcManager 管理，Release返回 kOtherRefsRemained
     void AddRef() const override {
@@ -156,12 +166,12 @@ signals:
     void iceDisconnected(const QString &peerId, const QString &link);
     void iceFailed(const QString &peerId, const QString &link);
 
-    // 数据通道状态与消息。信号可能从 WebRTC 信令线程发出，
-    // 接收方位于主线程时由 Qt 自动排队投递
-    void dataChannelOpened(const QString &peerId);
-    void dataChannelClosed(const QString &peerId);
-    void dataChannelMessageReceived(const QString &peerId, bool binary,
-                                    const QByteArray &data);
+    // 数据通道状态与消息。channel 为 "ctl" 或 "data"；信号可能从 WebRTC
+    // 信令线程发出，接收方位于主线程时由 Qt 自动排队投递
+    void dataChannelOpened(const QString &peerId, const QString &channel);
+    void dataChannelClosed(const QString &peerId, const QString &channel);
+    void dataChannelMessageReceived(const QString &peerId, const QString &channel,
+                                    bool binary, const QByteArray &data);
 
 private:
     // ---- PeerConnectionObserver ----
@@ -207,9 +217,26 @@ private:
     // ---- 数据通道 ----
     // 观察者由 DataChannelInterface 在信令线程回调
     class ChannelObserver;
-    void attachDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> channel);
-    void onDataChannelStateChanged();
-    void onDataChannelMessage(const webrtc::DataBuffer &buffer);
+    enum class DataChannelKind {
+        Control,
+        Data,
+    };
+    struct ChannelSlot {
+        webrtc::scoped_refptr<webrtc::DataChannelInterface> channel;
+        bool openReported = false;
+        bool closedReported = false;
+    };
+
+    ChannelSlot &slotFor(DataChannelKind kind);
+    const ChannelSlot &slotFor(DataChannelKind kind) const;
+    ChannelObserver *observerFor(DataChannelKind kind) const;
+    static QString channelId(DataChannelKind kind);
+    static std::optional<DataChannelKind> kindFromId(const QString &channel);
+    static std::optional<DataChannelKind> kindFromLabel(const std::string &label);
+    void attachDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> channel,
+                           DataChannelKind kind);
+    void onDataChannelStateChanged(DataChannelKind kind);
+    void onDataChannelMessage(DataChannelKind kind, const webrtc::DataBuffer &buffer);
 
     QString m_peerId;
     LinkKind m_kind;
@@ -251,16 +278,15 @@ private:
     webrtc::VideoSinkInterface<webrtc::VideoFrame> *m_remoteVideoSink = nullptr;
 
     // ---- 数据通道 ----
-    // 观察者回调在 WebRTC 信令线程，send/查询在主线程，故 m_dataChannel
-    // 的读写由 m_dataChannelLock 保护。观察者本身活到本对象析构：
-    // base 类的析构函数是 protected，不能按基类指针删除。
-    std::unique_ptr<ChannelObserver> m_channelObserver;
+    // 观察者回调在 WebRTC 信令线程，send/查询在主线程，故两条通道的读写
+    // 由 m_dataChannelLock 保护。观察者本身活到本对象析构：base 类的
+    // 析构函数是 protected，不能按基类指针删除。
+    std::unique_ptr<ChannelObserver> m_controlObserver;
+    std::unique_ptr<ChannelObserver> m_dataObserver;
     mutable webrtc::Mutex m_dataChannelLock;
-    webrtc::scoped_refptr<webrtc::DataChannelInterface>
-        m_dataChannel RTC_GUARDED_BY(m_dataChannelLock);
+    ChannelSlot m_controlChannel RTC_GUARDED_BY(m_dataChannelLock);
+    ChannelSlot m_dataChannel RTC_GUARDED_BY(m_dataChannelLock);
     bool m_dataChannelClosing RTC_GUARDED_BY(m_dataChannelLock) = false;
-    bool m_dataChannelOpenReported RTC_GUARDED_BY(m_dataChannelLock) = false;
-    bool m_dataChannelClosedReported RTC_GUARDED_BY(m_dataChannelLock) = false;
 
     // 等待执行的操作。
     // createOffer()/restartIce() 在主线程调用，OnSuccess/OnFailure 在 WebRTC

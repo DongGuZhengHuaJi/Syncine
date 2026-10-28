@@ -5,7 +5,7 @@
 - **客户端**：Qt 6.10（QML）+ 原生 libwebrtc
 - **服务端**：C++ / Boost.Asio + Beast，一个 WebSocket 房间服务器
 - **跨平台**：Linux x86-64 与 Windows x86-64
-- **当前版本**：1.3.0
+- **当前版本**：1.4.0
 
 ---
 
@@ -26,9 +26,11 @@
 - **语音**：麦克风推流，可在运行时切换麦克风/听筒设备，也可随时开关麦克风。
 - **聊天**：房间消息同时作为弹幕显示；消息不落盘，退出房间即清空。
 - **文件传输**：成员之间通过 WebRTC DataChannel 点对点传文件，不经过服务器。
-  - 分块传输、进度/速度显示、双方确认、SHA-256 校验。
-  - 发送端按 SCTP 发送缓冲做拥塞控制，避免发送队列无限增长。
-  - 连接中断后 60 秒内可自动断点续传；超过窗口会失败，需要重新发送。
+  - 控制消息（确认、取消、校验、心跳）走独立的无序通道，文件块走有序通道；大文件传输不会再把控制消息堵在重传队列后面。
+  - 分块传输（32KB）、进度/速度显示、双方确认、SHA-256 校验；接收端按 128KB/100ms 合并 ACK，发送端用 512KB 窗口限制在途数据。
+  - 发送端按 SCTP 发送缓冲做二次节流，避免发送队列无限增长；15 秒没有进展会主动请求续传，两条通道都有 5 秒 ping / 15 秒超时健康检查。
+  - 连接中断后 60 秒内可自动断点续传；超过窗口会失败，需要重新发送。新版本的数据通道名已改为 `syncine-file-ctl` / `syncine-file-data`，两端需要一起升级。
+  - 发送窗口默认 512KB，可用环境变量 `SYNCINE_TRANSFER_WINDOW_KB` 调整（128–16384）。传输期间每 15 秒输出一条 `WebRTCStats` 诊断日志（candidate 类型、RTT、可用带宽、DataChannel 字节），进度日志每 10 秒一条。
 
 ### B 站弹幕
 
@@ -65,11 +67,11 @@
 
 ### 直接下载运行（Linux x86-64）
 
-从 [Releases](https://github.com/DongGuZhengHuaJi/Syncine/releases) 下载 `Syncine-1.3.0-Linux.tar.gz`，解压后直接运行：
+从 [Releases](https://github.com/DongGuZhengHuaJi/Syncine/releases) 下载 `Syncine-1.4.0-Linux.tar.gz`，解压后直接运行：
 
 ```bash
-tar xzf Syncine-1.3.0-Linux.tar.gz
-cd Syncine-1.3.0-Linux
+tar xzf Syncine-1.4.0-Linux.tar.gz
+cd Syncine-1.4.0-Linux
 ./bin/Syncine
 ```
 
@@ -90,10 +92,10 @@ sudo apt install libgl1 libegl1 libglx0 libopengl0 libxkbcommon0 libxkbcommon-x1
 
 ### 直接下载运行（Windows x86-64）
 
-下载 `Syncine-1.3.0-Windows.zip`，解压后运行：
+下载 `Syncine-1.4.0-Windows.zip`，解压后运行：
 
 ```bat
-Syncine-1.3.0-Windows\bin\Syncine.exe
+Syncine-1.4.0-Windows\bin\Syncine.exe
 ```
 
 包里已经带了 Qt 运行库、平台插件、QML 模块、`tools/` 下的 ffmpeg/ffprobe 与 yt-dlp，以及 **MSVC 运行库**——不需要另外安装 Qt、Visual Studio 或 VC++ Redistributable。
@@ -106,8 +108,8 @@ Syncine-1.3.0-Windows\bin\Syncine.exe
 
 | 平台 | 文件 | 内容 |
 |---|---|---|
-| Linux x86-64 | `Syncine-Server-1.3.0-Linux-x86_64.tar.gz` | `bin/Server`、`LICENSE` |
-| Windows x64 | `Syncine-Server-1.3.0-Windows-x64.zip` | `bin/Server.exe`、`LICENSE` |
+| Linux x86-64 | `Syncine-Server-1.4.0-Linux-x86_64.tar.gz` | `bin/Server`、`LICENSE` |
+| Windows x64 | `Syncine-Server-1.4.0-Windows-x64.zip` | `bin/Server.exe`、`LICENSE` |
 
 Linux 包是动态链接的：目标机器需要 OpenSSL 运行库（`libssl` / `libcrypto`）；Boost 只用头文件组件（Asio/Beast、UUID/Random），不需要额外的 Boost 运行库。Windows 包使用 vcpkg 静态链接（静态 Boost/OpenSSL + `/MT` 运行库），单个 `Server.exe` 即可运行。
 
@@ -210,7 +212,7 @@ cmake --build --preset release
 
 # 4. 打包
 cd build-release && cpack
-# 产出 Syncine-1.3.0-Linux.tar.gz 与 .zip
+# 产出 Syncine-1.4.0-Linux.tar.gz 与 .zip
 ```
 
 > preset 里的 Qt 路径默认是 `~/Qt/6.10.2/gcc_64`。装在别处时在命令行覆盖：
@@ -242,7 +244,7 @@ cmake -S Client -B Client\build-release -G Ninja -DCMAKE_BUILD_TYPE=Release ^
   "-DWEBRTC_WIN_SYSTEM_LIBS=<见 third_party\webrtc\README.md 第 7 节>"
 cmake --build Client\build-release --parallel
 
-:: 5) 打包（出 Syncine-1.3.0-Windows.zip）
+:: 5) 打包（出 Syncine-1.4.0-Windows.zip）
 cd Client\build-release
 cpack
 ```
@@ -286,12 +288,14 @@ cmake --build Server\build-release --config Release --parallel
 
 服务端依赖 Boost（Asio/Beast、UUID/Random 均为 header-only）、OpenSSL 与 nlohmann-json；CMake ≥ 3.28，C++23。地址、端口和配额在 `Server/src/tools/Config.h`。
 
-**TURN 凭据**：服务端用 Cloudflare 的 TURN 密钥现场兑换临时凭据（有效期 24 小时），随入房消息下发，密钥只留在服务端。来源优先级：
+**TURN 凭据**：服务端优先使用自建 coturn，未配置 coturn 时回退 Cloudflare；两者都不可用时只下发公共 STUN（直连仍可用，NAT 穿透能力下降）。凭据随入房消息下发，密钥只留在服务端。
 
-1. 环境变量 `SYNCINE_TURN_KEY_ID` / `SYNCINE_TURN_API_TOKEN`
-2. `Server/src/tools/Secrets.h`（**不入仓库**，见 `.gitignore`）
+- **自建 coturn（推荐）**：配置 `SYNCINE_COTURN_URLS` / `SYNCINE_COTURN_SECRET` / `SYNCINE_COTURN_STUN_URLS`（可选）/ `SYNCINE_COTURN_TTL`（可选）。coturn 使用 `use-auth-secret`，服务端本地用 HMAC-SHA1 生成短期 username/credential，不依赖外部 API。
+- **Cloudflare（回退）**：只有在没有配置 coturn 时才使用。密钥来源：
+  1. 环境变量 `SYNCINE_TURN_KEY_ID` / `SYNCINE_TURN_API_TOKEN`
+  2. `Server/src/tools/Secrets.h`（**不入仓库**，见 `.gitignore`）
 
-两者都没有时不下发 TURN，只给公共 STUN——直连仍可用，NAT 穿透能力下降。
+服务端自带的 `deploy/coturn/install-coturn.sh` 会安装并配置 coturn、写入 `/opt/syncine/env`，并保留原有的 Cloudflare 配置。删掉 `SYNCINE_COTURN_*` 几行并重启即可回到 Cloudflare。
 
 ---
 
@@ -303,18 +307,21 @@ cmake --build Server\build-release --config Release --parallel
 # 1. 二进制（源码构建或解压 Release 里的服务端包）
 sudo mkdir -p /opt/syncine
 sudo install -m755 Server/build-release/Server /opt/syncine/Server
-# 或者从 Syncine-Server-1.3.0-Linux-x86_64.tar.gz 解压后：
+# 或者从 Syncine-Server-1.4.0-Linux-x86_64.tar.gz 解压后：
 # sudo install -m755 bin/Server /opt/syncine/Server
 
 # 2. 服务端专用用户
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin syncine || true
 sudo chown -R syncine:syncine /opt/syncine
 
-# 3. TURN 密钥放环境文件，不要写进 unit
+# 3. TURN 配置放环境文件，不要写进 unit
+#    使用 coturn 时第 5 步会自动写入 SYNCINE_COTURN_*；
+#    这里的 Cloudflare 密钥只作为未配置 coturn 时的回退，可留空。
 sudo install -m600 /dev/null /opt/syncine/env
 sudo tee /opt/syncine/env >/dev/null <<'EOF'
-SYNCINE_TURN_KEY_ID=...
-SYNCINE_TURN_API_TOKEN=...
+# 未配置 coturn 时才需要：
+# SYNCINE_TURN_KEY_ID=...
+# SYNCINE_TURN_API_TOKEN=...
 # SYNCINE_LOG_LEVEL=info
 EOF
 sudo chown syncine:syncine /opt/syncine/env
@@ -341,7 +348,17 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now syncine
+
+# 5. coturn（推荐）：安装、写配置、写 env 并重启 syncine
+#    Release 的服务端包已包含 deploy/coturn；源码构建时用 Server/deploy/coturn。
+sudo SYNCINE_PUBLIC_IP=<公网IP> \
+     bash /opt/syncine/deploy/coturn/install-coturn.sh
 ```
+
+- coturn 需要放行 **3478/udp、3478/tcp、49160-49300/udp、49160-49300/tcp**（云安全组 + 系统防火墙）；脚本会尝试配置 ufw/firewalld，但云安全组需要手动放行。
+- 脚本会把 `SYNCINE_COTURN_URLS` / `SYNCINE_COTURN_SECRET` 等写入 `/opt/syncine/env`，并保留原有的 Cloudflare 配置。
+- 删除 `SYNCINE_COTURN_*` 四行并重启 `syncine`，即可回退到 Cloudflare TURN。
+- coturn 的 `static-auth-secret` 与 `/opt/syncine/env` 里的 secret 必须一致；脚本会自动生成并写入两边。
 
 - 日志在 `/opt/syncine/logs/`；`SYNCINE_LOG_LEVEL`（trace/debug/info/warn/error）和 `SYNCINE_LOG_DIR` 可覆盖。
 - 需要放行 **8765/tcp**（云安全组和系统防火墙）。
@@ -409,7 +426,7 @@ third_party/webrtc/     WebRTC revision、补丁与构建说明
 - **没有账号系统**：不区分用户，join 房间即可参与；服务端不持久化房间和聊天。
 - **音画同步（lip sync）未实现**；未做时钟漂移校准，长时间播放后各端可能有秒级偏差。
 - **房主掉线 120 秒后房间解散**；暂不支持房主转让。
-- **文件传输续传窗口为 60 秒**；超过后需要重新发送。极端情况下校验阶段丢失尾包会判定失败。
+- **文件传输续传窗口为 60 秒**；超过后需要重新发送。新版本使用双 DataChannel（控制/数据分离），与旧客户端的文件传输不互通，两端需要一起升级。
 - **网链模式没有持久缓存**：退出软件后临时下载会被清理，下次观看会重新下载。
 - **macOS 未支持**；Linux 包要求 glibc ≥ 2.38。
 - **客户端和服务端需要一起升级**：1.3.0 的重连协议与旧服务端不兼容。

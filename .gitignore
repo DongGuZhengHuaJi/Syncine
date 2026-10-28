@@ -17,6 +17,8 @@ design
 RELEASING.md
 
 logs
+# 联调时从客户端/服务端拷回来的测试日志，含设备与网络信息，不入库。
+测试log/
 
 Client/tools/*
 

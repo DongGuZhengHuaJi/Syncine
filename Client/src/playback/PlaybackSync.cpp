@@ -106,6 +106,9 @@ PlaybackSync::PlaybackSync(RoomSession *session,
     // 房间的"当前条目"变了 —— 播放源由这里决定，是唯一会调用 load/unload 的地方
     connect(m_session, &RoomSession::playlistSwitched,
             this, &PlaybackSync::onPlaylistSwitched);
+    // 条目被服务端确认删除：即使不是当前条目，也要停掉它的解析/下载。
+    connect(m_session->playlist(), &PlaylistModel::itemRemoved,
+            this, &PlaybackSync::onPlaylistItemRemoved);
     connect(m_session, &RoomSession::entered,
             this, [this]() {
                 // 进房之前可能就已经加载好视频了，补报一次，
@@ -654,6 +657,9 @@ void PlaybackSync::onPlaylistSwitched(const QString &itemId) {
     emit playingChanged();
 
     applyPlaylistItem(itemId);
+    // 当前条目变了：即使媒体源没变（两个条目指向同一文件时 load() 直接返回），
+    // 也要把 loaded 状态重新挂到新条目上，否则服务端只能看到上一条的旧状态。
+    pushVideoStatus();
     emit liveChanged();
     emit gateChanged();
     // 切到一条正在后台下载的条目时，让进度文案立刻显示出来
@@ -664,6 +670,48 @@ void PlaybackSync::onPlaylistSwitched(const QString &itemId) {
     // 直播没有共同时间轴，播放器对直播倍速的支持也不可靠：切到直播即回原速
     if (live())
         resetPlaybackRate(m_session->inRoom() && m_session->isHost());
+}
+
+void PlaybackSync::onPlaylistItemRemoved(const QString &itemId, bool wasCurrent) {
+    if (m_session == nullptr || m_playback == nullptr || itemId.isEmpty())
+        return;
+
+    const bool wasDownloading = m_downloadItemId == itemId;
+    const bool wasPrepared = m_preparedItemId == itemId;
+    const bool wasFailed = m_failedItems.contains(itemId);
+
+    if (!wasDownloading && !wasPrepared && !wasFailed && !wasCurrent)
+        return;
+
+    // 不管是不是当前条目，只要下载器正在处理它，就立即终止解析/探测/下载/合并。
+    if (wasDownloading) {
+        if (m_urlDownloader != nullptr)
+            m_urlDownloader->cancel();
+        clearDownloadItem();
+        LOG_INFO("Playback") << "条目已删除，终止解析/下载:" << itemId;
+    }
+
+    if (wasPrepared)
+        m_preparedItemId.clear();
+
+    if (wasFailed) {
+        m_failedItems.remove(itemId);
+        emit downloadStateChanged();
+    }
+
+    if (wasCurrent) {
+        // 当前条目被删：播放器/弹幕立即退出；服务端随后会发 playlist_switched，
+        // 由 applyPlaylistItem() 加载新的当前条目（列表空了就保持卸载）。
+        if (m_danmaku != nullptr)
+            m_danmaku->reset();
+        m_playback->unload();
+        emit gateChanged();
+        emit durationChanged();
+        emit liveChanged();
+    }
+
+    emit downloadStateChanged();
+    emit retryStateChanged();
 }
 
 void PlaybackSync::applyPlaylistItem(const QString &itemId) {
