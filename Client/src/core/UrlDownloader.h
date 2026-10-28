@@ -92,6 +92,9 @@ public:
     // ffprobe 复核，发现 HDR 就删文件并失败。必须在 start() 之前设好。
     void setAllowHdr(bool allowed) { m_allowHdr = allowed; }
 
+    // 通用链接是否也带 cookie（Bilibili 来源始终带）。
+    void setGenericCookies(bool enabled) { m_genericCookies = enabled; }
+
     // 取消当前任务，**并把状态清回干净**(没有任务在跑时也一样清)。
     // 内部会同步 kill + waitForFinished + 置空，调用后可以立刻 start()。
     // 界面关弹窗时靠它复位；只发 stateChanged,不会发 resolved/failed。
@@ -182,6 +185,7 @@ private:
     // 本地 HDR 开关（硬约束）。默认关闭，与 AppSettings 的默认值一致；
     // main 启动时会用实际设置覆盖。
     bool m_allowHdr = false;
+    bool m_genericCookies = false;
 
     QString m_stage = QStringLiteral("idle");
     int m_progress = -1;

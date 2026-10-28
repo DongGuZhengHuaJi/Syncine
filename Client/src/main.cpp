@@ -19,6 +19,7 @@
 #include "core/Toolchain.h"
 #include "core/UrlDownloader.h"
 #include "danmaku/DanmakuController.h"
+#include "media/MediaPlatform.h"
 #include "media/UrlInspector.h"
 #include "playback/PlaybackController.h"
 #include "playback/PlaybackSync.h"
@@ -75,6 +76,10 @@ int main(int argc, char *argv[]) {
         // 但启动时就把结果记进日志 —— "为什么下载失败"最常见的原因就是它俩没就位。
         Toolchain toolchain;
 
+        // 网链模式的平台注册表：URL 匹配、B 站编号展开、cookie 策略。
+        // QML 通过 mediaPlatforms 调 normalize/detect。
+        PlatformBridge platformBridge;
+
         // cookie:给 yt-dlp 带上登录态（从浏览器导出 / 手动导入）。
         // 必须在 Toolchain 之后（要用它的 yt-dlp 路径）、在两个下载器之前
         CookieManager cookieManager(&toolchain, &appSettings);
@@ -95,6 +100,17 @@ int main(int argc, char *argv[]) {
         QObject::connect(&appSettings, &AppSettings::hdrAllowedChanged, &playbackDownloader,
                          [&appSettings, &playbackDownloader]() {
                              playbackDownloader.setAllowHdr(appSettings.hdrAllowed());
+                         });
+
+        // 通用链接的 cookie 策略：Bilibili 始终带，Generic 由设置决定。
+        playbackDownloader.setGenericCookies(appSettings.genericCookies());
+        urlInspector.setGenericCookies(appSettings.genericCookies());
+        QObject::connect(&appSettings, &AppSettings::genericCookiesChanged, &app,
+                         [&appSettings, &playbackDownloader, &urlInspector]() {
+                             playbackDownloader.setGenericCookies(
+                                 appSettings.genericCookies());
+                             urlInspector.setGenericCookies(
+                                 appSettings.genericCookies());
                          });
 
         // 网链模式的 B 站弹幕：用 yt-dlp 的 danmaku 字幕轨下载 XML，
@@ -281,6 +297,7 @@ int main(int argc, char *argv[]) {
         // 实际下载走 playbackSync 那条线
         engine->rootContext()->setContextProperty("urlInspector", &urlInspector);
         engine->rootContext()->setContextProperty("cookieManager", &cookieManager);
+        engine->rootContext()->setContextProperty("mediaPlatforms", &platformBridge);
 
         // 外部工具链（yt-dlp / ffmpeg）自检。版本探测是异步的（yt-dlp 为 PyInstaller
         // 打包，启动需数百毫秒），不会阻塞界面。

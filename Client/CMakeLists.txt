@@ -162,6 +162,8 @@ qt_add_executable(Syncine
         # media：格式模型与探测（不认识房间，也不认识播放器）
         src/media/FormatModel.cpp
         src/media/FormatModel.h
+        src/media/MediaPlatform.cpp
+        src/media/MediaPlatform.h
         src/media/UrlInspector.cpp
         src/media/UrlInspector.h
 
@@ -342,6 +344,21 @@ target_include_directories(syncine_logic_tests
 target_link_libraries(syncine_logic_tests PRIVATE Qt6::Core)
 
 add_test(NAME formatmodel COMMAND syncine_logic_tests)
+
+add_executable(syncine_platform_tests
+        tests/tst_platform.cpp
+        src/media/MediaPlatform.cpp
+)
+
+target_include_directories(syncine_platform_tests
+        PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/media"
+)
+
+target_link_libraries(syncine_platform_tests PRIVATE Qt6::Core)
+
+add_test(NAME platform COMMAND syncine_platform_tests)
 
 # ======================================================================
 # 13. 安装规则 —— 打包的基石

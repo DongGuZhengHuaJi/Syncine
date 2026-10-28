@@ -20,6 +20,7 @@ const char *kFallbackServerUrl = "ws://8.148.12.233:8765";
 const char *kKeyServerUrl = "server/userUrl";
 const char *kKeyQuality = "playback/quality";
 const char *kKeyHdrAllowed = "playback/hdrAllowed";
+const char *kKeyGenericCookies = "cookies/useForGeneric";
 const char *kKeyDanmakuArea = "danmaku/area";
 const char *kKeyDanmakuOpacity = "danmaku/opacity";
 const char *kKeyDanmakuFontSize = "danmaku/fontSize";
@@ -69,6 +70,7 @@ AppSettings::AppSettings(QObject *parent)
     if (m_defaultQuality == QLatin1String("0"))
         m_defaultQuality.clear();
     m_hdrAllowed = m_settings->value(QLatin1String(kKeyHdrAllowed), false).toBool();
+    m_genericCookies = m_settings->value(QLatin1String(kKeyGenericCookies), false).toBool();
     m_danmakuArea = qBound(10, m_settings->value(QLatin1String(kKeyDanmakuArea), 100).toInt(), 100);
     m_danmakuOpacity = qBound(10, m_settings->value(QLatin1String(kKeyDanmakuOpacity), 100).toInt(), 100);
     m_danmakuFontSize = qBound(50, m_settings->value(QLatin1String(kKeyDanmakuFontSize), 100).toInt(), 200);
@@ -178,6 +180,16 @@ void AppSettings::setHdrAllowed(bool allowed)
     m_hdrAllowed = allowed;
     m_settings->setValue(QLatin1String(kKeyHdrAllowed), m_hdrAllowed);
     emit hdrAllowedChanged();
+}
+
+void AppSettings::setGenericCookies(bool enabled)
+{
+    if (m_genericCookies == enabled)
+        return;
+
+    m_genericCookies = enabled;
+    m_settings->setValue(QLatin1String(kKeyGenericCookies), m_genericCookies);
+    emit genericCookiesChanged();
 }
 
 void AppSettings::setDanmakuArea(int area)

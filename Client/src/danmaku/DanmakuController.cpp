@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFile>
 #include <QSaveFile>
+#include <QUrl>
 
 #include <algorithm>
 #include <utility>
@@ -12,6 +13,7 @@
 #include "core/Toolchain.h"
 #include "danmaku/LiveDanmakuSession.h"
 #include "media/FormatModel.h"
+#include "media/MediaPlatform.h"
 
 namespace {
 
@@ -303,8 +305,8 @@ void DanmakuController::fail(const QString &message)
 
 bool DanmakuController::isBilibiliUrl(const QString &url)
 {
-    return url.contains(QLatin1String("bilibili.com"), Qt::CaseInsensitive)
-           || url.contains(QLatin1String("b23.tv"), Qt::CaseInsensitive);
+    const MediaPlatform *platform = mediaPlatformRegistry().detect(QUrl(url));
+    return platform != nullptr && platform->id() == QLatin1String("bilibili");
 }
 
 bool DanmakuController::isLiveUrl(const QString &url)

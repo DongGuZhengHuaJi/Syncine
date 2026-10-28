@@ -3,12 +3,14 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
+#include <QUrl>
 #include <QVariantMap>
 
 #include "core/CookieManager.h"
 #include "core/Log.h"
 #include "core/Toolchain.h"
 #include "media/FormatModel.h"
+#include "media/MediaPlatform.h"
 
 namespace {
 
@@ -53,6 +55,18 @@ UrlInspector::UrlInspector(const Toolchain *toolchain,
     : QObject(parent),
       m_toolchain(toolchain),
       m_cookies(cookies) {
+    m_stallTimer.setSingleShot(true);
+    connect(&m_stallTimer, &QTimer::timeout, this, [this] {
+        if (m_stage != QLatin1String("probing"))
+            return;
+        if (m_process != nullptr) {
+            disconnect(m_process, nullptr, this, nullptr);
+            m_process->kill();
+            m_process->deleteLater();
+            m_process = nullptr;
+        }
+        fail(QStringLiteral("yt-dlp 解析超时（30 秒没有输出），请检查网络后重试"));
+    });
 }
 
 UrlInspector::~UrlInspector()
@@ -94,13 +108,15 @@ void UrlInspector::inspect(const QString &url)
 
     QStringList args{QStringLiteral("-J"), QStringLiteral("--no-playlist")};
     args << m_toolchain->ffmpegLocationArgs();
-    if (m_cookies != nullptr)
+    const MediaPlatform *platform = mediaPlatformRegistry().detect(QUrl(url));
+    if (m_cookies != nullptr && platformUsesCookies(platform, m_genericCookies))
         args << m_cookies->cookieArgs();
     Toolchain::appendUrlArg(args, url); // 必须走它，理由见 Toolchain.h
     m_process->setArguments(args);
     LOG_DEBUG("UrlInspector") << "yt-dlp" << args.join(QLatin1Char(' '));
 
     connect(m_process, &QProcess::readyReadStandardOutput, this, [this]() {
+        m_stallTimer.start(30 * 1000);
         const QByteArray raw = m_process->readAllStandardOutput();
         m_outputBuffer.append(raw);
         for (const QString &line : QString::fromUtf8(raw).split(QLatin1Char('\n'),
@@ -112,12 +128,15 @@ void UrlInspector::inspect(const QString &url)
     });
 
     connect(m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-        if (error == QProcess::FailedToStart)
+        if (error == QProcess::FailedToStart) {
+            m_stallTimer.stop();
             fail(QStringLiteral("yt-dlp 启动失败:%1").arg(m_process->errorString()));
+        }
     });
 
     connect(m_process, &QProcess::finished, this,
             [this](int exitCode, QProcess::ExitStatus status) {
+                m_stallTimer.stop();
                 QProcess *finished = m_process;
                 m_process = nullptr;
                 if (finished != nullptr)
@@ -131,6 +150,7 @@ void UrlInspector::inspect(const QString &url)
             });
 
     m_process->start();
+    m_stallTimer.start(30 * 1000);
 }
 
 void UrlInspector::handleFinished(int exitCode)
@@ -371,6 +391,7 @@ QString UrlInspector::buildSpec(bool allowHdr) const
 
 void UrlInspector::cancel()
 {
+    m_stallTimer.stop();
     if (m_process != nullptr) {
         LOG_INFO("UrlInspector") << "已取消";
         disconnect(m_process, nullptr, this, nullptr);
@@ -413,6 +434,7 @@ void UrlInspector::resetResults()
 
 void UrlInspector::fail(const QString &message)
 {
+    m_stallTimer.stop();
     m_error = message;
     m_stage = QStringLiteral("failed");
     LOG_WARN("UrlInspector") << "失败:" << message;
