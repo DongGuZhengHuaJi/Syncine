@@ -464,7 +464,8 @@ void PeerLink::addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterf
     LOG_INFO("PeerLink") << m_peerId << "已挂载本地音轨";
 }
 
-void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterface> track) {
+void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterface> track,
+                                  bool sending) {
     if (m_connection == nullptr || track == nullptr)
         return;
 
@@ -480,20 +481,26 @@ void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterf
         return;
     }
 
+    // active 作为初始 encoding 参数：非共享模式/观众端从协商起就不发视频。
+    // 与电影音轨同理，协商之后还要在连接回调里再写一次。
+    m_videoSending = sending;
+    webrtc::RtpEncodingParameters videoEncoding;
+    videoEncoding.active = sending;
 
     // 在createOffer之前挂视频轨，SDP中会包含相应的m=video段
-    auto sender = m_connection->AddTrack(track, {"syncine-video"});
+    auto sender = m_connection->AddTrack(track, {"syncine-video"}, {videoEncoding});
     if (!sender.ok()) {
         LOG_ERROR("PeerLink") << m_peerId << "添加视频轨失败:" << sender.error().message();
         return;
     }
 
     m_localVideoTrack = track;
-    // sender 要留着：画质档位（码率/帧率上限）只能通过它设置
+    // sender 要留着：画质档位（码率/帧率上限）和发送开关都只能通过它设置
     m_videoSender = sender.value();
     pushVideoQuality(); // 新连接先把当前档位套上
 
-    LOG_INFO("PeerLink") << m_peerId << "已挂载本地视频轨";
+    LOG_INFO("PeerLink") << m_peerId << "已挂载本地视频轨"
+                         << (sending ? "" : "(初始停发)");
 }
 
 void PeerLink::addLocalMovieAudioTrack(
@@ -632,6 +639,7 @@ void PeerLink::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnect
         // 只靠建连前的设置会被覆盖。OnConnectionChange 未必在所有版本都触发，
         // 两个回调都补一次是幂等的。
         pushMovieAudioSending();
+        pushVideoSending();
         emit connected(m_peerId, linkId());
         break;
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionFailed:
@@ -761,6 +769,7 @@ void PeerLink::OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectio
         // 协商完成前设置的 RTP 参数可能没落下去（SendStream 还没建），
         // 连上后补一次。Media 连接的电影音轨就是靠这里真正停发的。
         pushMovieAudioSending();
+        pushVideoSending();
         emit connected(m_peerId, linkId());
         break;
     case webrtc::PeerConnectionInterface::PeerConnectionState::kFailed:
@@ -998,6 +1007,52 @@ void PeerLink::pushMovieAudioSending() {
 
         LOG_INFO("PeerLink") << m_peerId << (active ? "恢复发送电影音轨"
                                                     : "停止发送电影音轨");
+    });
+}
+
+void PeerLink::applyVideoSending(bool active) {
+    if (m_videoSending == active)
+        return;
+
+    m_videoSending = active;
+    // 建连前 sender 还不存在，push 会直接返回；连接建立后由
+    // OnIceConnectionChange / OnConnectionChange 补一次。
+    pushVideoSending();
+}
+
+void PeerLink::pushVideoSending() {
+    if (m_videoSender == nullptr || m_connection == nullptr)
+        return;
+
+    webrtc::Thread *signaling = m_connection->signaling_thread();
+    if (signaling == nullptr)
+        return;
+
+    const bool active = m_videoSending;
+    signaling->BlockingCall([this, active]() {
+        if (m_videoSender == nullptr)
+            return;
+
+        webrtc::RtpParameters parameters = m_videoSender->GetParameters();
+        if (parameters.encodings.empty()) {
+            LOG_DEBUG("PeerLink") << m_peerId << "视频 sender 没有 encoding，"
+                                                 "无法设置发送状态";
+            return;
+        }
+
+        // 与电影音轨同样的理由：协商会重新启动发送流，连上后必须再写一次。
+        parameters.encodings[0].active = active;
+
+        const webrtc::RTCError error = m_videoSender->SetParameters(parameters);
+        if (!error.ok()) {
+            LOG_DEBUG("PeerLink") << m_peerId << "设置视频发送状态失败(目标"
+                                  << (active ? "开" : "关") << "):"
+                                  << error.message();
+            return;
+        }
+
+        LOG_INFO("PeerLink") << m_peerId << (active ? "恢复发送视频"
+                                                    : "停止发送视频");
     });
 }
 

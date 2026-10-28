@@ -89,8 +89,14 @@ public:
 
     // 添加本地音轨（只允许 Voice 连接调用）
     void addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track);
-    // 添加本地视频轨（只允许 Media 连接调用）
-    void addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterface> track);
+    // 添加本地视频轨（只允许 Media 连接调用）。
+    // sending 决定初始 RTP 参数里的 active：false 时从协商起就不发视频。
+    void addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterface> track,
+                            bool sending);
+
+    // 控制是否真正发送视频（RTP 参数 encodings[0].active）。
+    // false = 停发 RTP，不只是把轨道静音；SDP 不变，恢复时无需重新协商。
+    void applyVideoSending(bool active);
     // 添加本地电影音轨（只允许 Media 连接调用）。
     // sending 决定初始 RTP 参数里的 active：false 时发送流从协商起就不启动。
     void addLocalMovieAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track,
@@ -213,6 +219,8 @@ private:
     void pushVideoQuality();
     // 把发送/停发状态写进电影音轨 sender（内部会切到信令线程）
     void pushMovieAudioSending();
+    // 把发送/停发状态写进视频 sender（内部会切到信令线程）
+    void pushVideoSending();
 
     // ---- 数据通道 ----
     // 观察者由 DataChannelInterface 在信令线程回调
@@ -251,6 +259,8 @@ private:
     webrtc::scoped_refptr<webrtc::RtpSenderInterface> m_videoSender;
     int m_videoMaxBitrateBps = 0;    // 0 = 不设上限(用 WebRTC 默认)
     double m_videoMaxFramerate = 0;  // 0 = 不设上限
+    // 主线程与信令线程都会读：连接建立后要按它补设一次参数
+    bool m_videoSending = true;
 
     // 电影音轨对应的 sender。encodings[0].active 决定是否真正发送；
     // false 时 AudioSendStream 会 Stop()，不产生任何 RTP 包。

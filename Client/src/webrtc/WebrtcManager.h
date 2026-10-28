@@ -165,9 +165,14 @@ public:
     // 真正节省带宽的是上游停止喂帧（见 main.cpp 中按模式门控的 pushQtVideoFrame）。
     void setLocalVideoEnabled(bool enabled);
 
+    // 控制视频轨是否真正发送 RTP（encodings[0].active）。
+    // 非共享模式与观众端传 false：发送流 Stop()，不再发黑帧，省上行带宽。
+    void setLocalVideoSending(bool enabled);
+
     bool localVideoEnabled() const {
         return m_localVideoTrack != nullptr && m_localVideoTrack->enabled();
     }
+    bool localVideoSending() const { return m_videoSending; }
 
     // 推送画质档位（共享模式下由房主设置）
     enum class VideoQuality {
@@ -453,6 +458,7 @@ private:
     // 电影音轨是否真正发送。默认 true；启动后由 main 按房间模式对齐
     // （非共享模式会立刻置 false）。
     bool m_movieAudioSending = true;
+    bool m_videoSending = true;
 
     // 接收侧：WebRTC 帧 → QVideoFrame → QVideoSink。
     // 所有对端共用一个——房间里同时只显示一路视频。

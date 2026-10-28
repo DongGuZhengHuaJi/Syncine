@@ -213,6 +213,9 @@ private:
     WebrtcManager *m_webrtcManager = nullptr;
 
     bool m_showingRemote = false;
+    // clearVideoFrame() 会把黑帧写进 outputSink，而该 sink 又连着 onVideoFrame。
+    // 不清掉这个回灌，本地显示分支会把黑帧当成真实解码帧转发给推流端。
+    bool m_injectingClearFrame = false;
 
 
 

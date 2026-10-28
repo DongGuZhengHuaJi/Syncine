@@ -497,7 +497,7 @@ PeerLink *WebrtcManager::createLink(const QString &peerId, LinkKind kind,
                 this, &WebrtcManager::dataChannelMessageReceived);
     } else {
         if (m_localVideoTrack != nullptr) {
-            link->addLocalVideoTrack(m_localVideoTrack);
+            link->addLocalVideoTrack(m_localVideoTrack, m_videoSending);
             // 新连接套用当前画质档位（观众可能在房主修改档位之后才进入）
             const VideoQualityPreset preset = presetForQuality(m_videoQuality);
             link->applyVideoQuality(preset.maxBitrateBps, preset.maxFramerate);
@@ -1044,6 +1044,22 @@ void WebrtcManager::setLocalVideoEnabled(bool enabled) {
 
     // 切模式时才会走这里，频率很低，放 Info
     LOG_INFO("WebRTC") << (enabled ? "推送视频已开启" : "推送视频已关闭")
+                       << "(当前" << m_peers.size() << "个对端)";
+}
+
+void WebrtcManager::setLocalVideoSending(bool enabled) {
+    if (m_videoSending == enabled)
+        return;
+
+    m_videoSending = enabled;
+
+    // 每个对端各有一条 media 连接，也就各有一个视频 sender
+    for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it) {
+        if (it.value().media != nullptr)
+            it.value().media->applyVideoSending(enabled);
+    }
+
+    LOG_INFO("WebRTC") << (enabled ? "视频恢复发送" : "视频停止发送")
                        << "(当前" << m_peers.size() << "个对端)";
 }
 

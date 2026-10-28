@@ -258,9 +258,8 @@ QMediaPlayer *PlaybackController::player() const
 }
 
 void PlaybackController::onVideoFrame(const QVideoFrame &frame) {
-    if (!frame.isValid())
+    if (!frame.isValid() || m_injectingClearFrame)
         return;
-
 
     // 本回调接在 m_outputSink 上，共享模式下远端渲染器也会往这里送帧
     // 只有显示本地时才往外转发，否则会产生回声
@@ -429,7 +428,9 @@ void PlaybackController::clearVideoFrame() {
     // 而 VideoOutput 自己不会在无人送帧时重绘黑色。
     QImage black(2, 2, QImage::Format_RGB32);
     black.fill(Qt::black);
+    m_injectingClearFrame = true;
     m_outputSink->setVideoFrame(QVideoFrame(black));
+    m_injectingClearFrame = false;
 }
 
 

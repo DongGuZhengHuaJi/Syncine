@@ -154,7 +154,10 @@ int main(int argc, char *argv[]) {
         // 轨道开关见下方 updateVideoEnabled。
         QObject::connect(&playbackController, &PlaybackController::videoFrameAvailable,
                          &app, [&webrtcManager, &roomSession](const QVideoFrame &f) {
-                             if (roomSession.roomMode() != RoomSession::RoomMode::Share)
+                             // 只有共享模式的房主推视频；观众端即使本地有残留
+                             // 播放器也不该占上行。
+                             if (roomSession.roomMode() != RoomSession::RoomMode::Share
+                                 || !roomSession.isHost())
                                  return;
                              webrtcManager.pushQtVideoFrame(f);
                          });
@@ -163,7 +166,12 @@ int main(int argc, char *argv[]) {
         // 比视频多一步：WebRTC 需要裸 PCM，而 QAudioBuffer 是带格式描述的容器，
         // 故在此拆为指针 + 每声道采样数 + 采样率 + 声道数。
         QObject::connect(&playbackController, &PlaybackController::movieAudioFrameAvailable,
-                         &app, [&webrtcManager](const QAudioBuffer &buffer) {
+                         &app, [&webrtcManager, &roomSession](const QAudioBuffer &buffer) {
+                             // 只有共享模式的房主需要电影声；观众端即使在共享模式
+                             // 也没有本地媒体，但门禁放在这里可以省掉无意义的 PCM 搬运。
+                             if (roomSession.roomMode() != RoomSession::RoomMode::Share
+                                 || !roomSession.isHost())
+                                 return;
                              const QAudioFormat format = buffer.format();
                              webrtcManager.pushMovieAudioPcm(
                                  buffer.constData<int16_t>(),
@@ -173,31 +181,40 @@ int main(int argc, char *argv[]) {
                          });
 
         // 电影音轨的两级开关：
-        //   发送层（active）：只有共享模式才真正发 RTP。非共享模式直接停发，
-        //                     不再为没人听的音轨持续付静音包的带宽。
+        //   发送层（active）：只有「共享模式 + 房主」才真正发 RTP。观众端和非共享
+        //                     模式直接停发，不再为没人听的音轨持续付静音包/编码成本。
         //   静音层（enabled）：共享模式下暂停时只静音、不停流，恢复播放没有
         //                     启动延迟（停流再启动要重新搭编码/打包链路）。
         auto updateMovieAudioEnabled = [&playbackController, &roomSession, &webrtcManager] {
-            const bool sharing = roomSession.roomMode() == RoomSession::RoomMode::Share;
-            webrtcManager.setMovieAudioEnabled(sharing && playbackController.playing());
-            webrtcManager.setMovieAudioSending(sharing);
+            const bool hostSharing =
+                roomSession.roomMode() == RoomSession::RoomMode::Share
+                && roomSession.isHost();
+            webrtcManager.setMovieAudioEnabled(hostSharing && playbackController.playing());
+            webrtcManager.setMovieAudioSending(hostSharing);
         };
 
         QObject::connect(&playbackController, &PlaybackController::playingChanged,
                          &app, updateMovieAudioEnabled);
         QObject::connect(&roomSession, &RoomSession::roomModeChanged,
                          &app, updateMovieAudioEnabled);
+        QObject::connect(&roomSession, &RoomSession::isHostChanged,
+                         &app, updateMovieAudioEnabled);
         updateMovieAudioEnabled(); // 启动时对齐一次（默认同步模式 → 停发）
 
-        // 视频轨开关：同理，仅在共享模式下开启。
+        // 视频轨开关：同理，只有「共享模式 + 房主」才发。
         // 注意 WebRTC 语义：set_enabled(false) 并非停发，而是改发黑帧以保持流不断；
-        // 真正节省带宽的是上方的「停止喂帧」，两者配合才是完整门控。
+        // setLocalVideoSending(false) 才真正把发送流 Stop 掉，再配合上方停止喂帧。
         auto updateVideoEnabled = [&roomSession, &webrtcManager] {
-            webrtcManager.setLocalVideoEnabled(
-                roomSession.roomMode() == RoomSession::RoomMode::Share);
+            const bool hostSharing =
+                roomSession.roomMode() == RoomSession::RoomMode::Share
+                && roomSession.isHost();
+            webrtcManager.setLocalVideoEnabled(hostSharing);
+            webrtcManager.setLocalVideoSending(hostSharing);
         };
 
         QObject::connect(&roomSession, &RoomSession::roomModeChanged,
+                         &app, updateVideoEnabled);
+        QObject::connect(&roomSession, &RoomSession::isHostChanged,
                          &app, updateVideoEnabled);
         updateVideoEnabled(); // 启动时对齐一次（默认同步模式 → 关）
 
