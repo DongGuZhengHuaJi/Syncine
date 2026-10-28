@@ -1,6 +1,7 @@
 #ifndef SERVER_LOG_H
 #define SERVER_LOG_H
 
+#include <memory>
 #include <sstream>
 #include <string>
 
@@ -39,8 +40,8 @@ public:
     template <typename T>
     Line &operator<<(const T &value)
     {
-        if (m_active)
-            m_os << value;
+        if (m_active && m_os)
+            *m_os << value;
         return *this;
     }
 
@@ -48,8 +49,8 @@ private:
     bool m_active = false;
     Level m_level = Level::Info;
     const char *m_tag = "";
-    // 与客户端不同，无需提前析构：ostringstream 边写边拼，析构函数中即可读到完整内容
-    std::ostringstream m_os;
+    // 被过滤掉的行不构造流，避免只为丢弃而拼接字符串。
+    std::unique_ptr<std::ostringstream> m_os;
 };
 
 } // namespace Log

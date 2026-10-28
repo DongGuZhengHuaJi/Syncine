@@ -157,6 +157,10 @@ public:
     // 否则会覆盖本地画面并维持回声环（见 PlaybackController::applyVideoSink）。
     void setRemoteVideoEnabled(bool enabled);
 
+    // 观众端收到远端 seek：清空电影声环形缓冲/一小段 NetEq 旧音频，
+    // 并丢弃视频待显示队列里的旧帧。由 PlaybackSync::remoteSeeked 触发。
+    void flushRemotePlayback();
+
     // ---- 推送端视频 ----
     // 视频轨与电影音轨一样在 initialize() 预创建、建连时立即挂上，以保证其恒定
     // 存在于 SDP 中（加轨会触发重新协商，而 PeerLink 只处理初始协商）。
@@ -165,9 +169,14 @@ public:
     // 真正节省带宽的是上游停止喂帧（见 main.cpp 中按模式门控的 pushQtVideoFrame）。
     void setLocalVideoEnabled(bool enabled);
 
+    // 控制视频轨是否真正发送 RTP（encodings[0].active）。
+    // 非共享模式与观众端传 false：发送流 Stop()，不再发黑帧，省上行带宽。
+    void setLocalVideoSending(bool enabled);
+
     bool localVideoEnabled() const {
         return m_localVideoTrack != nullptr && m_localVideoTrack->enabled();
     }
+    bool localVideoSending() const { return m_videoSending; }
 
     // 推送画质档位（共享模式下由房主设置）
     enum class VideoQuality {
@@ -179,6 +188,10 @@ public:
     Q_ENUM(VideoQuality)
 
     void setVideoQuality(VideoQuality quality);
+
+    // 文件传输进行中：把共享视频码率压到约 1.2Mbps，结束后恢复用户档位。
+    void setTransferActive(bool active);
+    bool transferActive() const { return m_transferActive; }
 
     VideoQuality videoQuality() const {
         return m_videoQuality;
@@ -331,6 +344,10 @@ private:
     PeerLink *createLink(const QString &peerId, LinkKind kind,
                          bool createDataChannel);
 
+    // 把当前档位（含传输期码率上限、横竖屏目标分辨率）套到一条/所有 media 连接。
+    void applyQualityToLink(PeerLink *link);
+    void applyQualityToAll();
+
     // 将 m_iceServers 转换为 libwebrtc 的形状。全项目唯一的转换点——
     // libwebrtc 侧字段名为 password、协议中为 credential，对应关系只在此处定义。
     // 列表为空时退回一个公共 STUN（见 .cpp 中的 defaultIceServers）。
@@ -453,6 +470,11 @@ private:
     // 电影音轨是否真正发送。默认 true；启动后由 main 按房间模式对齐
     // （非共享模式会立刻置 false）。
     bool m_movieAudioSending = true;
+    bool m_videoSending = true;
+    bool m_transferActive = false;
+    // 最近一次从 GUI 帧看到的源尺寸，用于在 worker 还没更新统计时计算横/竖屏目标。
+    int m_lastQualityWidth = 0;
+    int m_lastQualityHeight = 0;
 
     // 接收侧：WebRTC 帧 → QVideoFrame → QVideoSink。
     // 所有对端共用一个——房间里同时只显示一路视频。

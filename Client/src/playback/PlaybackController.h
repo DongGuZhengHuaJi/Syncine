@@ -12,6 +12,7 @@
 #include <QAudioOutput>
 #include <QAudioBuffer>
 #include <QAudioBufferOutput>
+#include <QPointer>
 #include <QVideoSink>
 #include <QVideoFrame>
 
@@ -87,6 +88,8 @@ public:
 
     bool hasLoaded() const;
     bool playing() const;
+    // 最近一次停止是否由 load/unload/EndOfMedia 触发（而非用户 pause）。
+    bool lifecycleStop() const { return m_lifecycleStop; }
     bool seekable() const;
     qint64 position() const;
     qint64 duration() const;
@@ -120,7 +123,7 @@ public:
     // 远端画面往哪送 —— 就是界面那个 VideoOutput 的 sink。
     // 由 WebrtcManager 的远端渲染器往这里推帧。
     QVideoSink *remoteSinkForRenderer() const {
-        return m_outputSink;
+        return m_outputSink.data();
     }
 
     // 由 QML 在 VideoOutput 的 Component.onCompleted 里调用，
@@ -128,6 +131,10 @@ public:
     //
     // 为什么必须这样做：VideoOutput.videoSink 只读，只能由它主动交出来。
     Q_INVOKABLE void bindVideoOutput(QVideoSink *sink);
+
+    // QML 的 VideoOutput 销毁前调用：断开信号、清空播放器/渲染器的 sink，
+    // 避免远端队列里还有帧时踩到已释放的 QVideoSink。
+    Q_INVOKABLE void unbindVideoOutput();
 
     void setRemoteRenderer(WebrtcManager *manager);
 
@@ -206,13 +213,19 @@ private:
 
     // 界面那个 VideoOutput 的 sink。QML 在 Component.onCompleted 里交过来。
     // 播放器和远端渲染器都往它送 —— 谁在送由 showingRemote 决定。
-    QVideoSink *m_outputSink = nullptr;
+    QPointer<QVideoSink> m_outputSink;
 
     // 远端画面往这个管理器的渲染器里送。由 main.cpp 装配时设置。
     // 只用于转发"该往哪个 sink 写"这一条信息 —— 本类不知道 WebRTC 的细节。
     WebrtcManager *m_webrtcManager = nullptr;
 
     bool m_showingRemote = false;
+    // 播放器因卸载/换源/播完而停止，不是用户主动暂停。PlaybackSync 据此
+    // 不广播 Pause，避免把房间里的其他人按停。
+    bool m_lifecycleStop = false;
+    // clearVideoFrame() 会把黑帧写进 outputSink，而该 sink 又连着 onVideoFrame。
+    // 不清掉这个回灌，本地显示分支会把黑帧当成真实解码帧转发给推流端。
+    bool m_injectingClearFrame = false;
 
 
 

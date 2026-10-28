@@ -3,9 +3,11 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -42,16 +44,42 @@ constexpr int kMaxRolls = 3;
 constexpr int kKeepDays = 7;
 constexpr int kTagWidth = 10;
 
+// ── 异步队列策略，与客户端保持一致 ──────────────────────────
+constexpr long long kMaxQueueBytes = 4LL * 1024 * 1024;
+constexpr long long kFlushBytes = 64LL * 1024;
+constexpr int kFlushMs = 100;
+
 struct State {
     std::string prefix = "server";
     std::string dir;
     std::string path;
     std::ofstream file;
+    long long writtenBytes = 0;
     bool console = true;
+    bool colorOut = false;
+    bool colorErr = false;
+};
+
+struct Entry {
+    std::string plain;
+    std::string colored; // 仅在终端且需要颜色时非空
+    Log::Level level = Log::Level::Info;
 };
 
 State g_state;
-std::mutex g_fileMutex; // 保护 g_state 中的文件与路径
+std::mutex g_fileMutex; // 保护文件、路径与写入
+
+std::mutex g_queueMutex;
+std::condition_variable g_queueCv;
+std::deque<Entry> g_queue;
+long long g_queueBytes = 0;
+bool g_stopWriter = false;
+bool g_writerRunning = false;
+bool g_accepting = false;
+std::thread g_writer;
+std::atomic<bool> g_syncMode{false};
+std::atomic<long long> g_droppedLow{0};
+
 std::atomic<int> g_level{static_cast<int>(Log::Level::Info)};
 
 // 线程编号：std::thread::id → 1,2,3……，日志中显示为 [t2]
@@ -59,6 +87,8 @@ std::mutex g_threadMutex;
 std::map<std::thread::id, int> g_threadNumbers;
 int g_nextThreadNumber = 1;
 thread_local int t_threadNumber = -1;
+
+std::atomic<bool> g_initialized{false};
 
 const char *levelLetter(Log::Level level)
 {
@@ -117,6 +147,12 @@ std::string envOr(const char *key, const std::string &fallback)
 {
     const char *value = std::getenv(key);
     return (value != nullptr && *value != '\0') ? std::string(value) : fallback;
+}
+
+bool envSet(const char *key)
+{
+    const char *value = std::getenv(key);
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
 int threadNumber()
@@ -182,25 +218,27 @@ void openFileLocked()
 
     g_state.file << "\n──────── " << timestamp() << " 启动 ────────\n";
     g_state.file.flush();
+    g_state.writtenBytes = static_cast<long long>(
+        std::filesystem::file_size(g_state.path, ec));
 }
 
-void rotateIfNeededLocked(std::size_t incoming)
+void rotateIfNeededLocked(long long incoming)
 {
     if (!g_state.file.is_open())
         return;
-
-    std::error_code sizeEc;
-    const auto size = static_cast<long long>(
-        std::filesystem::file_size(g_state.path, sizeEc));
-    if (size + static_cast<long long>(incoming) <= kMaxFileBytes)
+    if (g_state.writtenBytes + incoming <= kMaxFileBytes)
         return;
 
     g_state.file.close();
 
     std::error_code ec;
     std::filesystem::remove(rollPath(kMaxRolls), ec); // 最旧的直接扔
-    for (int i = kMaxRolls - 1; i >= 1; --i)
+    for (int i = kMaxRolls - 1; i >= 1; --i) {
+        // Windows 上 rename 目标存在会失败：先删目标再改名。
+        std::filesystem::remove(rollPath(i + 1), ec);
         std::filesystem::rename(rollPath(i), rollPath(i + 1), ec);
+    }
+    std::filesystem::remove(rollPath(1), ec);
     std::filesystem::rename(g_state.path, rollPath(1), ec);
     openFileLocked();
 }
@@ -227,22 +265,163 @@ void cleanupOldFilesLocked()
     }
 }
 
+Entry makeEntry(Log::Level level, const char *tag, const std::string &message)
+{
+    // 行在调用线程定型：时间戳是事件发生的时间，tag 立刻拷贝。
+    const int number = threadNumber();
+    const std::string stamp = timestamp();
+    const std::string letter = levelLetter(level);
+
+    std::string paddedTag = tag;
+    if (paddedTag.size() < kTagWidth)
+        paddedTag.append(kTagWidth - paddedTag.size(), ' ');
+
+    std::ostringstream line;
+    line << stamp << " [" << letter << "] [" << paddedTag << "] [t" << number
+         << "] " << message;
+
+    const bool wantedColor = static_cast<int>(level) >= static_cast<int>(Log::Level::Warn)
+                                 ? g_state.colorErr
+                                 : g_state.colorOut;
+
+    Entry entry;
+    entry.level = level;
+    entry.plain = line.str();
+    if (wantedColor) {
+        std::ostringstream colored;
+        colored << stamp << " [" << levelColor(level) << letter << "\033[0m] ["
+                << paddedTag << "] [t" << number << "] " << message;
+        entry.colored = colored.str();
+    }
+    return entry;
+}
+
+// 调用方必须持有 g_fileMutex
+void writeEntryLocked(const Entry &entry, bool flush)
+{
+    if (g_state.console) {
+        FILE *out = static_cast<int>(entry.level) >= static_cast<int>(Log::Level::Warn)
+                        ? stderr : stdout;
+        const std::string &line = entry.colored.empty() ? entry.plain : entry.colored;
+        std::fprintf(out, "%s\n", line.c_str());
+        if (flush)
+            std::fflush(out);
+    }
+
+    if (g_state.file.is_open()) {
+        rotateIfNeededLocked(static_cast<long long>(entry.plain.size()) + 1);
+        g_state.file << entry.plain << '\n';
+        g_state.writtenBytes += static_cast<long long>(entry.plain.size()) + 1;
+        if (flush)
+            g_state.file.flush();
+    }
+}
+
+void flushLocked()
+{
+    if (g_state.console) {
+        std::fflush(stdout);
+        std::fflush(stderr);
+    }
+    if (g_state.file.is_open())
+        g_state.file.flush();
+}
+
+void writeImmediate(const Entry &entry)
+{
+    std::lock_guard<std::mutex> lock(g_fileMutex);
+    writeEntryLocked(entry, /*flush=*/true);
+}
+
+bool enqueueEntry(const Entry &entry)
+{
+    std::lock_guard<std::mutex> lock(g_queueMutex);
+    if (!g_accepting)
+        return false;
+
+    const long long size = static_cast<long long>(entry.plain.size());
+    if (g_queueBytes + size > kMaxQueueBytes) {
+        if (static_cast<int>(entry.level) < static_cast<int>(Log::Level::Warn)) {
+            g_droppedLow.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        return false;
+    }
+
+    g_queue.push_back(entry);
+    g_queueBytes += size;
+    g_queueCv.notify_one();
+    return true;
+}
+
+void writerLoop()
+{
+    constexpr auto kBatchWait = std::chrono::milliseconds(20);
+
+    for (;;) {
+        std::deque<Entry> batch;
+        bool stopping = false;
+        {
+            std::unique_lock<std::mutex> lock(g_queueMutex);
+            const auto start = std::chrono::steady_clock::now();
+            while (!g_stopWriter && g_queueBytes < kFlushBytes) {
+                if (std::chrono::steady_clock::now() - start
+                    >= std::chrono::milliseconds(kFlushMs)) {
+                    break;
+                }
+                g_queueCv.wait_for(lock, kBatchWait);
+            }
+
+            batch.swap(g_queue);
+            g_queueBytes = 0;
+            stopping = g_stopWriter;
+        }
+
+        {
+            std::lock_guard<std::mutex> fileLock(g_fileMutex);
+            for (const Entry &entry : batch)
+                writeEntryLocked(entry, /*flush=*/false);
+            flushLocked();
+        }
+
+        const long long dropped = g_droppedLow.exchange(0, std::memory_order_relaxed);
+        if (dropped > 0) {
+            Entry summary = makeEntry(
+                Log::Level::Warn, "Log",
+                "日志队列已满，丢弃 " + std::to_string(dropped) + " 条 trace/debug 日志");
+            std::lock_guard<std::mutex> fileLock(g_fileMutex);
+            writeEntryLocked(summary, /*flush=*/true);
+        }
+
+        if (stopping)
+            break;
+    }
+}
+
 } // namespace
 
 // ══════════════════════════════════════════════════════════════
 
 void Log::init(const std::string &filePrefix)
 {
+    if (g_initialized.load())
+        return;
+    g_initialized.store(true);
+
     g_state.prefix = filePrefix;
 
     const std::string envLevel = envOr("SYNCINE_LOG_LEVEL", "");
     if (!envLevel.empty())
         g_level.store(static_cast<int>(levelFromName(envLevel)));
 
+    g_syncMode.store(envSet("SYNCINE_LOG_SYNC"));
+
     // 默认写到工作目录下的 logs/,SYNCINE_LOG_DIR 可以覆盖
     const std::string baseDir = envOr("SYNCINE_LOG_DIR", ".");
     g_state.dir = baseDir + "/logs";
     g_state.path = g_state.dir + "/" + filePrefix + "-" + today() + ".log";
+    g_state.colorOut = isatty(fileno(stdout)) != 0;
+    g_state.colorErr = isatty(fileno(stderr)) != 0;
 
     {
         std::lock_guard<std::mutex> lock(g_fileMutex);
@@ -250,17 +429,49 @@ void Log::init(const std::string &filePrefix)
         openFileLocked();
     }
 
+    if (!g_syncMode.load()) {
+        {
+            std::lock_guard<std::mutex> lock(g_queueMutex);
+            g_stopWriter = false;
+            g_accepting = true;
+            g_queue.clear();
+            g_queueBytes = 0;
+        }
+        g_writer = std::thread(writerLoop);
+        g_writerRunning = true;
+    } else {
+        std::lock_guard<std::mutex> lock(g_queueMutex);
+        g_accepting = true;
+    }
+
     LOG_INFO("Log") << "日志级别: " << levelName(level())
-                    << " 文件: " << std::filesystem::absolute(g_state.path).string();
+                    << " 文件: " << std::filesystem::absolute(g_state.path).string()
+                    << (g_syncMode.load() ? " (同步模式)" : " (异步模式)");
 }
 
 void Log::shutdown()
 {
+    {
+        std::lock_guard<std::mutex> lock(g_queueMutex);
+        g_accepting = false;
+    }
+
+    if (g_writerRunning) {
+        {
+            std::lock_guard<std::mutex> lock(g_queueMutex);
+            g_stopWriter = true;
+        }
+        g_queueCv.notify_all();
+        g_writer.join();
+        g_writerRunning = false;
+    }
+
     std::lock_guard<std::mutex> lock(g_fileMutex);
     if (g_state.file.is_open()) {
         g_state.file.flush();
         g_state.file.close();
     }
+    g_initialized.store(false);
 }
 
 void Log::setLevel(Level level)
@@ -295,42 +506,15 @@ void Log::write(Level level, const char *tag, const std::string &message)
     if (!isEnabled(level))
         return;
 
-    // 线程号先取（它自己会锁线程表）,文件锁最后才拿 —— 固定这个顺序不会死锁
-    const int number = threadNumber();
-    const std::string stamp = timestamp();
-    const std::string letter = levelLetter(level);
+    const Entry entry = makeEntry(level, tag, message);
 
-    std::string paddedTag = tag;
-    if (paddedTag.size() < kTagWidth)
-        paddedTag.append(kTagWidth - paddedTag.size(), ' ');
-
-    std::ostringstream line;
-    line << stamp << " [" << letter << "] [" << paddedTag << "] [t" << number
-         << "] " << message;
-    const std::string plain = line.str();
-
-    std::lock_guard<std::mutex> lock(g_fileMutex);
-
-    if (g_state.console) {
-        // 警告以上走 stderr,其余走 stdout
-        FILE *out = static_cast<int>(level) >= static_cast<int>(Level::Warn)
-                        ? stderr : stdout;
-        if (isatty(fileno(out))) {
-            std::fprintf(out, "%s [%s%s\033[0m] [%s] [t%d] %s\n",
-                         stamp.c_str(), levelColor(level), letter.c_str(),
-                         paddedTag.c_str(), number, message.c_str());
-        } else {
-            std::fprintf(out, "%s\n", plain.c_str());
-        }
-        std::fflush(out);
+    if (level == Level::Fatal || g_syncMode.load() || !g_initialized.load()) {
+        writeImmediate(entry);
+        return;
     }
 
-    if (g_state.file.is_open()) {
-        rotateIfNeededLocked(plain.size() + 1);
-        g_state.file << plain << '\n';
-        // 每行都 flush:日志文件的意义就是"进程挂了也能看到最后一行"
-        g_state.file.flush();
-    }
+    if (!enqueueEntry(entry))
+        writeImmediate(entry);
 }
 
 // ── Line ───────────────────────────────────────────────────
@@ -338,12 +522,13 @@ void Log::write(Level level, const char *tag, const std::string &message)
 Log::Line::Line(Level level, const char *tag)
     : m_active(isEnabled(level)), m_level(level), m_tag(tag)
 {
+    if (m_active)
+        m_os = std::make_unique<std::ostringstream>();
 }
 
 Log::Line::~Line()
 {
-    if (!m_active)
+    if (!m_active || !m_os)
         return;
-
-    write(m_level, m_tag, m_os.str());
+    write(m_level, m_tag, m_os->str());
 }

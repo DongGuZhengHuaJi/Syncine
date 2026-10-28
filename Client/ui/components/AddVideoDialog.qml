@@ -32,6 +32,13 @@ Popup {
     property bool detailMode: false
     // 这一份解析结果是哪个链接的 —— 用户改过输入框之后，旧结果就不该能提交
     property string inspectedUrl: ""
+    // 用户选的是哪张来源卡："bilibili" / "generic"
+    property string sourcePlatform: "generic"
+    // 输入框原文（送给 probe 前用于判断「改没改过」）
+    property string probedInput: ""
+    // 规范化后的完整链接（条目上存的就是它，各端 itemId 才一致）
+    property string normalizedUrl: ""
+    property string normalizeError: ""
     // 剧集：用户点了第几集（用它去下面的 seasonEpisodes 里取 url/title/itemId;-1 = 没点）
     property int pickedEpisode: -1
 
@@ -48,8 +55,11 @@ Popup {
     property var episodeSpecs: ({})
 
     readonly property string trimmedUrl: urlField.text.trim()
-    // 仅接受完整链接（关键词搜索暂不支持）：必须带 http(s):// 前缀
+    // 通用卡要求完整链接；B 站卡还接受 BV/av/ss/ep/直播间号。
     readonly property bool urlLooksComplete: /^https?:\/\/\S+/i.test(trimmedUrl)
+    readonly property bool inputLooksUsable: sourcePlatform === "bilibili"
+                                             ? trimmedUrl.length > 0
+                                             : urlLooksComplete
     readonly property bool probing: urlInspector.stage === "probing"
     // 注意**不可命名为 inspected**：那样会遮蔽 urlInspector 的 `inspected()` 信号名，
     // Connections 中的 onInspected 将永不触发（实测——表现为默认档位无法选中、
@@ -89,7 +99,8 @@ Popup {
     // 多集链接特殊：刚解析完只有剧集列表（没有档位）,必须先点定某一集才能加；
     // 而点某一集会再解析一次，那时 urlInspector 看的就是那一集了
     readonly property bool canSubmit: inspectedOk && urlInspector.selectionSpec !== ""
-                                      && inspectedUrl !== "" && inspectedUrl === trimmedUrl
+                                      && inspectedUrl !== "" && normalizedUrl !== ""
+                                      && probedInput === trimmedUrl
                                       && !isPlaylist
 
     modal: true
@@ -127,14 +138,26 @@ Popup {
         return urlInspector.pickedVideoId !== "" || urlInspector.pickedAudioId !== ""
     }
 
-    // 换一个链接 → 一切从头来
+    // 换一个链接 → 一切从头来。
+    // 先把平台编号/短链规范化为完整链接；条目上存的是 normalizedUrl。
     function startProbe() {
-        if (!urlLooksComplete || probing)
+        if (!inputLooksUsable || probing)
             return
-        inspectedUrl = trimmedUrl
+
+        normalizeError = ""
+        const result = mediaPlatforms.normalize(sourcePlatform, trimmedUrl)
+        if (result.error !== "") {
+            normalizeError = result.error
+            normalizedUrl = ""
+            return
+        }
+
+        probedInput = trimmedUrl
+        normalizedUrl = result.url
+        inspectedUrl = normalizedUrl
         detailMode = false
         clearSeason()
-        urlInspector.inspect(trimmedUrl)
+        urlInspector.inspect(normalizedUrl)
     }
 
     // 解析完成后的默认选择：
@@ -293,7 +316,7 @@ Popup {
             return
         // 参数必须**全部传满**:Q_INVOKABLE 的默认参数在 QML 里不存在，
         // 少传一个会直接报 "Insufficient arguments"
-        roomSession.addUrl(trimmedUrl, urlInspector.title, urlInspector.live,
+        roomSession.addUrl(normalizedUrl, urlInspector.title, urlInspector.live,
                            urlInspector.durationMs,
                            urlInspector.buildSpec(appSettings.hdrAllowed))
         root.close()
@@ -302,8 +325,13 @@ Popup {
     onOpened: {
         page = 0
         urlField.text = ""
+        urlField.placeholderText = "粘贴完整视频链接"
         urlField.forceActiveFocus()
         inspectedUrl = ""
+        sourcePlatform = "generic"
+        probedInput = ""
+        normalizedUrl = ""
+        normalizeError = ""
         detailMode = false
         clearSeason()
     }
@@ -383,6 +411,69 @@ Popup {
 
             // 选项卡，以后可以加入更多来源
             Rectangle {
+                id: bilibiliCard
+                width: parent.width
+                height: 58
+                radius: Style.radius
+                color: bilibiliHover.containsMouse ? Style.fieldHover : Style.fieldBg
+                border.width: 1
+                border.color: bilibiliHover.containsMouse ? Style.accent : Style.border
+
+                Row {
+                    anchors.left: parent.left
+                    anchors.leftMargin: 14
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 12
+
+                    AppIcon {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 18
+                        height: 18
+                        name: "link"
+                        color: Style.accent
+                    }
+
+                    Column {
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 3
+
+                        Text {
+                            text: "Bilibili"
+                            font.pixelSize: 13
+                            color: Style.textPrimary
+                        }
+
+                        Text {
+                            text: "BV号 / av号 / ss号 / ep号 / 直播间号，也可粘贴链接"
+                            font.pixelSize: 11
+                            color: Style.textFaint
+                        }
+                    }
+                }
+
+                MouseArea {
+                    id: bilibiliHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        root.sourcePlatform = "bilibili"
+                        urlField.placeholderText = "BV号 / av号 / ss号 / ep号 / 直播间号 / 链接"
+                        root.page = 1
+                        urlField.forceActiveFocus()
+                    }
+                }
+            }
+
+            Text {
+                width: parent.width
+                visible: root.sourcePlatform === "bilibili"
+                text: "纯数字按直播间号处理；番剧请加 ss/ep 前缀。"
+                font.pixelSize: 11
+                color: Style.textFaint
+            }
+
+            Rectangle {
                 id: customCard
                 width: parent.width
                 height: 58
@@ -429,6 +520,8 @@ Popup {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
+                        root.sourcePlatform = "generic"
+                        urlField.placeholderText = "粘贴完整视频链接"
                         root.page = 1
                         urlField.forceActiveFocus()
                     }
@@ -501,16 +594,17 @@ Popup {
                     Layout.preferredHeight: 34
                     font.pixelSize: 12
                     text: root.probing ? "…" : "解析"
-                    enabled: root.urlLooksComplete && !root.probing
+                    enabled: root.inputLooksUsable && !root.probing
                     onClicked: root.startProbe()
                 }
             }
 
-            // 失败原因显示
+            // 失败原因显示（平台编号规范化失败 / yt-dlp 解析失败共用这块）
             Text {
                 width: parent.width
-                visible: urlInspector.stage === "failed"
-                text: urlInspector.errorText
+                visible: root.normalizeError !== "" || urlInspector.stage === "failed"
+                text: root.normalizeError !== "" ? root.normalizeError
+                                                 : urlInspector.errorText
                 wrapMode: Text.Wrap
                 font.pixelSize: 11
                 color: Style.danger

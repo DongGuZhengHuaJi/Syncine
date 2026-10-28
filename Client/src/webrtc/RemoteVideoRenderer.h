@@ -4,26 +4,35 @@
 //   发送侧:  QVideoFrame ──转换──→ webrtc::VideoFrame → 编码器
 //   接收侧:  解码器 → webrtc::VideoFrame ──转换──→ QVideoFrame → QVideoSink
 //
-// 需要适配器的原因：WebRTC 的 VideoSinkInterface 与 Qt 的 QVideoSink 是两套不同的
-// 接口，且 WebRTC 提供的是 I420 平面数据（带行距填充），Qt 的 QVideoFrame 需要自身的
-// 格式描述，转换只能在此完成。
+// 线程：帧由 WebRTC 解码线程到达。OnFrame 只入队；专用 worker 做
+// ToI420 + QVideoFrame 组装；GUI 线程只做排期与 setVideoFrame。
 //
-// 线程：帧由 WebRTC 信令线程到达，而 QVideoSink 归属 GUI 线程，故 OnFrame 中只入队，
-// 转换与投递均在 GUI 线程执行。
+// 音画同步：观众端音频还要经过 QAudioSink 的 100ms 缓冲和环形队列，视频不能
+// “收到就画”。这里按 `到达时间 + 当前音频积压延迟` 排期，延迟由
+// MovieAudioPlayer::playoutDelayMs() 经 WebrtcManager 注入，取不到时退化为 0。
 //
 
 #ifndef SYNCINE_REMOTEVIDEORENDERER_H
 #define SYNCINE_REMOTEVIDEORENDERER_H
 
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <functional>
 #include <mutex>
 #include <optional>
+#include <thread>
 
 #include <QObject>
+#include <QPointer>
+#include <QVideoFrame>
 
 #include "api/media_stream_interface.h"
 #include "api/video/video_frame.h"
 #include "api/video/video_sink_interface.h"
 
+class QTimer;
 class QVideoSink;
 
 class RemoteVideoRenderer : public QObject,
@@ -34,41 +43,108 @@ public:
     explicit RemoteVideoRenderer(QObject *parent = nullptr);
     ~RemoteVideoRenderer() override;
 
-    // 画面往哪个 sink 送。由 main.cpp 装配时设成
-    // PlaybackController 的 remoteVideoSink。
+    // 画面往哪个 sink 送。由 main.cpp 装配时设成 PlaybackController 的 remoteVideoSink。
+    // 用 QPointer：sink 归 QML 的 VideoOutput 所有，页面销毁后不能留裸指针。
     void setTargetSink(QVideoSink *sink);
 
     // 是否往 sink 写帧。由 main.cpp 装配时设成
     void setWritingEnabled(bool enabled);
 
+    // 当前音频从“WebRTC 交出”到“扬声器响出”的估计延迟（毫秒）。
+    // 由 WebrtcManager 注入；不设置时视频不额外延迟。
+    void setPlayoutDelayProvider(std::function<int()> provider);
+
+    // 清空待显示/待转换队列（远端 seek 时调用）。
+    void resetQueue();
+
     // ---- VideoSinkInterface ----
-    // 在 WebRTC 信令线程被调用
+    // 在 WebRTC 解码线程被调用
     void OnFrame(const webrtc::VideoFrame &frame) override;
     void OnDiscardedFrame() override;
 
     int frameCount() const {
-        return m_frameCount;
+        return m_frameCount.load(std::memory_order_relaxed);
     }
 
 private:
-    // 真正干活的地方，在 GUI 线程执行（取出暂存的最新帧并渲染）
-    void deliverPendingFrame();
+    struct IncomingFrame {
+        IncomingFrame(const webrtc::VideoFrame &frame_, int64_t arrival,
+                      int64_t mediaTimestamp)
+            : frame(frame_), arrivalUs(arrival), mediaTimestampUs(mediaTimestamp) {}
 
-    int m_frameCount = 0;
-    int m_discardedCount = 0;
+        webrtc::VideoFrame frame;
+        int64_t arrivalUs = 0;
+        int64_t mediaTimestampUs = 0;
+    };
 
-    // ---- 帧暂存区：只保留"最新的一帧" ----
-    std::mutex m_frameMutex;
-    std::optional<webrtc::VideoFrame> m_pendingFrame;
+    struct PendingFrame {
+        QVideoFrame qtFrame;
+        int64_t arrivalUs = 0;
+    };
 
-    // 是否已经有一个投递任务在排队 —— 避免对同一帧重复排队
-    bool m_deliveryPosted = false;
+    // worker 线程：取帧 → ToI420/组装 → 投递到 GUI
+    void workerLoop();
+    // worker/GUI 回退路径共用：把一帧 WebRTC 画面转成 QVideoFrame。
+    std::optional<QVideoFrame> convertToQtFrame(const webrtc::VideoFrame &frame);
+    // GUI 线程：worker 转换完成后入排期队列（generation 不匹配说明已 reset）。
+    void scheduleConverted(QVideoFrame frame, int64_t arrivalUs,
+                           int64_t mediaTimestampUs, uint64_t generation);
+    // GUI 线程：worker 关闭时的回退路径，直接在 GUI 转换。
+    void scheduleIncomingOnGui(IncomingFrame incoming);
+    void pushScheduled(QVideoFrame frame, int64_t arrivalUs);
 
-    // 是否往 sink 写帧)。由 setWritingEnabled 切换。
-    bool m_writingEnabled = true;
+    // GUI 线程：按当前延迟启动单次定时器。
+    void armTimer();
+    // GUI 线程：显示已到点的最新一帧，然后重新定时。
+    void deliverDueFrames();
+    // GUI 线程：当前平滑后的延迟（毫秒）。每次调用都会推进 EMA。
+    int currentDelayMs();
+    // GUI 线程：真正把一帧写进 QVideoSink。
+    void presentFrame(const QVideoFrame &frame);
 
-    // QVideoSink 的生命周期由 PlaybackController 掌管，这里只借用
-    QVideoSink *m_targetSink = nullptr;
+    void stopWorker();
+
+    std::atomic<int> m_frameCount{0};
+    std::atomic<int> m_discardedCount{0};
+    // 因队列上限/过晚而丢弃的帧数
+    std::atomic<int> m_droppedForLag{0};
+
+    // worker 队列（WebRTC 帧）。GUI 线程 resetQueue 时也会清空它。
+    std::thread m_worker;
+    bool m_workerEnabled = true;
+    std::atomic<bool> m_workerStarted{false};
+    std::mutex m_workerMutex;
+    std::condition_variable m_workerCv;
+    std::deque<IncomingFrame> m_workerQueue;
+    bool m_stopWorker = false;
+
+    // resetQueue 递增；worker 投递结果时据此丢弃 reset 前的旧帧。
+    std::atomic<uint64_t> m_generation{0};
+
+    // GUI 线程独占：等待显示的帧（按到达顺序）
+    std::deque<PendingFrame> m_scheduled;
+    size_t m_scheduledBytes = 0;
+    QTimer *m_presentTimer = nullptr;
+
+    std::function<int()> m_delayProvider;
+    // 时间基非对称 EMA：上升快、下降慢；数值只在 GUI 线程访问。
+    double m_delayMs = 0.0;
+    int64_t m_lastDelayUpdateUs = 0;
+    int64_t m_lastAudioUs = 0;
+    bool m_hasSeenAudio = false;
+
+    // 到达抖动：到达间隔与 RTP 时间戳间隔之差的 EWMA。只用于决定视频
+    // 额外缓冲，不改变音频侧 NetEq 的行为。
+    double m_jitterMs = 0.0;
+    int64_t m_lastMediaTimestampUs = 0;
+    int64_t m_lastArrivalUs = 0;
+    // 有电影声时的最小视频缓冲；SYNCINE_SHARE_JITTER_MS 可覆盖。
+    double m_jitterFloorMs = 100.0;
+
+    std::atomic<bool> m_writingEnabled{true};
+
+    // QVideoSink 的生命周期由 QML 掌管，这里只借用
+    QPointer<QVideoSink> m_targetSink;
 };
 
 #endif //SYNCINE_REMOTEVIDEORENDERER_H

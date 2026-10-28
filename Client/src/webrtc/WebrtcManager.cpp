@@ -4,7 +4,9 @@
 
 #include "WebrtcManager.h"
 
+#include <QCoreApplication>
 #include <QDebug>
+#include <QEvent>
 #include <QVideoFrame>
 
 #include "MovieAudioPlayer.h"
@@ -180,32 +182,32 @@ private:
 };
 
 // 画质档位 → 编码参数。
-// 只调整码率上限与帧率上限，不改变分辨率——让编码器按码率自行下调（过载时它本就会
-// 优先降低分辨率），比自行推测缩放系数更准确。
+// 码率/帧率上限 + 显式目标分辨率。低档位不再让编码器自己猜降到多少。
 // 关于「原画」：WebRTC 中不设上限并非无限，未设置时会采用按分辨率计算的默认上限
 // （encoder_stream_factory.cc 的 GetMaxDefaultVideoBitrateKbps：540p 以上一律
 // 2500kbps），比「高清」还低；故「原画」须显式给出较高上限，实际上限交由带宽估计。
 struct VideoQualityPreset {
     int maxBitrateBps = 0;   // 0 = 用 WebRTC 默认上限
     double maxFramerate = 0; // 0 = 不限制
+    int targetHeight = 0;    // 0 = 不限制分辨率（按源尺寸）
 };
 
 VideoQualityPreset presetForQuality(WebrtcManager::VideoQuality quality) {
     switch (quality) {
     case WebrtcManager::VideoQuality::Smooth:
-        // 流畅：320~480p 观感，帧率留 24(电影本身也就 24)
-        return {800'000, 24.0};
+        // 流畅：480p，帧率留 24(电影本身也就 24)
+        return {800'000, 24.0, 480};
     case WebrtcManager::VideoQuality::Standard:
-        // 标准：720p 观感
-        return {2'000'000, 30.0};
+        // 标准：720p
+        return {2'000'000, 30.0, 720};
     case WebrtcManager::VideoQuality::Hd:
-        // 高清：1080p 观感。已高于 WebRTC 的默认上限（2.5Mbps）
-        return {4'000'000, 30.0};
+        // 高清：1080p。已高于 WebRTC 的默认上限（2.5Mbps）
+        return {4'000'000, 30.0, 1080};
     case WebrtcManager::VideoQuality::Original:
-        // 原画：上限设得很高，实际速率由网络决定；不限制帧率
-        return {10'000'000, 0.0};
+        // 原画：上限设得很高，实际速率由网络决定；不限制帧率/分辨率
+        return {10'000'000, 0.0, 0};
     }
-    return {10'000'000, 0.0};
+    return {10'000'000, 0.0, 0};
 }
 
 QString qualityName(WebrtcManager::VideoQuality quality) {
@@ -383,11 +385,15 @@ bool WebrtcManager::initialize() {
         LOG_WARN("WebRTC") << "推流电影音轨预创建失败，本次运行将没有共享视频声音";
     }
 
-    // 预创建共享模式下接收侧的画面渲染器与声音播放器
-    // TODO: 实现音画同步
+    // 预创建共享模式下接收侧的画面渲染器与声音播放器。
+    // 渲染器按“当前音频还要多久响出”给画面排期：回调里只读播放器的估计值，
+    // 不持有它的裸指针；destroy() 时会先清回调再销毁两者。
     m_remoteRenderer = std::make_unique<RemoteVideoRenderer>();
     m_movieAudioPlayer = std::make_unique<MovieAudioPlayer>();
     m_movieAudioPlayer->setVolume(m_remoteMovieVolume);
+    m_remoteRenderer->setPlayoutDelayProvider([this]() {
+        return m_movieAudioPlayer != nullptr ? m_movieAudioPlayer->playoutDelayMs() : 0;
+    });
 
     return true;
 }
@@ -497,10 +503,9 @@ PeerLink *WebrtcManager::createLink(const QString &peerId, LinkKind kind,
                 this, &WebrtcManager::dataChannelMessageReceived);
     } else {
         if (m_localVideoTrack != nullptr) {
-            link->addLocalVideoTrack(m_localVideoTrack);
+            link->addLocalVideoTrack(m_localVideoTrack, m_videoSending);
             // 新连接套用当前画质档位（观众可能在房主修改档位之后才进入）
-            const VideoQualityPreset preset = presetForQuality(m_videoQuality);
-            link->applyVideoQuality(preset.maxBitrateBps, preset.maxFramerate);
+            applyQualityToLink(link);
         }
         if (m_localMovieAudioTrack != nullptr) {
             // 初始 active 直接写进 init_send_encodings，协商时发送流
@@ -1047,22 +1052,84 @@ void WebrtcManager::setLocalVideoEnabled(bool enabled) {
                        << "(当前" << m_peers.size() << "个对端)";
 }
 
+void WebrtcManager::setLocalVideoSending(bool enabled) {
+    if (m_videoSending == enabled)
+        return;
+
+    m_videoSending = enabled;
+
+    // 每个对端各有一条 media 连接，也就各有一个视频 sender
+    for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it) {
+        if (it.value().media != nullptr)
+            it.value().media->applyVideoSending(enabled);
+    }
+
+    LOG_INFO("WebRTC") << (enabled ? "视频恢复发送" : "视频停止发送")
+                       << "(当前" << m_peers.size() << "个对端)";
+}
+
 void WebrtcManager::setVideoQuality(VideoQuality quality) {
     if (m_videoQuality == quality && !m_peers.isEmpty())
         return;
 
     m_videoQuality = quality;
+    applyQualityToAll();
 
     const VideoQualityPreset preset = presetForQuality(quality);
-    for (auto it = m_peers.constBegin(); it != m_peers.constEnd(); ++it) {
-        if (it.value().media != nullptr)
-            it.value().media->applyVideoQuality(preset.maxBitrateBps,
-                                                preset.maxFramerate);
+    LOG_INFO("WebRTC") << "推送画质设为" << qualityName(quality)
+                       << "(码率上限" << (preset.maxBitrateBps / 1000) << "kbps)"
+                       << "目标高度" << preset.targetHeight << "p";
+    emit videoQualityChanged(quality);
+}
+
+void WebrtcManager::applyQualityToLink(PeerLink *link) {
+    if (link == nullptr)
+        return;
+
+    const VideoQualityPreset preset = presetForQuality(m_videoQuality);
+    int maxBitrate = preset.maxBitrateBps;
+    // 文件传输期间给视频封顶；传输结束后 setTransferActive(false) 会恢复。
+    if (m_transferActive)
+        maxBitrate = maxBitrate > 0 ? qMin(maxBitrate, 1'200'000) : 1'200'000;
+
+    int maxWidth = 0;
+    int maxHeight = 0;
+    if (preset.targetHeight > 0) {
+        int sourceWidth = m_videoSource != nullptr ? m_videoSource->inputWidth() : 0;
+        int sourceHeight = m_videoSource != nullptr ? m_videoSource->inputHeight() : 0;
+        // worker 还没更新统计时，用 GUI 最近一帧的尺寸兜底。
+        if (sourceWidth <= 0 || sourceHeight <= 0) {
+            sourceWidth = m_lastQualityWidth;
+            sourceHeight = m_lastQualityHeight;
+        }
+        if (sourceWidth > 0 && sourceHeight > 0) {
+            const bool portrait = sourceHeight > sourceWidth;
+            const int longSide = preset.targetHeight * 16 / 9;
+            maxWidth = portrait ? preset.targetHeight : longSide;
+            maxHeight = portrait ? longSide : preset.targetHeight;
+        }
     }
 
-    LOG_INFO("WebRTC") << "推送画质设为" << qualityName(quality)
-                       << "(码率上限" << (preset.maxBitrateBps / 1000) << "kbps)";
-    emit videoQualityChanged(quality);
+    link->applyVideoQuality(maxBitrate, preset.maxFramerate, maxWidth, maxHeight);
+}
+
+void WebrtcManager::applyQualityToAll() {
+    for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it) {
+        if (it.value().media != nullptr)
+            applyQualityToLink(it.value().media);
+    }
+}
+
+void WebrtcManager::setTransferActive(bool active) {
+    if (m_transferActive == active)
+        return;
+
+    m_transferActive = active;
+    applyQualityToAll();
+
+    LOG_INFO("WebRTC") << (active
+                               ? "文件传输进行中，共享视频码率上限降至 1.2Mbps"
+                               : "文件传输结束，恢复共享视频画质档位");
 }
 
 void WebrtcManager::setMovieAudioEnabled(bool enabled) {
@@ -1194,6 +1261,16 @@ void WebrtcManager::pushQtVideoFrame(const QVideoFrame &frame) {
     if (m_videoSource == nullptr)
         return;
 
+    // 第一帧/换源后才能知道横竖屏与真实尺寸；此时把目标分辨率补套一次。
+    const int width = frame.width();
+    const int height = frame.height();
+    if (width > 0 && height > 0
+        && (width != m_lastQualityWidth || height != m_lastQualityHeight)) {
+        m_lastQualityWidth = width;
+        m_lastQualityHeight = height;
+        applyQualityToAll();
+    }
+
     m_videoSource->pushQtFrame(frame);
 }
 
@@ -1209,6 +1286,13 @@ void WebrtcManager::setRemoteVideoEnabled(bool enabled) {
         return;
 
     m_remoteRenderer->setWritingEnabled(enabled);
+}
+
+void WebrtcManager::flushRemotePlayback() {
+    if (m_movieAudioPlayer != nullptr)
+        m_movieAudioPlayer->flush();
+    if (m_remoteRenderer != nullptr)
+        m_remoteRenderer->resetQueue();
 }
 
 webrtc::scoped_refptr<webrtc::VideoTrackInterface> WebrtcManager::getOrCreateVideoTrack() {
@@ -1335,19 +1419,30 @@ void WebrtcManager::destroy() {
     // 走到这一步说明整个 WebRTC 世界都在拆，不需要它再撑着声卡了。
     m_voiceKeepAlive = nullptr;
 
-    // 接收侧播放器要在工厂之前放掉：它内部持有 WebRTC 的 sink 注册关系
+    // removePeer 用的是 deleteLater；主事件循环退出后它排队的析构不会再执行，
+    // 而 ~PeerLink 释放轨道时必须让 WebRTC 信令线程还活着。这里主动把
+    // DeferredDelete 事件处理掉，确保 PeerLink 在停线程之前完成析构。
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+
+    // 接收侧：渲染器的排期回调会读播放器。先清回调，再销毁渲染器
+    // （停掉它的定时器与队列），最后才放播放器 —— 顺序反了就是悬空回调。
+    if (m_remoteRenderer != nullptr)
+        m_remoteRenderer->setPlayoutDelayProvider({});
+    m_remoteRenderer.reset();
+
+    // 播放器内部持有 WebRTC 的 sink 注册关系，必须在工厂之前释放
     m_movieAudioPlayer.reset();
 
     // 2. 轨 → 源 → 工厂（顺序同上：引用方先释放）
     m_localVideoTrack = nullptr;
     m_localAudioTrack = nullptr;
     m_localMovieAudioTrack = nullptr;
+    // 源不会被 Release() 析构（永远 kOtherRefsRemained），worker 线程必须显式停。
+    if (m_videoSource != nullptr)
+        m_videoSource->shutdown();
     m_videoSource = nullptr;
     m_audioSource = nullptr;
     m_movieAudioSource = nullptr;
-
-    // 接收侧渲染器也要在工厂之前放掉：它内部的转换会用到 WebRTC 的类型
-    m_remoteRenderer.reset();
 
     m_voiceFactory = nullptr;
     m_mediaFactory = nullptr;

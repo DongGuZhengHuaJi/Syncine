@@ -316,6 +316,24 @@ Item {
                               + "（仅当前用户可读）。使用完毕后可在此清除。"
                     }
 
+                    OptionList {
+                        width: parent.width
+                        options: [
+                            { label: "仅 Bilibili 使用 Cookie", value: false },
+                            { label: "通用链接也使用 Cookie", value: true }
+                        ]
+                        selectedValue: appSettings.genericCookies
+                        onPicked: (value) => appSettings.setGenericCookies(value)
+                    }
+
+                    Label {
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        font.pixelSize: 11
+                        color: Style.textFaint
+                        text: "默认只把 cookie 带给 Bilibili，避免把登录态发给其它站点。"
+                    }
+
                     // 状态行
                     Row {
                         spacing: 6

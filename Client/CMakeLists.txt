@@ -162,6 +162,8 @@ qt_add_executable(Syncine
         # media：格式模型与探测（不认识房间，也不认识播放器）
         src/media/FormatModel.cpp
         src/media/FormatModel.h
+        src/media/MediaPlatform.cpp
+        src/media/MediaPlatform.h
         src/media/UrlInspector.cpp
         src/media/UrlInspector.h
 
@@ -316,6 +318,70 @@ target_link_libraries(Syncine
         # WebRTC
         WebRTC::WebRTC
 )
+
+# ======================================================================
+# 12.1 纯逻辑测试（不依赖 QML / 网络 / WebRTC 运行时）
+#
+# 只编译 FormatModel 与 Log，验证 spec 解释、档位/手选 id 优先级等纯规则。
+# 不安装、不打包；CI 发版构建也会顺带编译，成本很低。
+# ======================================================================
+
+enable_testing()
+
+add_executable(syncine_logic_tests
+        tests/tst_formatmodel.cpp
+        src/media/FormatModel.cpp
+        src/core/Log.cpp
+)
+
+target_include_directories(syncine_logic_tests
+        PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/media"
+)
+
+target_link_libraries(syncine_logic_tests PRIVATE Qt6::Core)
+
+add_test(NAME formatmodel COMMAND syncine_logic_tests)
+
+add_executable(syncine_platform_tests
+        tests/tst_platform.cpp
+        src/media/MediaPlatform.cpp
+)
+
+target_include_directories(syncine_platform_tests
+        PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/media"
+)
+
+target_link_libraries(syncine_platform_tests PRIVATE Qt6::Core)
+
+add_test(NAME platform COMMAND syncine_platform_tests)
+
+add_executable(syncine_video_tests
+        tests/tst_videosource.cpp
+        src/webrtc/VideoTrackSource.cpp
+        src/core/Log.cpp
+)
+
+target_include_directories(syncine_video_tests
+        PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/webrtc"
+)
+
+target_link_libraries(syncine_video_tests
+        PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Multimedia
+        WebRTC::WebRTC
+)
+
+add_test(NAME videosource COMMAND syncine_video_tests)
 
 # ======================================================================
 # 13. 安装规则 —— 打包的基石

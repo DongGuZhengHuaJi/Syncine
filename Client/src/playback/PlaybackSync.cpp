@@ -513,6 +513,12 @@ void PlaybackSync::onLocalPlayingChanged() {
         return;
 
     if (!m_playback->playing()) {
+        // 卸载/换源/播完也会走到这里，但那是播放器生命周期，不是用户按了暂停。
+        // 广播出去会把房间里的其他人一起按停。
+        if (m_playback->lifecycleStop()) {
+            LOG_DEBUG("Playback") << "生命周期停止(卸载/换源/播完)，不广播 Pause";
+            return;
+        }
         m_session->sendPlayback(RoomSession::PlaybackAction::Pause,
                                 m_playback->position());
         return;
@@ -1063,6 +1069,12 @@ void PlaybackSync::onRemoteCommand(RoomSession::PlaybackAction action, qint64 po
             }
             return;
         }
+
+        // seek 后本地音频环形缓冲和 NetEq 里还有旧声音，视频队列里也有旧帧；
+        // 让主函数清一次，避免先听到/看到 seek 前的内容。
+        if (action == RoomSession::PlaybackAction::Seek && position >= 0)
+            emit remoteSeeked(position);
+
         updateSyncedState(position, action == RoomSession::PlaybackAction::Play);
         return;
     }

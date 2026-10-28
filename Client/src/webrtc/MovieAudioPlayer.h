@@ -21,6 +21,7 @@
 #ifndef SYNCINE_MOVIEAUDIOPLAYER_H
 #define SYNCINE_MOVIEAUDIOPLAYER_H
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -54,6 +55,15 @@ public:
 
     // 已写入缓冲的字节数与当前缓冲深度（排查用）
     int queuedBytes() const;
+    int droppedForLag() const;
+
+    // 从 WebRTC 交出这段音频，到扬声器真正响出，大约还要多久（毫秒）。
+    // 只在 GUI 线程调用（内部读 QAudioSink::bufferSize）。
+    int playoutDelayMs() const;
+
+    // 丢弃本地环形缓冲和一小段仍在 NetEq 里的旧音频。
+    // 远端 seek 后调用；默认不 reset QAudioSink（避免一次可闻的停顿）。
+    void flush();
 
     // ---- webrtc::AudioTrackSinkInterface ----
     // 由 WebRTC 的音频线程调用
@@ -87,6 +97,14 @@ private:
     // 单声道铺成立体声用的暂存区。只在 OnData 里用，而 OnData 由 WebRTC 的
     // 音频线程串行调用，故无需加锁；做成成员是为了不在音频线程上反复分配。
     std::vector<int16_t> m_monoScratch;
+
+    // 最近一次收到音频的时间（steady clock 微秒）。拉模式下 QAudioSink 会一直
+    // 保持 Active（readData 永远补静音），不能用 sink 状态判断“还有没有电影声”，
+    // 只能看这个时间戳。
+    std::atomic<int64_t> m_lastOnDataUs{0};
+
+    // seek 后的一小段丢弃窗口：本地环形缓冲清掉后，NetEq 还会继续吐旧音频。
+    std::atomic<int64_t> m_discardUntilUs{0};
 };
 
 #endif //SYNCINE_MOVIEAUDIOPLAYER_H

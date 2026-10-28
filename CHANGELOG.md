@@ -2,6 +2,46 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 共享模式
+
+- **观众端停止推流**：视频与电影声的发送开关改为“共享模式且是房主”才开启，通过
+  `encodings[0].active` 真正停止 RTP；观众端同时停止喂帧和 PCM，不再占用上行带宽。
+- **建连即停发**：视频轨的初始 `active` 随 `AddTrack` 传入，连接建立后再补写一次，
+  避免非共享模式/观众端在建连瞬间先发几帧。
+- **黑帧回灌修复**：切换画面时注入的清屏黑帧不再被当成真实解码帧转发给推流端。
+
+- **音画同步**：视频与电影声使用同一个 MediaStream id（`syncine-media`），接收侧 libwebrtc 才会把两条流放进同一 sync_group 做投递对齐。
+- **音频积压补偿**：`MovieAudioPlayer::playoutDelayMs()` 用环形缓冲 + QAudioSink 缓冲估算“还要多久响出”；视频按 `到达时间 + 当前延迟` 排期，延迟用时间基非对称 EMA 平滑，队列有界（24 帧 / 64MB）。
+- **seek 清缓冲**：观众收到远端 seek 时清空电影声环形缓冲并丢弃 250ms 内来自 NetEq 的旧音频，同时清空视频待显示队列。
+- **音频环形缓冲**：`QByteArray::remove(0,n)` 改为固定大小环形缓冲；`OnData` 不再跨线程读 `QAudioSink`。
+- **sink 生命周期**：`QVideoSink` 改 `QPointer`，`VideoOutput` 销毁时 `unbindVideoOutput()`；`PeerLink::close()` 对远端音/视频轨 `RemoveSink`。`WebrtcManager::destroy()` 先清延迟回调、再销毁渲染器/播放器。
+- **暂停误报**：卸载/换源/播完不再广播 Pause；用户主动暂停仍正常同步。
+- **重连稳定性**：同一次连接的多个 `connected` 回调只上报一次，ICE 重试计数不再被反复清零；首次 ICE 失败也走 2s/5s/10s 退避重试；PeerConnection 进入 Closed 后拆掉旧连接重建（带防重入/2 秒冷却）。
+- **退出崩溃**：`WebrtcManager::destroy()` 在停 WebRTC 线程前处理 `DeferredDelete`，确保 PeerLink 在信令线程还活着时析构。
+- **编码转换搬离 GUI**：发送端 `VideoTrackSource` 改为 GUI 只打时间戳入有界 FIFO，worker 做 map/libyuv/I420 分配；GPU 帧在 GUI 回退转换后仍进入同一 FIFO，保证编码器收到的时间戳顺序不乱。`sinkCount()==0` 时不做任何转换。新增显式 `shutdown()`（源不会被 Release 析构，worker 必须手动停）。
+- **解码转换搬离 GUI**：接收端 `RemoteVideoRenderer` 增加转换 worker（ToI420 + QVideoFrame 组装），GUI 只做排期与 `setVideoFrame`；`SYNCINE_RENDER_WORKER=0` / `SYNCINE_VIDEO_WORKER=0` 可回退。
+- **jitter buffer**：排期延迟取 `max(音频积压, 到达抖动×2, 最小缓冲)`；有电影声时默认最小 100ms，`SYNCINE_SHARE_JITTER_MS` 可覆盖，无音频时只按抖动估计。
+- **画质档位**：显式 `MAINTAIN_FRAMERATE` 降级策略 + 按档位设置 480p/720p/1080p 目标分辨率（竖屏自动交换宽高）；协商完成后补写一次，修复 media 连接可能从未真正应用画质的问题。
+- **传输与视频争用**：文件传输进行中把共享视频码率上限压到 1.2Mbps，结束后恢复；传输窗口默认仍为 512KB，`SYNCINE_TRANSFER_ADAPTIVE=1` 时按 ACK 增量在 256KB~1MB 间 AIMD，不使用不可信的 availableOutgoingBitrate。
+
+### 网链
+
+- **手选 format_id**：新条目用 `id:` 前缀记录手选流；裸数字 spec 先判断是否为源内真实分辨率高度，再按 format_id 解释。纯数字 format_id（30080/137）不再被当成档位静默忽略；显式 `id:` 不存在时直接报错，不再回退最高画质。
+- **测试骨架**：新增 `Client/tests` 与 CTest，覆盖档位/手选 id/`id:` 前缀/缺失 id/标签显示。
+- **平台注册表**：按 URL host 后缀识别 Bilibili / Generic，不再在下载流程里硬编码站点；B 站始终带 cookie，Generic 默认不带（设置页可开启“通用链接也使用 Cookie”），避免把登录态发给任意站点。
+- **Bilibili 来源卡**：支持直接输入 BV号 / av号 / ss号 / ep号 / 直播间号，自动拼成完整链接；链接做去尾斜杠/fragment 规范化，直接输编号与粘贴完整链接得到同一个 `itemId`。通用卡仍只收完整链接，粘贴 B 站链接会按 URL 自动识别。
+- **解析看门狗**：添加条目弹窗的 yt-dlp 解析 30 秒无输出自动终止并报错，不再永远停在“解析中…”。
+- **yt-dlp 插件**：只做可行性分析（`docs/ytdlp-plugin-feasibility.md`），未实现；已实测随包二进制支持 `--plugin-dirs`，非法目录会直接退出。
+
+### 日志
+
+- **异步写入**：客户端与服务端改为“调用线程入队 + 单写线程批量落盘”，每 100ms 或 64KB flush 一次；队列有界，满时丢弃 trace/debug 并计数，Warn 及以上保留，Fatal 同步落盘。`SYNCINE_LOG_SYNC=1` 可回退到旧的逐行同步模式。
+- **降噪**：直播弹幕的逐包/逐通知日志降到 trace，ICE 候选收集错误降到 debug；文件传输进度和 GetStats 频率不变。
+- **WebRTC 日志**：恢复 `SYNCINE_WEBRTC_LOG` 开关，默认只接 warning 及以上。
+- **收尾日志**：客户端应用对象在 `Log::shutdown()` 之前析构，WebRTC 停线程等收尾日志不会丢。
+
 ## [1.4.0] — 2026-10-28
 
 > 本版客户端与服务端需要一起升级：`video_status` 新增 `itemId/seq`，文件传输的

@@ -70,6 +70,12 @@ class AppSettings : public QObject {
                WRITE setHdrAllowed
                NOTIFY hdrAllowedChanged)
 
+    // 通用链接是否也带 cookie。默认关闭：避免把 B 站登录态发给任意站点。
+    Q_PROPERTY(bool genericCookies
+               READ genericCookies
+               WRITE setGenericCookies
+               NOTIFY genericCookiesChanged)
+
     // ---- 弹幕显示 ----
     // 显示区域：弹幕只占播放器顶部的这个百分比，档位 10/25/50/75/100。
     Q_PROPERTY(int danmakuArea
@@ -153,6 +159,9 @@ public:
     bool hdrAllowed() const { return m_hdrAllowed; }
     Q_INVOKABLE void setHdrAllowed(bool allowed);
 
+    bool genericCookies() const { return m_genericCookies; }
+    Q_INVOKABLE void setGenericCookies(bool enabled);
+
     int danmakuArea() const { return m_danmakuArea; }
     Q_INVOKABLE void setDanmakuArea(int area);
 
@@ -203,6 +212,7 @@ signals:
     void cookieImportedAtChanged();
     void defaultQualityChanged();
     void hdrAllowedChanged();
+    void genericCookiesChanged();
     void danmakuAreaChanged();
     void danmakuOpacityChanged();
     void danmakuFontSizeChanged();
@@ -222,6 +232,7 @@ private:
     // 空 = 最高画质；数字串 = 高度上限（见文件头说明）
     QString m_defaultQuality;
     bool m_hdrAllowed = false;
+    bool m_genericCookies = false;
     int m_danmakuArea = 100;
     int m_danmakuOpacity = 100;
     int m_danmakuFontSize = 100;

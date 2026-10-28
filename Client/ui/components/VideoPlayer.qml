@@ -50,6 +50,9 @@ Item {
         fillMode: VideoOutput.PreserveAspectFit
 
         Component.onCompleted: playbackController.bindVideoOutput(videoOutput.videoSink)
+        // 页面销毁前把 C++ 里指向本 sink 的指针都清掉；否则远端队列里
+        // 还有帧时会踩到已释放的 QVideoSink。
+        Component.onDestruction: playbackController.unbindVideoOutput()
     }
 
     MouseArea {

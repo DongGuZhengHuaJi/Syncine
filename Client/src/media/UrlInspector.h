@@ -17,6 +17,7 @@
 #include <QJsonObject>
 #include <QObject>
 #include <QString>
+#include <QTimer>
 #include <QVariantList>
 
 #include "media/FormatModel.h"
@@ -134,6 +135,9 @@ public:
                           QObject *parent = nullptr);
     ~UrlInspector() override;
 
+    // 通用链接是否也带 cookie（Bilibili 来源始终带）。
+    void setGenericCookies(bool enabled) { m_genericCookies = enabled; }
+
     // 看一眼这个链接（拿标题/时长/档位/详情列表）。重复调用会作废上一次。
     // 多集链接（剧集/合集）只列表，不挑流 —— 用户得先点定某一集（pickEpisode）
     Q_INVOKABLE void inspect(const QString &url);
@@ -216,7 +220,10 @@ private:
 
     const Toolchain *m_toolchain = nullptr;
     const CookieManager *m_cookies = nullptr;
+    bool m_genericCookies = false;
     QProcess *m_process = nullptr;
+    // 解析长时间没有输出就杀掉，避免界面永远停在 “解析中…”。
+    QTimer m_stallTimer;
 
     QString m_stage = QStringLiteral("idle");
     QString m_error;

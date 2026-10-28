@@ -15,6 +15,7 @@
 #include "core/CookieManager.h"
 #include "core/Log.h"
 #include "core/Toolchain.h"
+#include "media/MediaPlatform.h"
 
 namespace {
 
@@ -543,7 +544,10 @@ void UrlDownloader::startProcess(const QStringList &options, const QString &url)
     // url 在末尾，其余无限制
     QStringList args = options;
     args << m_toolchain->ffmpegLocationArgs();
-    if (m_cookies != nullptr)
+    // 只有平台策略允许时才带 cookie：B 站始终带，Generic 默认不带，
+    // 避免把 B 站登录态发给任意站点。
+    const MediaPlatform *platform = mediaPlatformRegistry().detect(QUrl(m_url));
+    if (m_cookies != nullptr && platformUsesCookies(platform, m_genericCookies))
         args << m_cookies->cookieArgs();
     Toolchain::appendUrlArg(args, url); // 必须走它，理由见 Toolchain.h
     process->setArguments(args);

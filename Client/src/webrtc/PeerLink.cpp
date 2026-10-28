@@ -286,13 +286,23 @@ void PeerLink::close() {
     m_remoteDescriptionSet = false;
     m_pendingOperation = PendingOperation::None;
 
-    // 立刻松开外部播放器。
+    // 立刻松开外部播放器/渲染器。
     //
-    // 这个指针指向 WebrtcManager 持有的 MovieAudioPlayer。管理器的 destroy()
-    // 里是先关连接、再放播放器，而关闭到真正析构之间还有一段 deleteLater 的
-    // 窗口期 —— 只要这期间还有一帧音频摸进来，就会踩到已经释放的播放器。
-    // 这里先断开，窗口就不存在了。
-    m_remoteAudioSink = nullptr;
+    // 这些指针指向 WebrtcManager 持有的 MovieAudioPlayer / RemoteVideoRenderer。
+    // 管理器的 destroy() 里是先关连接、再放它们，而关闭到真正析构之间还有一段
+    // deleteLater 的窗口期 —— 只要这期间还有一帧音视频摸进来，就会踩到已经释放
+    // 的对象。除了清指针，还必须从轨上 RemoveSink；否则轨仍持有 sink 地址。
+    {
+        webrtc::MutexLock lock(&m_remoteAudioLock);
+        if (m_remoteAudioTrack != nullptr && m_remoteAudioSink != nullptr)
+            m_remoteAudioTrack->RemoveSink(m_remoteAudioSink);
+        m_remoteAudioTrack = nullptr;
+        m_remoteAudioSink = nullptr;
+    }
+    if (m_remoteVideoTrack != nullptr && m_remoteVideoSink != nullptr)
+        m_remoteVideoTrack->RemoveSink(m_remoteVideoSink);
+    m_remoteVideoTrack = nullptr;
+    m_remoteVideoSink = nullptr;
 
     if (m_connection != nullptr) {
         // 先断开连接再释放，防止析构过程中发生回调
@@ -464,7 +474,8 @@ void PeerLink::addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterf
     LOG_INFO("PeerLink") << m_peerId << "已挂载本地音轨";
 }
 
-void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterface> track) {
+void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterface> track,
+                                  bool sending) {
     if (m_connection == nullptr || track == nullptr)
         return;
 
@@ -480,20 +491,26 @@ void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterf
         return;
     }
 
+    // active 作为初始 encoding 参数：非共享模式/观众端从协商起就不发视频。
+    // 与电影音轨同理，协商之后还要在连接回调里再写一次。
+    m_videoSending = sending;
+    webrtc::RtpEncodingParameters videoEncoding;
+    videoEncoding.active = sending;
 
     // 在createOffer之前挂视频轨，SDP中会包含相应的m=video段
-    auto sender = m_connection->AddTrack(track, {"syncine-video"});
+    auto sender = m_connection->AddTrack(track, {kMediaStreamId}, {videoEncoding});
     if (!sender.ok()) {
         LOG_ERROR("PeerLink") << m_peerId << "添加视频轨失败:" << sender.error().message();
         return;
     }
 
     m_localVideoTrack = track;
-    // sender 要留着：画质档位（码率/帧率上限）只能通过它设置
+    // sender 要留着：画质档位（码率/帧率上限）和发送开关都只能通过它设置
     m_videoSender = sender.value();
     pushVideoQuality(); // 新连接先把当前档位套上
 
-    LOG_INFO("PeerLink") << m_peerId << "已挂载本地视频轨";
+    LOG_INFO("PeerLink") << m_peerId << "已挂载本地视频轨"
+                         << (sending ? "" : "(初始停发)");
 }
 
 void PeerLink::addLocalMovieAudioTrack(
@@ -514,13 +531,14 @@ void PeerLink::addLocalMovieAudioTrack(
         return;
     }
 
-    // stream id 用 kMovieStreamId —— 接收端就是靠它把这条轨认成"电影"的。
+    // stream id 与视频共用 kMediaStreamId：接收侧 libwebrtc 据此把两条流
+    // 放进同一个 sync_group，启用音视频投递对齐。
     // active 作为初始 encoding 参数一并传入：非共享模式下发送流从协商时就
     // 不会启动。否则 SetSsrc 会按默认的 active=true 重新应用一次，把建连前
     // 设置的 false 覆盖掉。
     webrtc::RtpEncodingParameters movieEncoding;
     movieEncoding.active = sending;
-    auto sender = m_connection->AddTrack(track, {kMovieStreamId}, {movieEncoding});
+    auto sender = m_connection->AddTrack(track, {kMediaStreamId}, {movieEncoding});
     if (!sender.ok()) {
         LOG_ERROR("PeerLink") << m_peerId << "添加电影音轨失败:" << sender.error().message();
         return;
@@ -613,10 +631,20 @@ void PeerLink::OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface>
     // 协商完成后再设一次画质：AddTrack 之后立刻设有时还太早
     pushVideoQuality();
 
-    emit connected(m_peerId, linkId());
+    reportConnected();
 }
 
 void PeerLink::OnRenegotiationNeeded() {
+}
+
+void PeerLink::reportConnected() {
+    // OnDataChannel / ICE Connected / ICE Completed / PeerConnection Connected
+    // 会在一次建连里各报一次；只让 SignalingChannel 看到一次，否则它每次都会
+    // 清空 ICE 重试计数，kMaxIceRestarts 形同虚设。
+    if (m_connectedReported)
+        return;
+    m_connectedReported = true;
+    emit connected(m_peerId, linkId());
 }
 
 void PeerLink::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState state) {
@@ -632,20 +660,22 @@ void PeerLink::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnect
         // 只靠建连前的设置会被覆盖。OnConnectionChange 未必在所有版本都触发，
         // 两个回调都补一次是幂等的。
         pushMovieAudioSending();
-        emit connected(m_peerId, linkId());
+        pushVideoSending();
+        // 协商会重启发送流，画质参数在连上后必须再落一次。
+        pushVideoQuality();
+        reportConnected();
         break;
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionFailed:
-        if (!m_everConnected) {
-            // 未连接成功过，不进行重连
-            emitError(QStringLiteral("ICE 连接失败"));
-            break;
-        }
-        // Failed 不会自行恢复，必须由应用发起 ICE restart。
+        // 首次失败也要交给 SignalingChannel 退避重试：瞬时网络问题不该让
+        // 这一路连接直接放弃。重试耗尽后 SignalingChannel 会报错。
+        m_connectedReported = false;
         LOG_WARN("PeerLink") << m_peerId << ":" << linkId()
-                             << "ICE 连接失败,等待重启";
+                             << "ICE 连接失败,等待重启"
+                             << (m_everConnected ? "" : "(首次)");
         emit iceFailed(m_peerId, linkId());
         break;
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionDisconnected:
+        m_connectedReported = false;
         if (!m_everConnected)
             break;
         // Disconnected 可能只是短暂抖动，先给一个宽限期；由 SignalingChannel
@@ -761,12 +791,17 @@ void PeerLink::OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectio
         // 协商完成前设置的 RTP 参数可能没落下去（SendStream 还没建），
         // 连上后补一次。Media 连接的电影音轨就是靠这里真正停发的。
         pushMovieAudioSending();
-        emit connected(m_peerId, linkId());
+        pushVideoSending();
+        // 协商会重启发送流，画质参数在连上后必须再落一次。
+        pushVideoQuality();
+        reportConnected();
         break;
     case webrtc::PeerConnectionInterface::PeerConnectionState::kFailed:
+        m_connectedReported = false;
         emitError(QStringLiteral("连接失败"));
         break;
     case webrtc::PeerConnectionInterface::PeerConnectionState::kClosed:
+        m_connectedReported = false;
         emit closed(m_peerId, linkId());
         break;
     default:
@@ -779,7 +814,9 @@ void PeerLink::OnStandardizedIceConnectionChange(webrtc::PeerConnectionInterface
 
 void PeerLink::OnIceCandidateError(const std::string &address, int port, const std::string &url,
                                    int error_code, const std::string &error_text) {
-    LOG_ERROR("PeerLink") << m_peerId << "ICE candidate 出错:" << url << error_code
+    // 候选收集失败是常态：每个 STUN/TURN URL 会按网卡各试一遍，远距离测试
+    // 一次能刷几百行。降到 Debug，默认 Info 级别不输出。
+    LOG_DEBUG("PeerLink") << m_peerId << "ICE candidate 出错:" << url << error_code
                           << error_text << "(地址" << address << ":" << port << ")";
 }
 
@@ -887,9 +924,12 @@ void PeerLink::createAnswer() {
     m_connection->CreateAnswer(this, options);
 }
 
-void PeerLink::applyVideoQuality(int maxBitrateBps, double maxFramerate) {
+void PeerLink::applyVideoQuality(int maxBitrateBps, double maxFramerate,
+                                 int maxWidth, int maxHeight) {
     m_videoMaxBitrateBps = maxBitrateBps;
     m_videoMaxFramerate = maxFramerate;
+    m_videoMaxWidth = maxWidth;
+    m_videoMaxHeight = maxHeight;
     pushVideoQuality();
 }
 
@@ -915,8 +955,12 @@ void PeerLink::pushVideoQuality() {
         //                    拥塞控制在这个上限内自适应。
         //   max_framerate    帧率上限。观影场景很划算：电影本来 24fps,
         //                    网络差时降到 15 肉眼几乎无感，码率却能省一半。
-        //   分辨率           不在这里设 —— 让编码器按码率自己降(过载时它会
-        //                    先降分辨率），比自行推测缩放系数更准确。
+        //   scale_resolution_down_to  目标分辨率上限。低档位显式压到 480p/720p，
+        //                    不再把“降到多少”完全交给编码器。
+        // 降级策略写死为保帧率、降分辨率，行为可预期。
+        parameters.degradation_preference =
+            webrtc::DegradationPreference::MAINTAIN_FRAMERATE;
+
         webrtc::RtpEncodingParameters &encoding = parameters.encodings[0];
 
         if (m_videoMaxBitrateBps > 0)
@@ -928,6 +972,13 @@ void PeerLink::pushVideoQuality() {
             encoding.max_framerate = m_videoMaxFramerate;
         else
             encoding.max_framerate.reset();
+
+        if (m_videoMaxWidth > 0 && m_videoMaxHeight > 0) {
+            encoding.scale_resolution_down_to =
+                webrtc::Resolution{m_videoMaxWidth, m_videoMaxHeight};
+        } else {
+            encoding.scale_resolution_down_to.reset();
+        }
 
         const webrtc::RTCError error = m_videoSender->SetParameters(parameters);
         if (!error.ok()) {
@@ -942,7 +993,12 @@ void PeerLink::pushVideoQuality() {
                              << "帧率上限"
                              << (m_videoMaxFramerate > 0
                                      ? QString::number(m_videoMaxFramerate) + "fps"
-                                     : QStringLiteral("默认"));
+                                     : QStringLiteral("默认"))
+                             << "分辨率上限"
+                             << (m_videoMaxWidth > 0
+                                     ? QStringLiteral("%1x%2").arg(m_videoMaxWidth)
+                                           .arg(m_videoMaxHeight)
+                                     : QStringLiteral("不限制"));
     });
 }
 
@@ -996,6 +1052,52 @@ void PeerLink::pushMovieAudioSending() {
 
         LOG_INFO("PeerLink") << m_peerId << (active ? "恢复发送电影音轨"
                                                     : "停止发送电影音轨");
+    });
+}
+
+void PeerLink::applyVideoSending(bool active) {
+    if (m_videoSending == active)
+        return;
+
+    m_videoSending = active;
+    // 建连前 sender 还不存在，push 会直接返回；连接建立后由
+    // OnIceConnectionChange / OnConnectionChange 补一次。
+    pushVideoSending();
+}
+
+void PeerLink::pushVideoSending() {
+    if (m_videoSender == nullptr || m_connection == nullptr)
+        return;
+
+    webrtc::Thread *signaling = m_connection->signaling_thread();
+    if (signaling == nullptr)
+        return;
+
+    const bool active = m_videoSending;
+    signaling->BlockingCall([this, active]() {
+        if (m_videoSender == nullptr)
+            return;
+
+        webrtc::RtpParameters parameters = m_videoSender->GetParameters();
+        if (parameters.encodings.empty()) {
+            LOG_DEBUG("PeerLink") << m_peerId << "视频 sender 没有 encoding，"
+                                                 "无法设置发送状态";
+            return;
+        }
+
+        // 与电影音轨同样的理由：协商会重新启动发送流，连上后必须再写一次。
+        parameters.encodings[0].active = active;
+
+        const webrtc::RTCError error = m_videoSender->SetParameters(parameters);
+        if (!error.ok()) {
+            LOG_DEBUG("PeerLink") << m_peerId << "设置视频发送状态失败(目标"
+                                  << (active ? "开" : "关") << "):"
+                                  << error.message();
+            return;
+        }
+
+        LOG_INFO("PeerLink") << m_peerId << (active ? "恢复发送视频"
+                                                    : "停止发送视频");
     });
 }
 

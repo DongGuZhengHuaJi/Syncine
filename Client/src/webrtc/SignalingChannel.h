@@ -211,6 +211,12 @@ private:
     // 信令断线期间 restart offer 发不出去，等 resume 后用这个集合重排。
     QSet<QString> m_iceFailedLinks;
 
+    // onPeerClosed 重建时的防重入/防连环重建：
+    //   - tearingDown：主动 teardown 期间 close() 产生的 closed 回调不处理
+    //   - rebuildCooldown：重建后的 2 秒内忽略旧的 closed 信号，避免把新连接拆掉
+    QSet<QString> m_tearingDownPeers;
+    QSet<QString> m_rebuildCooldown;
+
     static QString offerKey(const QString &peerId, const QString &link);
 };
 

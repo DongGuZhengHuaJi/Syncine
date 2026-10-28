@@ -115,7 +115,7 @@ PlaybackController::PlaybackController(QObject *parent)
     // 没有这条日志的话，"卡了"只能靠猜。放 Debug:正常播放时它很安静，
     // 只在状态真的变时才打一行。
     connect(m_player, &QMediaPlayer::mediaStatusChanged, this,
-            [](QMediaPlayer::MediaStatus status) {
+            [this](QMediaPlayer::MediaStatus status) {
                 const char *text = nullptr;
                 switch (status) {
                 case QMediaPlayer::NoMedia: text = "无媒体"; break;
@@ -124,11 +124,22 @@ PlaybackController::PlaybackController(QObject *parent)
                 case QMediaPlayer::StalledMedia: text = "卡住了(等数据)"; break;
                 case QMediaPlayer::BufferingMedia: text = "缓冲中"; break;
                 case QMediaPlayer::BufferedMedia: text = "缓冲够用"; break;
-                case QMediaPlayer::EndOfMedia: text = "播完了"; break;
+                case QMediaPlayer::EndOfMedia:
+                    text = "播完了";
+                    // 播完导致的 playingChanged(false) 不是用户暂停，不广播。
+                    m_lifecycleStop = true;
+                    break;
                 case QMediaPlayer::InvalidMedia: text = "媒体无效"; break;
                 }
                 if (text != nullptr)
                     LOG_DEBUG("Playback") << "播放状态:" << text;
+            });
+
+    // 真正进入播放状态（用户点了播放）后，生命周期停止标记复位。
+    connect(m_player, &QMediaPlayer::playbackStateChanged, this,
+            [this](QMediaPlayer::PlaybackState state) {
+                if (state == QMediaPlayer::PlayingState)
+                    m_lifecycleStop = false;
             });
 }
 
@@ -258,9 +269,11 @@ QMediaPlayer *PlaybackController::player() const
 }
 
 void PlaybackController::onVideoFrame(const QVideoFrame &frame) {
-    if (!frame.isValid())
+    // clearVideoFrame() 注入的是 2×2 黑帧；即使信号是排队投递的、标志已经复位，
+    // 也用尺寸兜一道，避免它被当成真实解码帧转发给推流端。
+    if (!frame.isValid() || m_injectingClearFrame
+        || (frame.width() == 2 && frame.height() == 2))
         return;
-
 
     // 本回调接在 m_outputSink 上，共享模式下远端渲染器也会往这里送帧
     // 只有显示本地时才往外转发，否则会产生回声
@@ -328,7 +341,7 @@ void PlaybackController::onMovieAudioBuffer(const QAudioBuffer &buffer) {
 }
 
 QVideoSink *PlaybackController::displayVideoSink() const {
-    return m_outputSink;
+    return m_outputSink.data();
 }
 
 QUrl PlaybackController::source() const {
@@ -346,10 +359,14 @@ void PlaybackController::bindVideoOutput(QVideoSink *sink) {
     if (m_outputSink == sink)
         return;                         // 已经绑过了
 
+    // 重新绑定时断开旧 sink，避免同一个对象上留下两条连接。
+    if (!m_outputSink.isNull())
+        disconnect(m_outputSink.data(), nullptr, this, nullptr);
+
     m_outputSink = sink;
 
     // 本地解码帧到达时往外发一份 —— 推流侧订阅这个信号。
-    connect(m_outputSink, &QVideoSink::videoFrameChanged,
+    connect(sink, &QVideoSink::videoFrameChanged,
             this, &PlaybackController::onVideoFrame);
 
     // 向sink送帧的对象可能是播放器也可能是远端渲染器，取决于显示本地还是远端。
@@ -357,9 +374,25 @@ void PlaybackController::bindVideoOutput(QVideoSink *sink) {
 
     // 将sink交给 WebrtcManager,让远端渲染器往这里送帧。
     if (m_webrtcManager != nullptr)
-        m_webrtcManager->setRemoteVideoSink(m_outputSink);
+        m_webrtcManager->setRemoteVideoSink(sink);
 
     LOG_DEBUG("Playback") << "视频输出端已绑定:" << sink;
+    emit displayVideoSinkChanged();
+}
+
+void PlaybackController::unbindVideoOutput() {
+    if (m_outputSink.isNull())
+        return;
+
+    // QML 的 VideoOutput 即将销毁：先断开它的信号，再把播放器/渲染器两边
+    // 的落点清空，最后才松开 QPointer。
+    disconnect(m_outputSink.data(), nullptr, this, nullptr);
+    if (m_player != nullptr)
+        m_player->setVideoSink(nullptr);
+    if (m_webrtcManager != nullptr)
+        m_webrtcManager->setRemoteVideoSink(nullptr);
+
+    m_outputSink = nullptr;
     emit displayVideoSinkChanged();
 }
 
@@ -368,7 +401,7 @@ void PlaybackController::setRemoteRenderer(WebrtcManager *manager) {
 
     // 如果 sink 已经交过来了（顺序反过来）,立刻接上
     if (m_webrtcManager != nullptr && m_outputSink != nullptr)
-        m_webrtcManager->setRemoteVideoSink(m_outputSink);
+        m_webrtcManager->setRemoteVideoSink(m_outputSink.data());
 }
 
 void PlaybackController::setShowingRemote(bool showing) {
@@ -405,7 +438,7 @@ void PlaybackController::applyVideoSink() {
         LOG_DEBUG("Playback") << "applyVideoSink: 显示远端,播放器已脱钩";
     } else {
         // 显示本地画面，播放器往 sink 送帧
-        m_player->setVideoSink(m_outputSink);
+        m_player->setVideoSink(m_outputSink.data());
 
         // 停止远端渲染器
         if (m_webrtcManager != nullptr)
@@ -416,7 +449,7 @@ void PlaybackController::applyVideoSink() {
         // 本地播放器有画面时，下一帧会立刻覆盖这帧黑色。
         clearVideoFrame();
 
-        LOG_DEBUG("Playback") << "applyVideoSink: 显示本地,播放器 →" << m_outputSink
+        LOG_DEBUG("Playback") << "applyVideoSink: 显示本地,播放器 →" << m_outputSink.data()
                               << "实际生效:" << m_player->videoSink();
     }
 }
@@ -429,7 +462,9 @@ void PlaybackController::clearVideoFrame() {
     // 而 VideoOutput 自己不会在无人送帧时重绘黑色。
     QImage black(2, 2, QImage::Format_RGB32);
     black.fill(Qt::black);
+    m_injectingClearFrame = true;
     m_outputSink->setVideoFrame(QVideoFrame(black));
+    m_injectingClearFrame = false;
 }
 
 
@@ -452,12 +487,15 @@ void PlaybackController::load(const QUrl &source)
 
     LOG_INFO("Playback") << "加载媒体:" << source;
 
+    // 换源会让播放器 Stopped，这个 playingChanged(false) 不是用户暂停。
+    m_lifecycleStop = true;
     m_player->setSource(source);
     emit sourceChanged();
     emit hasLoadedChanged();
 }
 
 void PlaybackController::unload() {
+    m_lifecycleStop = true;
     m_player->stop();
     m_player->setSource(QUrl());
     emit sourceChanged();
@@ -471,6 +509,8 @@ void PlaybackController::unload() {
 
 void PlaybackController::play()
 {
+    // 用户主动播放：此后的暂停才需要广播。
+    m_lifecycleStop = false;
     m_player->play();
 }
 

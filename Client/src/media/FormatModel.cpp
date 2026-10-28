@@ -550,7 +550,21 @@ QString label(const QString &spec, const MediaInfo &info)
         base = QStringLiteral("最高画质");
     else if (text.startsWith(QLatin1String("http")))
         base = QStringLiteral("直播源");
-    else if (text.contains(QLatin1Char('+'))) {
+    else if (text.startsWith(QLatin1String("id:"))) {
+        // 显式手选：id 可能纯数字，不能当档位显示成 "30080P"。
+        const QStringList ids = text.mid(3).split(QLatin1Char('+'));
+        int shortSide = 0;
+        double fps = 0;
+        for (const MediaFormat &format : info.formats) {
+            if (ids.contains(format.formatId) && format.isVideo()) {
+                shortSide = format.shortSide();
+                fps = format.fps;
+                break;
+            }
+        }
+        base = shortSide > 0 ? QStringLiteral("手选 %1").arg(tierLabel(shortSide, fps))
+                             : QStringLiteral("手选");
+    } else if (text.contains(QLatin1Char('+'))) {
         // 手选的 format_id 对：尽量还原出分辨率，无法还原时仅显示「手选」
         const QStringList ids = text.split(QLatin1Char('+'));
         int shortSide = 0;
@@ -567,16 +581,31 @@ QString label(const QString &spec, const MediaInfo &info)
     } else if (text.toInt() > 0) {
         // 档位中存的是 height 字段（竖屏 1080P 存为 "1920"）。要显示为 "1080P"
         // 需知道该流的长宽比，故在 formats 中查找同高度的一条取其短边；
-        // 列表侧没有 formats（传入空 info），只能原样显示为 "1920P"
+        // 列表侧没有 formats（传入空 info），只能原样显示为 "1920P"。
+        //
+        // 旧条目的裸数字 format_id（30080/137）也要避免显示成 "30080P"：
+        // 能在 formats 里找到同 id，或数字明显超过常见视频高度（>4320）时，
+        // 按“手选”显示。新条目都带 id: 前缀，不会走到这里。
         const int height = text.toInt();
-        int labelHeight = height;
+        bool isKnownId = false;
         for (const MediaFormat &format : info.formats) {
-            if (format.height == height && format.isVideo()) {
-                labelHeight = format.shortSide();
+            if (format.formatId == text) {
+                isKnownId = true;
                 break;
             }
         }
-        base = tierLabel(labelHeight, 0);
+        if (isKnownId || height > 4320) {
+            base = QStringLiteral("手选");
+        } else {
+            int labelHeight = height;
+            for (const MediaFormat &format : info.formats) {
+                if (format.height == height && format.isVideo()) {
+                    labelHeight = format.shortSide();
+                    break;
+                }
+            }
+            base = tierLabel(labelHeight, 0);
+        }
     } else {
         base = text; // 无法识别时原样显示
     }
@@ -1061,11 +1090,31 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info,
         return selection;
     }
 
-    // 2) 手选的 format_id 对："30102+30280" / "30080"
-    const bool looksLikeIds = body.contains(QLatin1Char('+'))
-                              || (!body.isEmpty() && StreamSpec::heightOf(spec) < 0);
+    // 2) 手选的 format_id：新条目用 "id:30102+30280" / "id:30080" 显式标记；
+    //    旧条目保留裸 id 兼容。裸数字既可能是档位（1080）也可能是 format_id
+    //    （30080/137），判定顺序：id: 前缀 → 有 + → 该数字确实是源里的高度 → 精确 id。
+    const bool prefixedIds = body.startsWith(QLatin1String("id:"));
+    const QString idBody = prefixedIds ? body.mid(3) : body;
+    const int specHeight = StreamSpec::heightOf(spec);
+    const bool heightExists =
+        specHeight > 0
+        && std::any_of(info.formats.cbegin(), info.formats.cend(),
+                       [specHeight](const MediaFormat &format) {
+                           return format.isVideo() && format.height == specHeight;
+                       });
+    const bool idExists =
+        !idBody.isEmpty()
+        && std::any_of(info.formats.cbegin(), info.formats.cend(),
+                       [&idBody](const MediaFormat &format) {
+                           return format.formatId == idBody;
+                       });
+
+    const bool looksLikeIds = prefixedIds
+                              || idBody.contains(QLatin1Char('+'))
+                              || (!idBody.isEmpty() && specHeight < 0)
+                              || (!heightExists && idExists);
     if (looksLikeIds) {
-        const QStringList ids = body.split(QLatin1Char('+'));
+        const QStringList ids = idBody.split(QLatin1Char('+'));
         MediaFormat video;
         MediaFormat audio;
         for (const MediaFormat &format : info.formats) {
@@ -1077,9 +1126,18 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info,
                 audio = format;
         }
 
-        // 一个 id 都不匹配（对方登录态/会员等级不同）时退回按档位挑选，
-        // 避免「该条下不到」演变为「该条播不了」
+        // 一个 id 都不匹配（对方登录态/会员等级不同）。
+        // 显式 id: 是用户明确的选择，失败就报错，不静默换成最高画质；
+        // 旧条目的裸 id 保留“按档位重挑”的兼容兜底。
         if (video.formatId.isEmpty() && audio.formatId.isEmpty()) {
+            if (prefixedIds) {
+                selection.error = QStringLiteral(
+                    "手选的流（id:%1）在当前视频源中不存在；"
+                    "可能是登录态/会员等级不同，或该流已下架")
+                                       .arg(idBody);
+                LOG_WARN("Format") << selection.error << "spec=" << spec;
+                return selection;
+            }
             LOG_WARN("Format") << "手选的 format_id 均不在源中，退回按档位挑选: spec="
                                << spec;
             return tierSelection(info, 0, allowHdr);

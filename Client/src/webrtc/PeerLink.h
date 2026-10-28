@@ -84,13 +84,23 @@ public:
     // 每条连接只承载它该承载的轨，由 LinkKind 决定，调用错了会被挡下：
     //   Voice → addLocalAudioTrack(麦克风)
     //   Media → addLocalVideoTrack + addLocalMovieAudioTrack
-    static constexpr const char *kMovieStreamId = "syncine-movie";
+    // 视频与电影声共用同一个 MediaStream id。libwebrtc 的接收侧用 SDP 的
+    // msid 生成 sync_group（webrtc_video_engine.cc / webrtc_voice_engine.cc），
+    // 两条流 id 相同才会被 RtpStreamsSynchronizer 配对，做音视频投递对齐。
+    // 接收端认轨靠连接类型（LinkKind），不靠这个 id，所以改动安全。
+    static constexpr const char *kMediaStreamId = "syncine-media";
     static constexpr const char *kChatStreamId = "syncine-mic";
 
     // 添加本地音轨（只允许 Voice 连接调用）
     void addLocalAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track);
-    // 添加本地视频轨（只允许 Media 连接调用）
-    void addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterface> track);
+    // 添加本地视频轨（只允许 Media 连接调用）。
+    // sending 决定初始 RTP 参数里的 active：false 时从协商起就不发视频。
+    void addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterface> track,
+                            bool sending);
+
+    // 控制是否真正发送视频（RTP 参数 encodings[0].active）。
+    // false = 停发 RTP，不只是把轨道静音；SDP 不变，恢复时无需重新协商。
+    void applyVideoSending(bool active);
     // 添加本地电影音轨（只允许 Media 连接调用）。
     // sending 决定初始 RTP 参数里的 active：false 时发送流从协商起就不启动。
     void addLocalMovieAudioTrack(webrtc::scoped_refptr<webrtc::AudioTrackInterface> track,
@@ -109,7 +119,9 @@ public:
     // 注意这只是**上限**:实际码率仍由拥塞控制在这个上限内跑，
     // "不设限"也不等于无限 —— 那样拿到的是 WebRTC 的默认上限（540p 以上约 2.5Mbps）。
     // 可随时调用（界面线程）,内部会投递到信令线程。
-    void applyVideoQuality(int maxBitrateBps, double maxFramerate);
+    // maxWidth/maxHeight 为 0 表示不限制分辨率（scale_resolution_down_to）。
+    void applyVideoQuality(int maxBitrateBps, double maxFramerate,
+                           int maxWidth = 0, int maxHeight = 0);
 
     // 显式调用 setPlayoutEnabled(false)，让 NullAudioPoller 每隔约 10 毫秒请求一次音频数据
     void setPlayoutEnabled(bool enabled);
@@ -213,6 +225,10 @@ private:
     void pushVideoQuality();
     // 把发送/停发状态写进电影音轨 sender（内部会切到信令线程）
     void pushMovieAudioSending();
+    // 把发送/停发状态写进视频 sender（内部会切到信令线程）
+    void pushVideoSending();
+    // 同一次连接只报告一次 connected；真正断开后允许下次恢复再报告。
+    void reportConnected();
 
     // ---- 数据通道 ----
     // 观察者由 DataChannelInterface 在信令线程回调
@@ -251,6 +267,10 @@ private:
     webrtc::scoped_refptr<webrtc::RtpSenderInterface> m_videoSender;
     int m_videoMaxBitrateBps = 0;    // 0 = 不设上限(用 WebRTC 默认)
     double m_videoMaxFramerate = 0;  // 0 = 不设上限
+    int m_videoMaxWidth = 0;         // 0 = 不限制分辨率
+    int m_videoMaxHeight = 0;
+    // 主线程与信令线程都会读：连接建立后要按它补设一次参数
+    bool m_videoSending = true;
 
     // 电影音轨对应的 sender。encodings[0].active 决定是否真正发送；
     // false 时 AudioSendStream 会 Stop()，不产生任何 RTP 包。
@@ -301,6 +321,9 @@ private:
     // 初次就连不上（没有可用候选、端口被防火墙挡住）重启也救不了，
     // 保留原来的立即报错行为。只在 WebRTC 信令线程读写。
     bool m_everConnected = false;
+    // 同一次连接内 ICE Connected/Completed、PeerConnection Connected、OnDataChannel
+    // 会多次触发；只向 SignalingChannel 报告一次，避免反复清空 ICE 重试计数。
+    bool m_connectedReported = false;
 
     // 已设好远端描述？
     bool m_remoteDescriptionSet = false;
