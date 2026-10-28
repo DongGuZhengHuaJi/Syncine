@@ -145,7 +145,10 @@ Popup {
             return
 
         normalizeError = ""
-        const result = mediaPlatforms.normalize(sourcePlatform, trimmedUrl)
+        // 通用卡不指定平台：注册表会先尝试 Bilibili（URL/编号都能命中），
+        // 失败再落到 Generic。这样 B 站链接从哪张卡进来都会得到同一个规范化 URL。
+        const platformId = sourcePlatform === "bilibili" ? "bilibili" : ""
+        const result = mediaPlatforms.normalize(platformId, trimmedUrl)
         if (result.error !== "") {
             normalizeError = result.error
             normalizedUrl = ""

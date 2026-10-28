@@ -99,6 +99,12 @@ void testGeneric()
     // 不指定来源时自动识别编号。
     CHECK(normalize(QString(), QStringLiteral("ep29144"), &error)
           == QStringLiteral("https://www.bilibili.com/bangumi/play/ep29144"));
+
+    // 通用卡粘贴 B 站完整链接也要规范化成同一个 URL。
+    CHECK(normalize(QString(),
+                    QStringLiteral("https://www.bilibili.com/video/BV11FJv6ZEmH/"),
+                    &error)
+          == QStringLiteral("https://www.bilibili.com/video/BV11FJv6ZEmH"));
 }
 
 void testCookiePolicy()
