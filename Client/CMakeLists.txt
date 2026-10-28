@@ -360,6 +360,29 @@ target_link_libraries(syncine_platform_tests PRIVATE Qt6::Core)
 
 add_test(NAME platform COMMAND syncine_platform_tests)
 
+add_executable(syncine_video_tests
+        tests/tst_videosource.cpp
+        src/webrtc/VideoTrackSource.cpp
+        src/core/Log.cpp
+)
+
+target_include_directories(syncine_video_tests
+        PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/webrtc"
+)
+
+target_link_libraries(syncine_video_tests
+        PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Multimedia
+        WebRTC::WebRTC
+)
+
+add_test(NAME videosource COMMAND syncine_video_tests)
+
 # ======================================================================
 # 13. 安装规则 —— 打包的基石
 #
