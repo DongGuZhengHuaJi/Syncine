@@ -5,7 +5,7 @@
 - **客户端**：Qt 6.10（QML）+ 原生 libwebrtc
 - **服务端**：C++ / Boost.Asio + Beast，一个 WebSocket 房间服务器
 - **跨平台**：Linux x86-64 与 Windows x86-64
-- **当前版本**：1.3.0
+- **当前版本**：1.4.0
 
 ---
 
@@ -30,7 +30,7 @@
   - 分块传输（32KB）、进度/速度显示、双方确认、SHA-256 校验；接收端按 128KB/100ms 合并 ACK，发送端用 512KB 窗口限制在途数据。
   - 发送端按 SCTP 发送缓冲做二次节流，避免发送队列无限增长；15 秒没有进展会主动请求续传，两条通道都有 5 秒 ping / 15 秒超时健康检查。
   - 连接中断后 60 秒内可自动断点续传；超过窗口会失败，需要重新发送。新版本的数据通道名已改为 `syncine-file-ctl` / `syncine-file-data`，两端需要一起升级。
-  - 发送窗口默认 2MB，可用环境变量 `SYNCINE_TRANSFER_WINDOW_KB` 调整（128–16384）。传输期间每 15 秒输出一条 `WebRTCStats` 诊断日志（candidate 类型、RTT、可用带宽、DataChannel 字节），进度日志每 10 秒一条。
+  - 发送窗口默认 512KB，可用环境变量 `SYNCINE_TRANSFER_WINDOW_KB` 调整（128–16384）。传输期间每 15 秒输出一条 `WebRTCStats` 诊断日志（candidate 类型、RTT、可用带宽、DataChannel 字节），进度日志每 10 秒一条。
 
 ### B 站弹幕
 
@@ -67,11 +67,11 @@
 
 ### 直接下载运行（Linux x86-64）
 
-从 [Releases](https://github.com/DongGuZhengHuaJi/Syncine/releases) 下载 `Syncine-1.3.0-Linux.tar.gz`，解压后直接运行：
+从 [Releases](https://github.com/DongGuZhengHuaJi/Syncine/releases) 下载 `Syncine-1.4.0-Linux.tar.gz`，解压后直接运行：
 
 ```bash
-tar xzf Syncine-1.3.0-Linux.tar.gz
-cd Syncine-1.3.0-Linux
+tar xzf Syncine-1.4.0-Linux.tar.gz
+cd Syncine-1.4.0-Linux
 ./bin/Syncine
 ```
 
@@ -92,10 +92,10 @@ sudo apt install libgl1 libegl1 libglx0 libopengl0 libxkbcommon0 libxkbcommon-x1
 
 ### 直接下载运行（Windows x86-64）
 
-下载 `Syncine-1.3.0-Windows.zip`，解压后运行：
+下载 `Syncine-1.4.0-Windows.zip`，解压后运行：
 
 ```bat
-Syncine-1.3.0-Windows\bin\Syncine.exe
+Syncine-1.4.0-Windows\bin\Syncine.exe
 ```
 
 包里已经带了 Qt 运行库、平台插件、QML 模块、`tools/` 下的 ffmpeg/ffprobe 与 yt-dlp，以及 **MSVC 运行库**——不需要另外安装 Qt、Visual Studio 或 VC++ Redistributable。
@@ -108,8 +108,8 @@ Syncine-1.3.0-Windows\bin\Syncine.exe
 
 | 平台 | 文件 | 内容 |
 |---|---|---|
-| Linux x86-64 | `Syncine-Server-1.3.0-Linux-x86_64.tar.gz` | `bin/Server`、`LICENSE` |
-| Windows x64 | `Syncine-Server-1.3.0-Windows-x64.zip` | `bin/Server.exe`、`LICENSE` |
+| Linux x86-64 | `Syncine-Server-1.4.0-Linux-x86_64.tar.gz` | `bin/Server`、`LICENSE` |
+| Windows x64 | `Syncine-Server-1.4.0-Windows-x64.zip` | `bin/Server.exe`、`LICENSE` |
 
 Linux 包是动态链接的：目标机器需要 OpenSSL 运行库（`libssl` / `libcrypto`）；Boost 只用头文件组件（Asio/Beast、UUID/Random），不需要额外的 Boost 运行库。Windows 包使用 vcpkg 静态链接（静态 Boost/OpenSSL + `/MT` 运行库），单个 `Server.exe` 即可运行。
 
@@ -212,7 +212,7 @@ cmake --build --preset release
 
 # 4. 打包
 cd build-release && cpack
-# 产出 Syncine-1.3.0-Linux.tar.gz 与 .zip
+# 产出 Syncine-1.4.0-Linux.tar.gz 与 .zip
 ```
 
 > preset 里的 Qt 路径默认是 `~/Qt/6.10.2/gcc_64`。装在别处时在命令行覆盖：
@@ -244,7 +244,7 @@ cmake -S Client -B Client\build-release -G Ninja -DCMAKE_BUILD_TYPE=Release ^
   "-DWEBRTC_WIN_SYSTEM_LIBS=<见 third_party\webrtc\README.md 第 7 节>"
 cmake --build Client\build-release --parallel
 
-:: 5) 打包（出 Syncine-1.3.0-Windows.zip）
+:: 5) 打包（出 Syncine-1.4.0-Windows.zip）
 cd Client\build-release
 cpack
 ```
@@ -307,7 +307,7 @@ cmake --build Server\build-release --config Release --parallel
 # 1. 二进制（源码构建或解压 Release 里的服务端包）
 sudo mkdir -p /opt/syncine
 sudo install -m755 Server/build-release/Server /opt/syncine/Server
-# 或者从 Syncine-Server-1.3.0-Linux-x86_64.tar.gz 解压后：
+# 或者从 Syncine-Server-1.4.0-Linux-x86_64.tar.gz 解压后：
 # sudo install -m755 bin/Server /opt/syncine/Server
 
 # 2. 服务端专用用户

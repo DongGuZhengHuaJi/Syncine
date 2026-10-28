@@ -34,7 +34,7 @@ endif()
 # SYNCINE_VERSION 都由它派生。改版本只改这一行。
 # ----------------------------------------------------------------------
 
-project(Syncine VERSION 1.3.0 LANGUAGES CXX)
+project(Syncine VERSION 1.4.0 LANGUAGES CXX)
 
 # WebRTC 使用 C++20
 set(CMAKE_CXX_STANDARD 20)
