@@ -4,7 +4,9 @@
 
 #include "WebrtcManager.h"
 
+#include <QCoreApplication>
 #include <QDebug>
+#include <QEvent>
 #include <QVideoFrame>
 
 #include "MovieAudioPlayer.h"
@@ -1361,6 +1363,11 @@ void WebrtcManager::destroy() {
     // 保活连接也是连接，和解房间里的对端一样要放在工厂之前释放。
     // 走到这一步说明整个 WebRTC 世界都在拆，不需要它再撑着声卡了。
     m_voiceKeepAlive = nullptr;
+
+    // removePeer 用的是 deleteLater；主事件循环退出后它排队的析构不会再执行，
+    // 而 ~PeerLink 释放轨道时必须让 WebRTC 信令线程还活着。这里主动把
+    // DeferredDelete 事件处理掉，确保 PeerLink 在停线程之前完成析构。
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 
     // 接收侧：渲染器的排期回调会读播放器。先清回调，再销毁渲染器
     // （停掉它的定时器与队列），最后才放播放器 —— 顺序反了就是悬空回调。

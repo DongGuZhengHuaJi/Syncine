@@ -308,6 +308,9 @@ void SignalingChannel::syncPeers() {
 }
 
 void SignalingChannel::teardownPeer(const QString &peerId) {
+    const bool wasTearingDown = m_tearingDownPeers.contains(peerId);
+    m_tearingDownPeers.insert(peerId);
+
     for (const QString &link : {linkKindId(LinkKind::Voice),
                                 linkKindId(LinkKind::Media)}) {
         m_offeredLinks.remove(offerKey(peerId, link));
@@ -315,6 +318,10 @@ void SignalingChannel::teardownPeer(const QString &peerId) {
     }
     if (m_webrtcManager != nullptr)
         m_webrtcManager->removePeer(peerId);
+
+    // 嵌套调用（removePeer → close → closed → onPeerClosed）只由最外层移除。
+    if (!wasTearingDown)
+        m_tearingDownPeers.remove(peerId);
 }
 
 void SignalingChannel::onRoomEntered() {
@@ -344,6 +351,8 @@ void SignalingChannel::onRoomLeft() {
     m_iceBusyRetries.clear();
     m_iceGraceGeneration.clear();
     m_iceFailedLinks.clear();
+    m_tearingDownPeers.clear();
+    m_rebuildCooldown.clear();
     if (m_webrtcManager != nullptr)
         m_webrtcManager->closeAllPeers();
 }
@@ -463,10 +472,31 @@ void SignalingChannel::onPeerConnected(const QString &peerId, const QString &lin
 }
 
 void SignalingChannel::onPeerClosed(const QString &peerId, const QString &link) {
-    // 两条连接各自会发这个信号 —— 一条断了不代表对端没了，所以这里不
-    // 直接对外报"对端断开",只记日志。真正判断对端是否还在，看成员表。
+    // 两条连接各自会发这个信号 —— 一条断了不代表对端没了，所以这里不直接对外
+    // 报"对端断开"。但 PeerConnection 进入 kClosed 是终态，旧连接/数据通道
+    // 可能已经不可用，需要拆掉重建，而不是继续复用。
     clearIceRecovery(peerId, link);
+
+    if (m_tearingDownPeers.contains(peerId) || m_rebuildCooldown.contains(peerId)) {
+        LOG_DEBUG("Signaling") << "对端" << peerId << "的" << link
+                               << "连接已关闭(正在/刚完成重建,忽略)";
+        return;
+    }
+
     LOG_DEBUG("Signaling") << "对端" << peerId << "的" << link << "连接已关闭";
+
+    if (m_session == nullptr || m_webrtcManager == nullptr || !m_session->inRoom())
+        return;
+    if (!m_session->otherMemberIds().contains(peerId))
+        return;
+
+    LOG_INFO("Signaling") << "重建已关闭的对端连接:" << peerId;
+    teardownPeer(peerId);
+    m_rebuildCooldown.insert(peerId);
+    QTimer::singleShot(2000, this, [this, peerId] {
+        m_rebuildCooldown.remove(peerId);
+    });
+    syncPeers();
 }
 
 void SignalingChannel::onPeerError(const QString &peerId, const QString &link,

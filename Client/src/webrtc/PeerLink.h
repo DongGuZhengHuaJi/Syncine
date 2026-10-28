@@ -225,6 +225,8 @@ private:
     void pushMovieAudioSending();
     // 把发送/停发状态写进视频 sender（内部会切到信令线程）
     void pushVideoSending();
+    // 同一次连接只报告一次 connected；真正断开后允许下次恢复再报告。
+    void reportConnected();
 
     // ---- 数据通道 ----
     // 观察者由 DataChannelInterface 在信令线程回调
@@ -315,6 +317,9 @@ private:
     // 初次就连不上（没有可用候选、端口被防火墙挡住）重启也救不了，
     // 保留原来的立即报错行为。只在 WebRTC 信令线程读写。
     bool m_everConnected = false;
+    // 同一次连接内 ICE Connected/Completed、PeerConnection Connected、OnDataChannel
+    // 会多次触发；只向 SignalingChannel 报告一次，避免反复清空 ICE 重试计数。
+    bool m_connectedReported = false;
 
     // 已设好远端描述？
     bool m_remoteDescriptionSet = false;

@@ -631,10 +631,20 @@ void PeerLink::OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface>
     // 协商完成后再设一次画质：AddTrack 之后立刻设有时还太早
     pushVideoQuality();
 
-    emit connected(m_peerId, linkId());
+    reportConnected();
 }
 
 void PeerLink::OnRenegotiationNeeded() {
+}
+
+void PeerLink::reportConnected() {
+    // OnDataChannel / ICE Connected / ICE Completed / PeerConnection Connected
+    // 会在一次建连里各报一次；只让 SignalingChannel 看到一次，否则它每次都会
+    // 清空 ICE 重试计数，kMaxIceRestarts 形同虚设。
+    if (m_connectedReported)
+        return;
+    m_connectedReported = true;
+    emit connected(m_peerId, linkId());
 }
 
 void PeerLink::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState state) {
@@ -651,20 +661,19 @@ void PeerLink::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnect
         // 两个回调都补一次是幂等的。
         pushMovieAudioSending();
         pushVideoSending();
-        emit connected(m_peerId, linkId());
+        reportConnected();
         break;
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionFailed:
-        if (!m_everConnected) {
-            // 未连接成功过，不进行重连
-            emitError(QStringLiteral("ICE 连接失败"));
-            break;
-        }
-        // Failed 不会自行恢复，必须由应用发起 ICE restart。
+        // 首次失败也要交给 SignalingChannel 退避重试：瞬时网络问题不该让
+        // 这一路连接直接放弃。重试耗尽后 SignalingChannel 会报错。
+        m_connectedReported = false;
         LOG_WARN("PeerLink") << m_peerId << ":" << linkId()
-                             << "ICE 连接失败,等待重启";
+                             << "ICE 连接失败,等待重启"
+                             << (m_everConnected ? "" : "(首次)");
         emit iceFailed(m_peerId, linkId());
         break;
     case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionDisconnected:
+        m_connectedReported = false;
         if (!m_everConnected)
             break;
         // Disconnected 可能只是短暂抖动，先给一个宽限期；由 SignalingChannel
@@ -781,12 +790,14 @@ void PeerLink::OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectio
         // 连上后补一次。Media 连接的电影音轨就是靠这里真正停发的。
         pushMovieAudioSending();
         pushVideoSending();
-        emit connected(m_peerId, linkId());
+        reportConnected();
         break;
     case webrtc::PeerConnectionInterface::PeerConnectionState::kFailed:
+        m_connectedReported = false;
         emitError(QStringLiteral("连接失败"));
         break;
     case webrtc::PeerConnectionInterface::PeerConnectionState::kClosed:
+        m_connectedReported = false;
         emit closed(m_peerId, linkId());
         break;
     default:

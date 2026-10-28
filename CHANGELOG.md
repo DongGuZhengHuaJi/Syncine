@@ -18,6 +18,8 @@
 - **音频环形缓冲**：`QByteArray::remove(0,n)` 改为固定大小环形缓冲；`OnData` 不再跨线程读 `QAudioSink`。
 - **sink 生命周期**：`QVideoSink` 改 `QPointer`，`VideoOutput` 销毁时 `unbindVideoOutput()`；`PeerLink::close()` 对远端音/视频轨 `RemoveSink`。`WebrtcManager::destroy()` 先清延迟回调、再销毁渲染器/播放器。
 - **暂停误报**：卸载/换源/播完不再广播 Pause；用户主动暂停仍正常同步。
+- **重连稳定性**：同一次连接的多个 `connected` 回调只上报一次，ICE 重试计数不再被反复清零；首次 ICE 失败也走 2s/5s/10s 退避重试；PeerConnection 进入 Closed 后拆掉旧连接重建（带防重入/2 秒冷却）。
+- **退出崩溃**：`WebrtcManager::destroy()` 在停 WebRTC 线程前处理 `DeferredDelete`，确保 PeerLink 在信令线程还活着时析构。
 
 ### 网链
 
