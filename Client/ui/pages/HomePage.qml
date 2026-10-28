@@ -71,7 +71,7 @@ Item {
                 color: Style.textSecondary
                 text: {
                     if (networkManager.isConnected)
-                        return networkManager.usingFallback ? "已连接(备用地址)"
+                        return networkManager.usingFallback ? "已连接(内置地址)"
                                                             : "服务器已连接"
                     if (networkManager.connecting)
                         return "连接中…"

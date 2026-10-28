@@ -188,6 +188,9 @@ private:
 
     // 根据 showingRemote 决定"谁往界面 sink 送帧"。
     void applyVideoSink();
+    // 往界面 sink 塞一帧黑色，清掉上一路留下的最后一帧。
+    // VideoOutput 不会因为没人送帧就自己变黑，切模式时必须主动清。
+    void clearVideoFrame();
 
     QMediaPlayer *m_player = nullptr;
     QAudioOutput *m_audioOutput = nullptr;

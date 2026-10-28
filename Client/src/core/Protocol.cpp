@@ -216,6 +216,8 @@ std::optional<Message> decode(const QString &text) {
         message.clientId = object.value("clientId").toString();
         message.loaded = object.value("loaded").toBool(false);
         message.duration = int64Of(object, "duration");
+        message.itemId = object.value("itemId").toString();
+        message.seq = int64Of(object, "seq");
         break;
 
     case MessageType::VideoMismatch:
@@ -341,12 +343,17 @@ QString encodePlaybackPosition(qint64 position, bool playing) {
     return serialize(message);
 }
 
-QString encodeVideoStatus(bool loaded, const QString &hash, qint64 duration) {
+QString encodeVideoStatus(bool loaded, const QString &hash, qint64 duration,
+                          const QString &itemId, qint64 seq) {
     QJsonObject message;
     message["type"] = "video_status";
     message["loaded"] = loaded;
     message["hash"] = loaded ? hash : QString();
     message["duration"] = loaded ? duration : 0;
+    // loaded=false 也带上 itemId：它表示「卸载的是这一条」，
+    // 服务端据此丢弃切模式后才迟到的旧条目状态。
+    message["itemId"] = itemId;
+    message["seq"] = seq;
     return serialize(message);
 }
 

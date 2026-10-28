@@ -74,6 +74,9 @@ struct Message {
     QList<PlaylistEntry> playlist;
     int currentIndex = -1;
     QString itemId;
+    // video_status 的递增序号。服务端多线程处理消息，同一连接的相邻状态
+    // 可能乱序到达；序号小的一方直接丢弃。
+    qint64 seq = 0;
 
     // room_created / room_joined 的顶层字段：服务端下发的 ICE 服务器列表
     // （STUN + 带临时凭据的 TURN）。core 层只搬运，不认识 WebRTC；
@@ -144,7 +147,10 @@ QString encodePlayback(const QString &action, qint64 position, qreal rate = 1.0)
 
 QString encodePlaybackPosition(qint64 position, bool playing);
 
-QString encodeVideoStatus(bool loaded, const QString &hash, qint64 duration);
+// itemId：这条状态属于哪个播放列表条目。服务端只比较当前条目的状态，
+// 否则切换模式/切条目时，旧条目残留的 loaded/hash/duration 会被误判为不一致。
+QString encodeVideoStatus(bool loaded, const QString &hash, qint64 duration,
+                          const QString &itemId, qint64 seq);
 
 // ---- 播放列表 ----
 // itemId 由客户端生成（UUID），服务端只保证不重复。

@@ -408,7 +408,11 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
             return;
         }
 
+        const std::string beforeItem = room->currentItemId();
         room->setMode(mode);
+        // 换模式等于换一份播放列表：当前条目变了，旧的成员视频状态全部作废
+        if (room->currentItemId() != beforeItem)
+            room->clearMemberVideoStates();
 
         // 广播给所有成员（含房主自己），客户端以服务端为准
         json notice;
@@ -449,6 +453,9 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
 
         broadcastPlaylistSwitched(room, room->currentItemId());
         broadcastPlaylistStatus(room);
+        // 模式切换后当前条目已经换了一份列表。旧条目的 loaded/时长不能
+        // 继续参与一致性判断，立即按新当前条目重算一次。
+        broadcastMismatchIfChanged(room);
 
         LOG_INFO("Logic") << "房间 " << roomIt->second << " 模式切换: " << mode;
         return;
@@ -511,8 +518,27 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
         const bool loaded = message.value("loaded", false);
         const std::string hash = message.value("hash", "");
         const long long duration = message.value("duration", 0LL);
+        const std::string itemId = message.value("itemId", "");
+        const long long seq = message.value("seq", 0LL);
 
-        room->setMemberVideo(session, loaded, hash, duration);
+        // 多个工作线程从同一队列取消息，同一客户端的 video_status 可能晚于
+        // set_room_mode / playlist_switch 才被处理。非当前条目的状态不再写入
+        // 成员表，否则会把新条目的 loaded/hash 覆盖回旧值。
+        if (itemId != room->currentItemId()) {
+            LOG_DEBUG("Logic") << "忽略旧条目的视频状态: clientId="
+                               << room->clientIdOf(session)
+                               << " itemId=" << (itemId.empty() ? "-" : itemId.substr(0, 8))
+                               << " current="
+                               << (room->currentItemId().empty()
+                                       ? "-"
+                                       : room->currentItemId().substr(0, 8));
+            return;
+        }
+
+        // 同一连接内的乱序（例如「卸载旧条目」晚于「新条目已加载」）按序号丢弃；
+        // 不中继也不重算，接收端看到的始终是最新状态。
+        if (!room->setMemberVideo(session, loaded, hash, duration, itemId, seq))
+            return;
 
         // 中继给其他人（不含哈希，哈希只留在服务端做比对）
         json relay;
@@ -520,16 +546,11 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
         relay["clientId"] = room->clientIdOf(session);
         relay["loaded"] = loaded;
         relay["duration"] = duration;
+        relay["itemId"] = itemId;
         room->broadcast(relay, session);
 
         // 不一致状态变化时通知所有人
-        if (room->updateMismatch()) {
-            json notice;
-            notice["type"] = "video_mismatch";
-            notice["mismatched"] = room->videoMismatched();
-            notice["shortestDuration"] = room->shortestDuration();
-            room->broadcast(notice);
-        }
+        broadcastMismatchIfChanged(room);
         return;
     }
 
@@ -628,8 +649,11 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
             sendPlaylistMessage(room, changed);
 
             // 列表原本为空时该条目成为当前条目，各端据此加载
-            if (becameCurrent)
+            if (becameCurrent) {
+                room->clearMemberVideoStates();
                 broadcastPlaylistSwitched(room, room->currentItemId());
+                broadcastMismatchIfChanged(room);
+            }
 
             // title 来自客户端，原样写日志会让对端能用换行符伪造日志行、
             // 或用超长标题把 8 MB 的日志文件冲得轮转。截断并剥掉控制字符。
@@ -672,8 +696,12 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
         }
 
         // 仅当前条目变化时广播切换（删除的恰好是当前条目时也会走到这里）
-        if (room->currentItemId() != beforeId)
+        if (room->currentItemId() != beforeId) {
+            room->clearMemberVideoStates();
             broadcastPlaylistSwitched(room, room->currentItemId());
+            // 当前条目变了：旧条目的视频状态不再参与一致性比较
+            broadcastMismatchIfChanged(room);
+        }
         return;
     }
 
@@ -787,6 +815,17 @@ void LogicSystem::broadcastPlaylistStatus(const std::shared_ptr<Room> &room) {
     sendPlaylistMessage(room, message);
 }
 
+void LogicSystem::broadcastMismatchIfChanged(const std::shared_ptr<Room> &room) {
+    if (!room->updateMismatch())
+        return;
+
+    json notice;
+    notice["type"] = "video_mismatch";
+    notice["mismatched"] = room->videoMismatched();
+    notice["shortestDuration"] = room->shortestDuration();
+    room->broadcast(notice);
+}
+
 bool LogicSystem::removeMemberFromRoomLocked(const std::shared_ptr<Session> &session) {
     auto roomIt = m_sessionRooms.find(session);
     if (roomIt == m_sessionRooms.end())
@@ -845,13 +884,7 @@ bool LogicSystem::removeMemberByClientIdLocked(const std::shared_ptr<Room> &room
                           << " 房间人数=" << room->sessions().size();
 
         // 离开的成员可能带走了不一致的视频，重新计算
-        if (room->updateMismatch()) {
-            json mismatch;
-            mismatch["type"] = "video_mismatch";
-            mismatch["mismatched"] = room->videoMismatched();
-            mismatch["shortestDuration"] = room->shortestDuration();
-            room->broadcast(mismatch);
-        }
+        broadcastMismatchIfChanged(room);
     }
     return true;
 }

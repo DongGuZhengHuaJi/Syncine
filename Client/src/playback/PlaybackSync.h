@@ -180,6 +180,9 @@ private slots:
     void onRoomChanged();
     void onPositionTimer();
     void onPlaylistSwitched(const QString &itemId);
+    // 服务端确认某条目已从播放列表删除。如果它正在解析/下载，立即终止；
+    // 如果它是当前条目，同时卸载播放器/弹幕（新当前条目由 playlist_switched 加载）。
+    void onPlaylistItemRemoved(const QString &itemId, bool wasCurrent);
     // 网链模式：解析出直链（路径 A,秒开）或开始下载合并（路径 B）
     void onUrlResolved();
     void onUrlReady(const QString &filePath);
