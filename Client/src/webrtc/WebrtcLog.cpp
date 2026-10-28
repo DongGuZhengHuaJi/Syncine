@@ -41,6 +41,14 @@ Sink g_sink;
 
 void WebrtcLog::install(bool verbose)
 {
+    // 关闭 WebRTC 默认的 stderr 输出。它不受本项目 Log 的级别/文件策略控制，
+    // 会直接在终端刷 audio_device_*.cc 这类初始化行。
+    // 注意只调 LogToDebug(LS_NONE) 不够：Debug 构建的 LoggingConfig 默认
+    // debug_severity 仍是 LS_INFO，OutputToDebug 仍会执行；必须关掉 stderr。
+    // 消息仍然会送到下面注册的 stream sink。
+    webrtc::LogMessage::LogToDebug(webrtc::LS_NONE);
+    webrtc::LogMessage::SetLogToStderr(false);
+
     // 只调一次：AddLogToStream 是把 sink 头插进单向链表（logging.cc:355），
     // 没有去重，同一个 sink 注册两次会把自己串成一个环。
     //
