@@ -157,6 +157,10 @@ public:
     // 否则会覆盖本地画面并维持回声环（见 PlaybackController::applyVideoSink）。
     void setRemoteVideoEnabled(bool enabled);
 
+    // 观众端收到远端 seek：清空电影声环形缓冲/一小段 NetEq 旧音频，
+    // 并丢弃视频待显示队列里的旧帧。由 PlaybackSync::remoteSeeked 触发。
+    void flushRemotePlayback();
+
     // ---- 推送端视频 ----
     // 视频轨与电影音轨一样在 initialize() 预创建、建连时立即挂上，以保证其恒定
     // 存在于 SDP 中（加轨会触发重新协商，而 PeerLink 只处理初始协商）。

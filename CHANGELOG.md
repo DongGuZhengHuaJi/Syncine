@@ -12,6 +12,13 @@
   避免非共享模式/观众端在建连瞬间先发几帧。
 - **黑帧回灌修复**：切换画面时注入的清屏黑帧不再被当成真实解码帧转发给推流端。
 
+- **音画同步**：视频与电影声使用同一个 MediaStream id（`syncine-media`），接收侧 libwebrtc 才会把两条流放进同一 sync_group 做投递对齐。
+- **音频积压补偿**：`MovieAudioPlayer::playoutDelayMs()` 用环形缓冲 + QAudioSink 缓冲估算“还要多久响出”；视频按 `到达时间 + 当前延迟` 排期，延迟用时间基非对称 EMA 平滑，队列有界（24 帧 / 64MB）。
+- **seek 清缓冲**：观众收到远端 seek 时清空电影声环形缓冲并丢弃 250ms 内来自 NetEq 的旧音频，同时清空视频待显示队列。
+- **音频环形缓冲**：`QByteArray::remove(0,n)` 改为固定大小环形缓冲；`OnData` 不再跨线程读 `QAudioSink`。
+- **sink 生命周期**：`QVideoSink` 改 `QPointer`，`VideoOutput` 销毁时 `unbindVideoOutput()`；`PeerLink::close()` 对远端音/视频轨 `RemoveSink`。`WebrtcManager::destroy()` 先清延迟回调、再销毁渲染器/播放器。
+- **暂停误报**：卸载/换源/播完不再广播 Pause；用户主动暂停仍正常同步。
+
 ### 网链
 
 - **手选 format_id**：新条目用 `id:` 前缀记录手选流；裸数字 spec 先判断是否为源内真实分辨率高度，再按 format_id 解释。纯数字 format_id（30080/137）不再被当成档位静默忽略；显式 `id:` 不存在时直接报错，不再回退最高画质。

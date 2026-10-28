@@ -383,11 +383,15 @@ bool WebrtcManager::initialize() {
         LOG_WARN("WebRTC") << "推流电影音轨预创建失败，本次运行将没有共享视频声音";
     }
 
-    // 预创建共享模式下接收侧的画面渲染器与声音播放器
-    // TODO: 实现音画同步
+    // 预创建共享模式下接收侧的画面渲染器与声音播放器。
+    // 渲染器按“当前音频还要多久响出”给画面排期：回调里只读播放器的估计值，
+    // 不持有它的裸指针；destroy() 时会先清回调再销毁两者。
     m_remoteRenderer = std::make_unique<RemoteVideoRenderer>();
     m_movieAudioPlayer = std::make_unique<MovieAudioPlayer>();
     m_movieAudioPlayer->setVolume(m_remoteMovieVolume);
+    m_remoteRenderer->setPlayoutDelayProvider([this]() {
+        return m_movieAudioPlayer != nullptr ? m_movieAudioPlayer->playoutDelayMs() : 0;
+    });
 
     return true;
 }
@@ -1227,6 +1231,13 @@ void WebrtcManager::setRemoteVideoEnabled(bool enabled) {
     m_remoteRenderer->setWritingEnabled(enabled);
 }
 
+void WebrtcManager::flushRemotePlayback() {
+    if (m_movieAudioPlayer != nullptr)
+        m_movieAudioPlayer->flush();
+    if (m_remoteRenderer != nullptr)
+        m_remoteRenderer->resetQueue();
+}
+
 webrtc::scoped_refptr<webrtc::VideoTrackInterface> WebrtcManager::getOrCreateVideoTrack() {
     if (m_localVideoTrack != nullptr)
         return m_localVideoTrack;
@@ -1351,7 +1362,13 @@ void WebrtcManager::destroy() {
     // 走到这一步说明整个 WebRTC 世界都在拆，不需要它再撑着声卡了。
     m_voiceKeepAlive = nullptr;
 
-    // 接收侧播放器要在工厂之前放掉：它内部持有 WebRTC 的 sink 注册关系
+    // 接收侧：渲染器的排期回调会读播放器。先清回调，再销毁渲染器
+    // （停掉它的定时器与队列），最后才放播放器 —— 顺序反了就是悬空回调。
+    if (m_remoteRenderer != nullptr)
+        m_remoteRenderer->setPlayoutDelayProvider({});
+    m_remoteRenderer.reset();
+
+    // 播放器内部持有 WebRTC 的 sink 注册关系，必须在工厂之前释放
     m_movieAudioPlayer.reset();
 
     // 2. 轨 → 源 → 工厂（顺序同上：引用方先释放）
@@ -1361,9 +1378,6 @@ void WebrtcManager::destroy() {
     m_videoSource = nullptr;
     m_audioSource = nullptr;
     m_movieAudioSource = nullptr;
-
-    // 接收侧渲染器也要在工厂之前放掉：它内部的转换会用到 WebRTC 的类型
-    m_remoteRenderer.reset();
 
     m_voiceFactory = nullptr;
     m_mediaFactory = nullptr;

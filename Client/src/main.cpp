@@ -239,6 +239,12 @@ int main(int argc, char *argv[]) {
         // 交出 sink 后再转给渲染器（见 bindVideoOutput）。
         playbackController.setRemoteRenderer(&webrtcManager);
 
+        // 观众端收到远端 seek：清掉电影声缓冲（含 NetEq 丢弃窗口）和视频待显示队列。
+        QObject::connect(&playbackSync, &PlaybackSync::remoteSeeked,
+                         &webrtcManager, [&webrtcManager](qint64) {
+                             webrtcManager.flushRemotePlayback();
+                         });
+
         QObject::connect(&signalingChannel, &SignalingChannel::errorOccurred, &app,
                          [](const QString &message) {
                              LOG_WARN("Signaling") << message;

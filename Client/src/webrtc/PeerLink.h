@@ -84,7 +84,11 @@ public:
     // 每条连接只承载它该承载的轨，由 LinkKind 决定，调用错了会被挡下：
     //   Voice → addLocalAudioTrack(麦克风)
     //   Media → addLocalVideoTrack + addLocalMovieAudioTrack
-    static constexpr const char *kMovieStreamId = "syncine-movie";
+    // 视频与电影声共用同一个 MediaStream id。libwebrtc 的接收侧用 SDP 的
+    // msid 生成 sync_group（webrtc_video_engine.cc / webrtc_voice_engine.cc），
+    // 两条流 id 相同才会被 RtpStreamsSynchronizer 配对，做音视频投递对齐。
+    // 接收端认轨靠连接类型（LinkKind），不靠这个 id，所以改动安全。
+    static constexpr const char *kMediaStreamId = "syncine-media";
     static constexpr const char *kChatStreamId = "syncine-mic";
 
     // 添加本地音轨（只允许 Voice 连接调用）

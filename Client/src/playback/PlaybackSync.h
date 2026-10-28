@@ -170,6 +170,9 @@ signals:
     // 后台重试结束。界面可据此弹一条系统消息（不打断当前播放）。
     void backgroundRetryFinished(const QString &itemId, bool ok, const QString &error);
 
+    // 共享模式观众收到远端 seek。主函数据此清空电影声/远端视频的旧缓冲。
+    void remoteSeeked(qint64 position);
+
 private slots:
     void onLocalPlayingChanged();
     void onLocalSeeked(qint64 position);

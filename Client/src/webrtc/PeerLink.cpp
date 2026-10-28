@@ -286,13 +286,23 @@ void PeerLink::close() {
     m_remoteDescriptionSet = false;
     m_pendingOperation = PendingOperation::None;
 
-    // 立刻松开外部播放器。
+    // 立刻松开外部播放器/渲染器。
     //
-    // 这个指针指向 WebrtcManager 持有的 MovieAudioPlayer。管理器的 destroy()
-    // 里是先关连接、再放播放器，而关闭到真正析构之间还有一段 deleteLater 的
-    // 窗口期 —— 只要这期间还有一帧音频摸进来，就会踩到已经释放的播放器。
-    // 这里先断开，窗口就不存在了。
-    m_remoteAudioSink = nullptr;
+    // 这些指针指向 WebrtcManager 持有的 MovieAudioPlayer / RemoteVideoRenderer。
+    // 管理器的 destroy() 里是先关连接、再放它们，而关闭到真正析构之间还有一段
+    // deleteLater 的窗口期 —— 只要这期间还有一帧音视频摸进来，就会踩到已经释放
+    // 的对象。除了清指针，还必须从轨上 RemoveSink；否则轨仍持有 sink 地址。
+    {
+        webrtc::MutexLock lock(&m_remoteAudioLock);
+        if (m_remoteAudioTrack != nullptr && m_remoteAudioSink != nullptr)
+            m_remoteAudioTrack->RemoveSink(m_remoteAudioSink);
+        m_remoteAudioTrack = nullptr;
+        m_remoteAudioSink = nullptr;
+    }
+    if (m_remoteVideoTrack != nullptr && m_remoteVideoSink != nullptr)
+        m_remoteVideoTrack->RemoveSink(m_remoteVideoSink);
+    m_remoteVideoTrack = nullptr;
+    m_remoteVideoSink = nullptr;
 
     if (m_connection != nullptr) {
         // 先断开连接再释放，防止析构过程中发生回调
@@ -488,7 +498,7 @@ void PeerLink::addLocalVideoTrack(webrtc::scoped_refptr<webrtc::VideoTrackInterf
     videoEncoding.active = sending;
 
     // 在createOffer之前挂视频轨，SDP中会包含相应的m=video段
-    auto sender = m_connection->AddTrack(track, {"syncine-video"}, {videoEncoding});
+    auto sender = m_connection->AddTrack(track, {kMediaStreamId}, {videoEncoding});
     if (!sender.ok()) {
         LOG_ERROR("PeerLink") << m_peerId << "添加视频轨失败:" << sender.error().message();
         return;
@@ -521,13 +531,14 @@ void PeerLink::addLocalMovieAudioTrack(
         return;
     }
 
-    // stream id 用 kMovieStreamId —— 接收端就是靠它把这条轨认成"电影"的。
+    // stream id 与视频共用 kMediaStreamId：接收侧 libwebrtc 据此把两条流
+    // 放进同一个 sync_group，启用音视频投递对齐。
     // active 作为初始 encoding 参数一并传入：非共享模式下发送流从协商时就
     // 不会启动。否则 SetSsrc 会按默认的 active=true 重新应用一次，把建连前
     // 设置的 false 覆盖掉。
     webrtc::RtpEncodingParameters movieEncoding;
     movieEncoding.active = sending;
-    auto sender = m_connection->AddTrack(track, {kMovieStreamId}, {movieEncoding});
+    auto sender = m_connection->AddTrack(track, {kMediaStreamId}, {movieEncoding});
     if (!sender.ok()) {
         LOG_ERROR("PeerLink") << m_peerId << "添加电影音轨失败:" << sender.error().message();
         return;
