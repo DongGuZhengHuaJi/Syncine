@@ -397,6 +397,190 @@ target_link_libraries(syncine_video_tests
 add_test(NAME videosource COMMAND syncine_video_tests)
 
 # ======================================================================
+# 12.2 PlaybackSync 加载时机测试
+#
+# 用 tests/fake_playback.cpp 替换 PlaybackController（记录每次 load/unload），
+# 其余对象（房间、成员表、播放列表、协议）都是真实实现，验证：
+#   · 成员表刷新不重建媒体，只有房主身份变化才重新决定播放源
+#   · "已就绪"标记绑定实际播放源
+# 不链接 WebRTC：播放器是替身，测试里没有远端渲染。
+# ======================================================================
+
+add_executable(syncine_playback_tests
+        tests/tst_playbacksync.cpp
+        tests/fake_playback.cpp
+        tests/fake_playback.h
+
+        src/playback/PlaybackSync.cpp
+        src/playback/PlaybackSync.h
+        # 只为让 AUTOMOC 生成它的元对象（方法体由 fake_playback.cpp 提供）
+        src/playback/PlaybackController.h
+
+        src/session/RoomSession.cpp
+        src/session/RoomSession.h
+        src/session/MemberModel.cpp
+        src/session/MemberModel.h
+        src/session/PlaylistModel.cpp
+        src/session/PlaylistModel.h
+
+        src/core/AppSettings.cpp
+        src/core/AppSettings.h
+        src/core/CookieManager.cpp
+        src/core/CookieManager.h
+        src/core/Log.cpp
+        src/core/Log.h
+        src/core/MediaHash.cpp
+        src/core/MediaHash.h
+        src/core/NetworkManager.cpp
+        src/core/NetworkManager.h
+        src/core/Protocol.cpp
+        src/core/Protocol.h
+        src/core/Toolchain.cpp
+        src/core/Toolchain.h
+        src/core/UrlDownloader.cpp
+        src/core/UrlDownloader.h
+
+        src/danmaku/DanmakuController.cpp
+        src/danmaku/DanmakuController.h
+        src/danmaku/DanmakuXmlParser.cpp
+        src/danmaku/DanmakuXmlParser.h
+        src/danmaku/LiveDanmakuSession.cpp
+        src/danmaku/LiveDanmakuSession.h
+
+        src/media/FormatModel.cpp
+        src/media/FormatModel.h
+        src/media/MediaPlatform.cpp
+        src/media/MediaPlatform.h
+)
+
+target_include_directories(syncine_playback_tests
+        PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/danmaku"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/media"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/playback"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/session"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/webrtc"
+)
+
+target_link_libraries(syncine_playback_tests
+        PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Qml
+        Qt6::Multimedia
+        Qt6::Network
+        Qt6::WebSockets
+        ZLIB::ZLIB
+)
+
+add_test(NAME playbacksync COMMAND syncine_playback_tests)
+
+# ======================================================================
+# 12.3 媒体内存探针（验收工具）
+#
+# 用真实 PlaybackController 跑加载/解码/卸载循环，检查卸载后不保留最后一帧、
+# 以及 RSS 不随轮次持续增长。需要 SYNCINE_MEMORY_VIDEO 指向一段真实视频，
+# 没设置时测试自己跳过（详见 tests/tst_media_memory.cpp 顶部说明）。
+#
+# 只借用 WebRTC 的头文件，不链接 libwebrtc.a：PlaybackController 对
+# WebrtcManager 的引用由 tests/stub_webrtcmanager.cpp 补上两个空实现。
+# ======================================================================
+
+get_target_property(SYNCINE_WEBRTC_INCLUDE_DIRS WebRTC::WebRTC
+        INTERFACE_INCLUDE_DIRECTORIES)
+get_target_property(SYNCINE_WEBRTC_COMPILE_DEFS WebRTC::WebRTC
+        INTERFACE_COMPILE_DEFINITIONS)
+
+add_library(syncine_webrtc_headers INTERFACE)
+target_include_directories(syncine_webrtc_headers
+        INTERFACE ${SYNCINE_WEBRTC_INCLUDE_DIRS})
+if(SYNCINE_WEBRTC_COMPILE_DEFS)
+    target_compile_definitions(syncine_webrtc_headers
+            INTERFACE ${SYNCINE_WEBRTC_COMPILE_DEFS})
+endif()
+
+add_executable(syncine_memory_probe
+        tests/tst_media_memory.cpp
+        tests/stub_webrtcmanager.cpp
+
+        src/playback/PlaybackController.cpp
+        src/playback/PlaybackController.h
+        src/core/Log.cpp
+        src/core/Log.h
+        src/core/MediaHash.cpp
+        src/core/MediaHash.h
+)
+
+target_include_directories(syncine_memory_probe
+        PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/playback"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/webrtc"
+)
+
+target_link_libraries(syncine_memory_probe
+        PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Multimedia
+        syncine_webrtc_headers
+)
+
+add_test(NAME media_memory COMMAND syncine_memory_probe)
+set_tests_properties(media_memory PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# ======================================================================
+# 12.4 共享模式开关的发送侧内存探针
+#
+# 两条真实 PeerLink 在本进程内回环连通，真实 VideoTrackSource 推 4K 帧，
+# 反复执行 main.cpp 的"停止/恢复共享"，逐轮记录 RSS。用来定位编码器在
+# 开关共享模式时是否存在不回收的缓存。默认跳过，需显式开启：
+#   SYNCINE_SHARE_MEMORY_PROBE=1 ./syncine_share_memory_probe
+# ======================================================================
+
+add_executable(syncine_share_memory_probe
+        tests/tst_share_memory.cpp
+        # 播放器模式下要真实解码；WebrtcManager 的两个符号用空实现补上
+        tests/stub_webrtcmanager.cpp
+
+        src/playback/PlaybackController.cpp
+        src/playback/PlaybackController.h
+
+        src/webrtc/PeerLink.cpp
+        src/webrtc/PeerLink.h
+        src/webrtc/VideoTrackSource.cpp
+        src/webrtc/VideoTrackSource.h
+
+        src/core/Log.cpp
+        src/core/Log.h
+        src/core/MediaHash.cpp
+        src/core/MediaHash.h
+)
+
+target_include_directories(syncine_share_memory_probe
+        PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/playback"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/transfer"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/webrtc"
+)
+
+target_link_libraries(syncine_share_memory_probe
+        PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Multimedia
+        WebRTC::WebRTC
+)
+
+add_test(NAME share_memory COMMAND syncine_share_memory_probe)
+
+# ======================================================================
 # 13. 安装规则 —— 打包的基石
 #
 # CPack 只会打包 install() 出去的东西。这里的布局必须和运行时的查找路径

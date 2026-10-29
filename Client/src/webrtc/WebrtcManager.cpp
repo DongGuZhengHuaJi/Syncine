@@ -1097,14 +1097,33 @@ void WebrtcManager::setLocalVideoSending(bool enabled) {
 
     m_videoSending = enabled;
 
-    // 每个对端各有一条 media 连接，也就各有一个视频 sender
-    for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it) {
-        if (it.value().media != nullptr)
-            it.value().media->applyVideoSending(enabled);
+    // 停发时不改已有 sender 的 encodings[0].active，只把它留给新建连接做初始值。
+    //
+    // active 走 true→false→true 会让 libwebrtc 在恢复时重配编码器：
+    // VideoSendStreamImpl::ReconfigureVideoEncoder() 把 has_active_encodings_ 置回
+    // true，VideoStreamEncoder::RequiresEncoderReset() 看到 inactive→active，
+    // 于是 ReleaseEncoder() + InitEncode()。原分辨率（4K）下每轮都会重新分配
+    // 几十 MB 的内部帧缓冲，glibc 不立即归还，RSS 随开关次数抬升
+    // （实测 4K 每轮 +10~20MB；1080p 档位几乎为 0）。
+    //
+    // 停发本身已由“轨道 disabled + 上层停止喂帧”完成：编码器收不到帧，
+    // 2 秒后（kEncoderTimeOut）libwebrtc 自动移除码率观察者并停掉填充，
+    // 上行只剩 RTCP。代价是切走后的头 2 秒可能还有少量填充包。
+    if (!enabled) {
+        LOG_DEBUG("WebRTC") << "视频停止发送(轨道已关闭，保留编码器)"
+                            << "(当前" << m_peers.size() << "个对端)";
+        return;
     }
 
-    LOG_DEBUG("WebRTC") << (enabled ? "视频恢复发送" : "视频停止发送")
-                       << "(当前" << m_peers.size() << "个对端)";
+    // 恢复时把停发期间新建的连接（它们以 active=false 起步）真正打开。
+    // 一直在发的连接 m_videoSending 仍是 true，PeerLink 会自行跳过，
+    // 不会触发 SetParameters，也就不会让编码器重新初始化。
+    for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it) {
+        if (it.value().media != nullptr)
+            it.value().media->applyVideoSending(true);
+    }
+
+    LOG_DEBUG("WebRTC") << "视频恢复发送(当前" << m_peers.size() << "个对端)";
 }
 
 void WebrtcManager::setVideoQuality(VideoQuality quality) {

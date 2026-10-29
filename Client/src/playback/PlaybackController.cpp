@@ -12,6 +12,10 @@
 #include <QVideoSink>
 #include <QVideoFrame>
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 // 只为了转发"远端渲染器该往哪个 sink 写"这一条信息。
 // 本类不知道 WebRTC 的任何细节 —— 那是 WebrtcManager 的事。
 #include "webrtc/WebrtcManager.h"
@@ -384,8 +388,10 @@ void PlaybackController::unbindVideoOutput() {
     if (m_outputSink.isNull())
         return;
 
-    // QML 的 VideoOutput 即将销毁：先断开它的信号，再把播放器/渲染器两边
-    // 的落点清空，最后才松开 QPointer。
+    // QML 的 VideoOutput 即将销毁：先清掉最后一帧，再断开它的信号，
+    // 最后把播放器/渲染器两边的落点清空并松开 QPointer。
+    // 否则 sink 在真正销毁前仍会持有最后一帧（4K 下可达十几 MB，另加纹理）。
+    clearVideoFrame();
     disconnect(m_outputSink.data(), nullptr, this, nullptr);
     if (m_player != nullptr)
         m_player->setVideoSink(nullptr);
@@ -496,8 +502,27 @@ void PlaybackController::load(const QUrl &source)
 
 void PlaybackController::unload() {
     m_lifecycleStop = true;
+    // 只有确实卸载过一个源才值得整理 allocator；重复的空卸载（共享模式观众、
+    // 空列表等路径会反复走到这里）直接跳过。
+    const bool hadSource = m_player->source().isValid();
+
     m_player->stop();
     m_player->setSource(QUrl());
+
+    // QMediaPlayer 置空后会释放解码器，但界面的 QVideoSink 仍会保留最后
+    // 一帧。4K 下一帧就有十几 MB，删除条目/切网链模式时会在下载期间一直
+    // 挂着。这里用 2×2 黑帧替换掉它；下一帧真实画面到达时会自然覆盖。
+    clearVideoFrame();
+
+#if defined(__GLIBC__)
+    // 解码器与 FFmpeg 帧池释放后，内存大多留在 glibc 的 arena 里不归还系统。
+    // 实测重复加载同一段 4K 视频：不 trim 时卸载后 RSS 在 430–600MB、解码峰值
+    // 约 750MB；每次卸载 trim 后是 210–280MB / 510–535MB。卸载总耗时（主要是
+    // 播放器自身拆卸，约 0.1 秒）加不加 trim 没有可测差别。
+    if (hadSource)
+        malloc_trim(0);
+#endif
+
     emit sourceChanged();
     emit hasLoadedChanged();
 }

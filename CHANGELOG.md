@@ -28,6 +28,9 @@
 
 ### 修复
 
+- **共享模式停止推流后的 RSS 抬升**：`setLocalVideoSending(false)` 不再把已有 sender 的 `encodings[0].active` 改回 false。该字段 false→true 会让 libwebrtc 在恢复共享时 `ReleaseEncoder() + InitEncode()`，4K 下每轮重新分配几十 MB 帧缓冲。停发改由“轨道 disabled + 停止喂帧”完成：编码器 2 秒后超时并停掉填充，上行只剩 RTCP；停发期间新建的连接仍以 active=false 起步。实测 4K 下“推流 → 删除当前播放条目”8 轮累计 RSS 从 +356MB 降到 +12MB。
+- **本地播放反复加载的内存平台**：卸载时用 2×2 黑帧替换 `QVideoSink` 里保留的最后一帧（4K 下一帧十几 MB，删条目/切网链模式时会在下载期间一直挂着）；glibc 平台卸载后调用 `malloc_trim(0)`，把解码器/帧池释放后留在 arena 里的内存归还系统。实测同一段 4K 连续 50 轮加载/卸载：卸载后 RSS 从 429–599MB 降到 205–269MB，解码峰值从 774MB 降到 535MB，末轮只比最低点高 11MB。新增 `syncine_memory_probe` 验收工具。
+- **成员表刷新重建解码器**：`membersChanged` 不再触发完整的媒体重算，普通成员加入/离开、`video_status` 回显只刷新显示与门禁；只有房主身份变化才重新决定“本地解码还是看远端”。新增 `syncine_playback_tests` 覆盖该行为。
 - **共享模式观众端总时长一直为 0、无法拖动进度条**：共享模式观众按设计拿到空播放列表，`video_status` 的条目过滤会把房主上报的 duration 一并丢弃。现在共享模式观众放行房主的视频状态（服务端已按当前条目/seq 过滤），成员表能拿到时长，进度条恢复可拖动。
 - **接收端 4K 内存暴涨到 GB 级**：转换 worker 之前每转好一帧就 `invokeMethod` 投一个 lambda 到 GUI；GUI 忙时事件队列里的 `QVideoFrame` 无界堆积（4K 每帧约 12MB）。改为“有界转换队列（16 帧 / 48MB）+ 单次唤醒事件”，worker 队列也压到 8 帧；GUI 忙时丢弃最老帧而不是无限占内存。
 - **共享模式默认画质改为高清 1080p**：4K 源不再默认按原画整帧转换/编码；发送端在转换阶段按目标短边前置缩放（I420/NV12/NV21 直接在源平面缩放），显著降低 Windows 主机的 CPU/内存压力。需要 4K 原画可在播放控制条切换。
@@ -36,6 +39,7 @@
 
 ### 网链
 
+- **“已就绪”标记绑定实际播放源**：条目 id 相同、但播放器里是本地文件时，切回网链模式不再被误判为“已准备”而跳过重新解析；`preparedSourceLoaded()` 同时校验条目 id 与实际 source。
 - **手选 format_id**：新条目用 `id:` 前缀记录手选流；裸数字 spec 先判断是否为源内真实分辨率高度，再按 format_id 解释。纯数字 format_id（30080/137）不再被当成档位静默忽略；显式 `id:` 不存在时直接报错，不再回退最高画质。
 - **测试骨架**：新增 `Client/tests` 与 CTest，覆盖档位/手选 id/`id:` 前缀/缺失 id/标签显示。
 - **平台注册表**：按 URL host 后缀识别 Bilibili / Generic，不再在下载流程里硬编码站点；B 站始终带 cookie，Generic 默认不带（设置页可开启“通用链接也使用 Cookie”），避免把登录态发给任意站点。

@@ -96,8 +96,10 @@ PlaybackSync::PlaybackSync(RoomSession *session,
             this, &PlaybackSync::onPositionUpdate);
 
     // ---- 房间状态变化 -> 重算门禁 / 同步状态 ----
+    // membersChanged 只刷新派生状态；只有房主身份变化才可能改变媒体源。
+    // 房间模式/进出房才走完整的重算路径，避免成员表每次刷新都重建解码器。
     connect(m_session, &RoomSession::membersChanged,
-            this, &PlaybackSync::onRoomChanged);
+            this, &PlaybackSync::onMembersChanged);
     connect(m_session, &RoomSession::roomModeChanged,
             this, &PlaybackSync::onRoomChanged);
     connect(m_session, &RoomSession::left,
@@ -134,7 +136,7 @@ PlaybackSync::PlaybackSync(RoomSession *session,
                         return;
 
                     // 清掉"已就绪"标记，让 prepareUrlItem 重新走一遍解析
-                    m_preparedItemId.clear();
+                    clearPrepared();
                     clearDownloadItem();
                     prepareUrlItem(m_session->playlist()->currentItemId());
                 });
@@ -350,6 +352,35 @@ void PlaybackSync::clearAllFailedItems()
     emit downloadStateChanged();
 }
 
+// ============================
+// 网链模式：已就绪标记
+// ============================
+
+bool PlaybackSync::preparedSourceLoaded(const QString &itemId) const
+{
+    if (itemId.isEmpty() || itemId != m_preparedItemId || !m_preparedSource.isValid())
+        return false;
+    if (m_playback == nullptr || !m_playback->hasLoaded())
+        return false;
+
+    // 只看条目 id 不够：本地/网链模式往返后，播放器里的可能是同一个条目的
+    // 另一种来源（本地文件 vs 缓存文件）。QUrl 的相等比较对本地文件的两种
+    // 拼法是稳的，直接用它判断"播放器上现在就是准备好的那一份"。
+    return m_playback->source() == m_preparedSource;
+}
+
+void PlaybackSync::markPrepared(const QString &itemId, const QUrl &source)
+{
+    m_preparedItemId = itemId;
+    m_preparedSource = source;
+}
+
+void PlaybackSync::clearPrepared()
+{
+    m_preparedItemId.clear();
+    m_preparedSource.clear();
+}
+
 void PlaybackSync::retryItem(const QString &itemId)
 {
     if (m_session == nullptr || m_urlDownloader == nullptr)
@@ -369,7 +400,7 @@ void PlaybackSync::retryItem(const QString &itemId)
         // 上次没下成功时才会重新拉取
         if (m_danmaku != nullptr)
             m_danmaku->reset();
-        m_preparedItemId.clear();
+        clearPrepared();
         clearFailedItem(itemId);
         clearDownloadItem();
         // "重试"的意思是**重新下一遍**:把缓存的映射删掉，否则 prepareUrlItem
@@ -550,8 +581,25 @@ void PlaybackSync::onMediaChanged() {
 }
 
 void PlaybackSync::onRoomChanged() {
+    // 模式变化、进出房间：媒体源可能随之变化，走完整重算。
+    handleRoomState(true);
+}
+
+void PlaybackSync::onMembersChanged() {
     if (m_session == nullptr || m_playback == nullptr)
         return;
+
+    // 成员表刷新大部分时候只是加入/离开/状态回显，不影响媒体源。
+    // 只有在共享模式下房主身份变化时，才需要重新决定“本地解码还是看远端”。
+    const bool hostChanged = m_session->isHost() != m_lastIsHost;
+    handleRoomState(hostChanged);
+}
+
+void PlaybackSync::handleRoomState(bool reloadMedia) {
+    if (m_session == nullptr || m_playback == nullptr)
+        return;
+
+    m_lastIsHost = m_session->isHost();
 
     // 换房/退房时，上一条目的下载、失败、就绪状态都不再属于当前房间。
     // 必须在后面的 applyPlaylistItem 之前清，否则新房间可能复用旧标记。
@@ -560,7 +608,7 @@ void PlaybackSync::onRoomChanged() {
         if (m_urlDownloader != nullptr)
             m_urlDownloader->cancel();
         clearDownloadItem();
-        m_preparedItemId.clear();
+        clearPrepared();
         clearAllFailedItems();
     }
 
@@ -608,7 +656,7 @@ void PlaybackSync::onRoomChanged() {
             UrlDownloader::removeClientTempDir(m_session->clientId());
         }
         clearDownloadItem();
-        m_preparedItemId.clear();
+        clearPrepared();
         clearAllFailedItems();
 
         // 离开房间时不要再走 applyPlaylistItem()：RoomSession::clearRoomState()
@@ -635,8 +683,10 @@ void PlaybackSync::onRoomChanged() {
         clearAllFailedItems();
 
     // 模式变了，"这一条从哪儿来"也跟着变：同步/共享读本地文件，网链读 URL。
-    // 重新解析一次当前条目（没有当前条目时是空串，等价于卸载）
-    applyPlaylistItem(m_session->playlist()->currentItemId());
+    // 重新解析一次当前条目（没有当前条目时是空串，等价于卸载）。
+    // 成员表刷新且房主身份未变时 reloadMedia=false：不要碰播放器。
+    if (reloadMedia)
+        applyPlaylistItem(m_session->playlist()->currentItemId());
 
     emit durationChanged();
     emit seekableChanged();
@@ -698,7 +748,7 @@ void PlaybackSync::onPlaylistItemRemoved(const QString &itemId, bool wasCurrent)
     }
 
     if (wasPrepared)
-        m_preparedItemId.clear();
+        clearPrepared();
 
     if (wasFailed) {
         m_failedItems.remove(itemId);
@@ -725,6 +775,7 @@ void PlaybackSync::applyPlaylistItem(const QString &itemId) {
         // 列表空了：把播放器卸载掉，画面回到"请先加载视频"
         if (m_danmaku != nullptr)
             m_danmaku->reset();
+        clearPrepared();
         m_playback->unload();
         return;
     }
@@ -736,6 +787,7 @@ void PlaybackSync::applyPlaylistItem(const QString &itemId) {
     if (mode == RoomSession::RoomMode::Share && !m_session->isHost()) {
         if (m_danmaku != nullptr)
             m_danmaku->reset();
+        clearPrepared();
         m_playback->unload();
         return;
     }
@@ -755,6 +807,7 @@ void PlaybackSync::applyPlaylistItem(const QString &itemId) {
     if (path.isEmpty()) {
         // 还没给这一条指定本机文件 —— 清空播放器，门禁会挡住播放，
         // 界面提示"请选择文件"
+        clearPrepared();
         m_playback->unload();
         return;
     }
@@ -772,6 +825,7 @@ void PlaybackSync::prepareUrlItem(const QString &itemId)
     if (url.isEmpty()) {
         if (m_danmaku != nullptr)
             m_danmaku->reset();
+        clearPrepared();
         m_playback->unload();
         return;
     }
@@ -789,18 +843,18 @@ void PlaybackSync::prepareUrlItem(const QString &itemId)
             clearDownloadItem();
     }
 
-    // 已经在播放器里：不重启
-    if (itemId == m_preparedItemId && m_playback->hasLoaded())
+    // 已经在播放器里：不重启。必须同时确认实际 source 匹配，
+    // 否则“网链 → 本地 → 网链”往返时会把本地文件误认为网链缓存。
+    if (preparedSourceLoaded(itemId))
         return;
 
     // 当前条目已经失败：保留失败状态给界面显示，等用户点重试。
-    // 否则每次成员表刷新（video_status 回显等）都会自动重拉一次 yt-dlp，
+    // 否则每次房间状态刷新（video_status 回显等）都会自动重拉一次 yt-dlp，
     // 既刷屏又会把别的条目的后台重试任务挤掉。
+    // 走到这里说明 preparedSourceLoaded() 已经是 false，播放器里不是它的就绪源。
     if (m_failedItems.contains(itemId)) {
-        if (!(itemId == m_preparedItemId && m_playback->hasLoaded())) {
-            m_preparedItemId.clear();
-            m_playback->unload();
-        }
+        clearPrepared();
+        m_playback->unload();
         return;
     }
 
@@ -818,7 +872,7 @@ void PlaybackSync::prepareUrlItem(const QString &itemId)
             || stage == QLatin1String("checking")) {
             // 用户刚切到一条正在后台下载的条目：播放器先清空等 ready；
             // 任务本身不重启。
-            m_preparedItemId.clear();
+            clearPrepared();
             m_playback->unload();
             return;
         }
@@ -846,8 +900,9 @@ void PlaybackSync::prepareUrlItem(const QString &itemId)
         // 缓存能加载成功，说明之前的失败已经无关紧要
         if (m_failedItems.contains(itemId))
             clearFailedItem(itemId);
-        m_preparedItemId = itemId;
-        m_playback->load(QUrl::fromLocalFile(cached));
+        const QUrl cachedSource = QUrl::fromLocalFile(cached);
+        markPrepared(itemId, cachedSource);
+        m_playback->load(cachedSource);
         return;
     }
 
@@ -913,8 +968,9 @@ void PlaybackSync::onUrlResolved()
     // 秒开、能拖、不落盘
     LOG_INFO("Playback") << "直链播放:" << m_urlDownloader->title();
     // 记成"已就绪":直链这条路没有临时文件，但同样不该被反复重新解析
-    m_preparedItemId = itemId;
-    m_playback->load(QUrl(m_urlDownloader->directUrl()));
+    const QUrl directSource(m_urlDownloader->directUrl());
+    markPrepared(itemId, directSource);
+    m_playback->load(directSource);
     clearFailedItem(itemId);
     clearDownloadItem();
 }
@@ -957,8 +1013,9 @@ void PlaybackSync::onUrlReady(const QString &filePath)
 
     const bool isCurrent = itemId == m_session->playlist()->currentItemId();
     if (isCurrent) {
-        m_preparedItemId = itemId;
-        m_playback->load(QUrl::fromLocalFile(filePath));
+        const QUrl readySource = QUrl::fromLocalFile(filePath);
+        markPrepared(itemId, readySource);
+        m_playback->load(readySource);
     } else {
         LOG_INFO("Playback") << "后台重试完成,已写入缓存:" << itemId << filePath;
     }

@@ -21,6 +21,7 @@
 #include <QHash>
 #include <QObject>
 #include <QTimer>
+#include <QUrl>
 
 #include <qqmlintegration.h>
 
@@ -181,6 +182,7 @@ private slots:
     void onPositionUpdate(qint64 position, bool playing);
     void onMediaChanged();
     void onRoomChanged();
+    void onMembersChanged();
     void onPositionTimer();
     void onPlaylistSwitched(const QString &itemId);
     // 服务端确认某条目已从播放列表删除。如果它正在解析/下载，立即终止；
@@ -196,10 +198,18 @@ private slots:
 
 private:
     void pushVideoStatus();
+    // 房间状态变化的公共处理。reloadMedia 为 false 时只刷新显示/门禁等
+    // 派生状态，不碰播放器；成员列表刷新走这条路径，避免无意义地重建解码器。
+    void handleRoomState(bool reloadMedia);
     // 按当前模式解析某一条的播放源并加载；没有可用的源就把播放器卸载掉
     void applyPlaylistItem(const QString &itemId);
     // 网链模式：准备某一条（解析 → 直链播放 或 下载合并）
     void prepareUrlItem(const QString &itemId);
+    // “已准备好”的标记必须同时匹配条目 id 和播放器实际 source，
+    // 否则本地/网链模式往返时会把本地文件误认为网链缓存。
+    bool preparedSourceLoaded(const QString &itemId) const;
+    void markPrepared(const QString &itemId, const QUrl &source);
+    void clearPrepared();
     // 停掉可能在跑的下载。**不删文件** —— 下载好的那份留着，切回这一条直接复用
     // (缓存只在退出软件时清，见 removeClientTempDir 的说明)
     void cancelOngoingDownload();
@@ -234,8 +244,14 @@ private:
     QHash<QString, QString> m_failedItems;
     // 已经准备好、临时文件还在的条目（播放器上就是它）
     QString m_preparedItemId;
+    // 与 m_preparedItemId 对应的实际播放源（缓存文件或直链）。
+    // 只有 itemId 和实际 source 同时匹配才认为“已准备好”，避免本地/网链
+    // 模式往返时把本地文件误当成网链缓存。
+    QUrl m_preparedSource;
     // 上一次 onRoomChanged 看到的房间号；换房时清掉下载/失败状态
     QString m_roomId;
+    // 上一次看到的房主状态。成员表刷新只有在这一项变化时才需要重算媒体源。
+    bool m_lastIsHost = false;
 
     // 正在执行远端命令 —— 这期间播放器产生的变化都算"远端造成的",
     // 不是用户操作，不能再广播回去（否则 A→B→A 无限回声）
