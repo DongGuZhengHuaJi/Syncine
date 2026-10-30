@@ -33,6 +33,8 @@
 #include <utility>
 #include <vector>
 
+// ksmedia.h 在新版 Windows SDK 里要求先包含 ks.h（否则 C1189）。
+#include <ks.h>
 #include <ksmedia.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
