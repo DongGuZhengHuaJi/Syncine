@@ -33,7 +33,11 @@
 #include <utility>
 #include <vector>
 
-// ksmedia.h 在新版 Windows SDK 里要求先包含 ks.h（否则 C1189）。
+// ks.h 只包含 winapifamily.h，ULONG/GUID 等类型必须由 windows.h 先提供；
+// ksmedia.h 要求 ks.h 先于它（否则 C1189），且 WAVEFORMATEX /
+// KSDATAFORMAT_SUBTYPE_IEEE_FLOAT 来自 mmreg.h（由 _INC_MMREG 门控）。
+#include <windows.h>
+#include <mmreg.h>
 #include <ks.h>
 #include <ksmedia.h>
 #include <mmdeviceapi.h>
