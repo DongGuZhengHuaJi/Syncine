@@ -11,8 +11,14 @@
 #if defined(_WIN32) && !defined(WINVER)
 #define WINVER 0x0A00
 #endif
-#if defined(_WIN32) && !defined(NTDDI_VERSION)
-#define NTDDI_VERSION 0x0A000000  // NTDDI_WIN10
+// audioclientactivationparams.h 的进程回环类型被
+// #if (NTDDI_VERSION >= NTDDI_WIN10_FE) 包住。这里显式抬到 WIN10_FE，
+// 否则头文件存在但 AUDIOCLIENT_ACTIVATION_PARAMS 等类型不定义。
+#if defined(_WIN32)
+#ifdef NTDDI_VERSION
+#undef NTDDI_VERSION
+#endif
+#define NTDDI_VERSION 0x0A00000A  // NTDDI_WIN10_FE
 #endif
 
 #include "WasapiLoopbackCapture.h"
@@ -33,13 +39,12 @@
 #include <utility>
 #include <vector>
 
-// ks.h 只包含 winapifamily.h，ULONG/GUID 等类型必须由 windows.h 先提供；
-// ksmedia.h 要求 ks.h 先于它（否则 C1189），且 WAVEFORMATEX /
-// KSDATAFORMAT_SUBTYPE_IEEE_FLOAT 来自 mmreg.h（由 _INC_MMREG 门控）。
+// 只包含需要的 Windows 头。不要引入 ks.h / ksmedia.h：ks.h 会把 GUID_NULL
+// 重定义成宏，随后 mmdeviceapi.h 里的 cguid.h（extern const IID GUID_NULL）
+// 会被宏展开成 __uuidof，导致编译失败。这里只需要 mmreg.h 的
+// WAVEFORMATEX/WAVEFORMATEXTENSIBLE 和一个 IEEE float 子格式 GUID。
 #include <windows.h>
 #include <mmreg.h>
-#include <ks.h>
-#include <ksmedia.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <wrl/client.h>
@@ -58,6 +63,12 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
+// KSDATAFORMAT_SUBTYPE_IEEE_FLOAT（ksmedia.h）的等价定义。
+// 00000003-0000-0010-8000-00aa00389b71，第一段就是 WAVE_FORMAT_IEEE_FLOAT。
+constexpr GUID kSubtypeIeeeFloat = {
+    0x00000003, 0x0000, 0x0010,
+    {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+
 bool isFloatFormat(const WAVEFORMATEX *format, WORD *validBits)
 {
     WORD bits = format->wBitsPerSample;
@@ -66,8 +77,7 @@ bool isFloatFormat(const WAVEFORMATEX *format, WORD *validBits)
     if (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
         const auto *extended =
             reinterpret_cast<const WAVEFORMATEXTENSIBLE *>(format);
-        isFloat = IsEqualGUID(extended->SubFormat,
-                              KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
+        isFloat = IsEqualGUID(extended->SubFormat, kSubtypeIeeeFloat);
         if (extended->Samples.wValidBitsPerSample != 0)
             bits = extended->Samples.wValidBitsPerSample;
     }
