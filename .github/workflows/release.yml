@@ -190,6 +190,7 @@ jobs:
           if (-not $zlibLib) { throw "vcpkg zlib 静态库不存在: $zlibRoot\lib" }
           cmake -S Client -B Client/build-release -G "Visual Studio 18 2026" -A x64 `
             -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
+            -DCMAKE_CXX_FLAGS="/FIks.h" `
             -DZLIB_INCLUDE_DIR="$zlibRoot\include" `
             -DZLIB_LIBRARY="$($zlibLib.FullName)" `
             -DWEBRTC_ROOT="$env:WEBRTC_ROOT" `
