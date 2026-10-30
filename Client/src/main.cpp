@@ -11,6 +11,7 @@
 
 #include "rtc_base/logging.h"
 
+#include "capture/ScreenShareController.h"
 #include "core/AppSettings.h"
 #include "core/AudioDevices.h"
 #include "core/CookieManager.h"
@@ -123,6 +124,20 @@ int main(int argc, char *argv[]) {
         // 状态全部保存在这里，QML 的传输窗口只是视图，关掉不影响任务
         FileTransferManager fileTransferManager(&webrtcManager, &roomSession);
 
+        // ---- 屏幕/窗口采集 ----
+        // 声明位置在 playbackSync / roomSession / webrtcManager 之后：
+        // 析构时它先于这些对象销毁，stop() 发出的 activeChanged 不会碰到
+        // 已经析构的播放同步或 WebRTC 管理器。
+        ScreenShareController screenShareController;
+        screenShareController.setOutputDeviceName(appSettings.speakerDevice());
+        // 系统声音 PCM 在采集线程到达；MovieAudioSource 自带锁，可直接写。
+        screenShareController.setAudioSink(
+            [&webrtcManager](const int16_t *data, size_t samplesPerChannel,
+                             int sampleRate, size_t channels) {
+                webrtcManager.pushMovieAudioPcm(data, samplesPerChannel,
+                                                sampleRate, channels);
+            });
+
         // 文件传输进行中时给共享视频封一个较低的码率上限，传输结束再恢复。
         // 只影响房主的 media 连接；观众端没有发送流，调用是空操作。
         QObject::connect(&fileTransferManager,
@@ -154,10 +169,13 @@ int main(int argc, char *argv[]) {
                              appSettings.setMicDevice(name);
                          });
         QObject::connect(&signalingChannel, &SignalingChannel::speakerDeviceChanged, &app,
-                         [&appSettings, &playbackController](const QString &name) {
+                         [&appSettings, &playbackController, &screenShareController](
+                             const QString &name) {
                              appSettings.setSpeakerDevice(name);
                              // 设备名（ADM 给的 PulseAudio 描述）→ Qt 的输出设备
                              playbackController.setOutputDevice(findAudioOutputByName(name));
+                             // 系统声音跟着「听筒」走；采集中会重启音频采集。
+                             screenShareController.setOutputDeviceName(name);
                          });
 
         signalingChannel.setMicDevice(appSettings.micDevice());
@@ -173,12 +191,31 @@ int main(int argc, char *argv[]) {
         // 门控挡在 push 之前而非仅关轨道，是为了把 Qt 帧 → I420 的逐行转换开销一并省掉；
         // 轨道开关见下方 updateVideoEnabled。
         QObject::connect(&playbackController, &PlaybackController::videoFrameAvailable,
-                         &app, [&webrtcManager, &roomSession](const QVideoFrame &f) {
+                         &app, [&webrtcManager, &roomSession, &screenShareController](
+                                   const QVideoFrame &f) {
                              // 只有共享模式的房主推视频；观众端即使本地有残留
                              // 播放器也不该占上行。
                              if (roomSession.roomMode() != RoomSession::RoomMode::Share
                                  || !roomSession.isHost())
                                  return;
+                             // 屏幕共享期间画面来自 ScreenShareController，
+                             // 本地电影帧不能同时进同一根视频轨。
+                             if (screenShareController.isActive())
+                                 return;
+                             webrtcManager.pushQtVideoFrame(f);
+                         });
+
+        // 发送：屏幕采集帧 → 同一根视频轨。
+        // 控制器已经做了 30fps 节流，并把回调统一搬到 GUI 线程。
+        QObject::connect(&screenShareController, &ScreenShareController::frameAvailable,
+                         &app, [&webrtcManager, &roomSession, &playbackController](
+                                   const QVideoFrame &f) {
+                             if (roomSession.roomMode() != RoomSession::RoomMode::Share
+                                 || !roomSession.isHost())
+                                 return;
+                             // 房主本地也显示正在共享的画面；这与推流是两份用途，
+                             // PlaybackController 内部会阻止预览帧回灌进电影推流入口。
+                             playbackController.presentScreenShareFrame(f);
                              webrtcManager.pushQtVideoFrame(f);
                          });
 
@@ -186,11 +223,16 @@ int main(int argc, char *argv[]) {
         // 比视频多一步：WebRTC 需要裸 PCM，而 QAudioBuffer 是带格式描述的容器，
         // 故在此拆为指针 + 每声道采样数 + 采样率 + 声道数。
         QObject::connect(&playbackController, &PlaybackController::movieAudioFrameAvailable,
-                         &app, [&webrtcManager, &roomSession](const QAudioBuffer &buffer) {
+                         &app, [&webrtcManager, &roomSession, &screenShareController](
+                                   const QAudioBuffer &buffer) {
                              // 只有共享模式的房主需要电影声；观众端即使在共享模式
                              // 也没有本地媒体，但门禁放在这里可以省掉无意义的 PCM 搬运。
                              if (roomSession.roomMode() != RoomSession::RoomMode::Share
                                  || !roomSession.isHost())
+                                 return;
+                             // 屏幕共享期间同一根 media 音轨留给系统声音（后续阶段），
+                             // 电影 PCM 不能混进来。
+                             if (screenShareController.isActive())
                                  return;
                              const QAudioFormat format = buffer.format();
                              webrtcManager.pushMovieAudioPcm(
@@ -205,11 +247,21 @@ int main(int argc, char *argv[]) {
         //                     模式直接停发，不再为没人听的音轨持续付静音包/编码成本。
         //   静音层（enabled）：共享模式下暂停时只静音、不停流，恢复播放没有
         //                     启动延迟（停流再启动要重新搭编码/打包链路）。
-        auto updateMovieAudioEnabled = [&playbackController, &roomSession, &webrtcManager] {
+        auto updateMovieAudioEnabled = [&playbackController, &roomSession, &webrtcManager,
+                                        &screenShareController] {
             const bool hostSharing =
                 roomSession.roomMode() == RoomSession::RoomMode::Share
                 && roomSession.isHost();
-            webrtcManager.setMovieAudioEnabled(hostSharing && playbackController.playing());
+            // 同一根音轨在「电影」与「系统声音」间二选一：
+            //   · 屏幕共享中且系统声音在采 → 开；
+            //   · 屏幕共享中但没有系统声音 → 关（电影已暂停）；
+            //   · 非屏幕共享 → 跟随电影播放状态。
+            const bool movieAudio = !screenShareController.isActive()
+                                    && playbackController.playing();
+            const bool screenAudio = screenShareController.isActive()
+                                     && screenShareController.audioActive();
+            webrtcManager.setMovieAudioEnabled(hostSharing
+                                               && (movieAudio || screenAudio));
             webrtcManager.setMovieAudioSending(hostSharing);
         };
 
@@ -237,6 +289,117 @@ int main(int argc, char *argv[]) {
         QObject::connect(&roomSession, &RoomSession::isHostChanged,
                          &app, updateVideoEnabled);
         updateVideoEnabled(); // 启动时对齐一次（默认同步模式 → 关）
+
+        // 把本地采集状态同步给服务端，迟到者与观众据此进入共享态。
+        // 采集先启动、状态随后广播：本地响应快，服务端仍是观众侧的权威来源。
+        auto publishShareState = [&screenShareController, &roomSession] {
+            const bool hostSharing =
+                roomSession.roomMode() == RoomSession::RoomMode::Share
+                && roomSession.isHost();
+            if (!hostSharing)
+                return;
+
+            const bool active = screenShareController.isActive();
+            const RoomSession::ShareSource desired =
+                active
+                    ? (screenShareController.sourceKind()
+                               == QLatin1String("window")
+                           ? RoomSession::ShareSource::Window
+                           : RoomSession::ShareSource::Screen)
+                    : RoomSession::ShareSource::Media;
+            const bool audio = active && screenShareController.audioActive();
+
+            if (roomSession.shareSource() != desired
+                || roomSession.shareAudio() != audio) {
+                roomSession.setShareState(desired, audio);
+            }
+        };
+
+        // 屏幕共享开始/停止：
+        //   · 通知 WebrtcManager 切换编码器的 screencast/content hint；
+        //   · 开始共享时暂停本地电影，避免两路画面/声音同时存在。
+        QObject::connect(&screenShareController, &ScreenShareController::activeChanged,
+                         &app, [&screenShareController, &playbackSync, &playbackController,
+                                &webrtcManager, &roomSession, updateMovieAudioEnabled,
+                                publishShareState] {
+                             const bool active = screenShareController.isActive();
+                             const bool hostSharing =
+                                 roomSession.roomMode() == RoomSession::RoomMode::Share
+                                 && roomSession.isHost();
+                             playbackController.setScreenSharePreviewActive(active
+                                                                            && hostSharing);
+                             webrtcManager.setScreenShareActive(active && hostSharing);
+                             // 屏幕共享与电影共享互斥：开始共享时立即取消正在播放的
+                             // 电影（广播 Pause），同一时刻只有屏幕这一路内容上屏/推流。
+                             // 停止共享后电影保持暂停，由房主手动恢复。
+                             if (active && hostSharing)
+                                 playbackSync.pause();
+                             updateMovieAudioEnabled();
+                             publishShareState();
+                         });
+
+        // 系统声音启停/偏好变化：同一根音轨在电影 PCM 与系统声音之间切换。
+        auto updateAudioState = [&webrtcManager, updateMovieAudioEnabled,
+                                 publishShareState] {
+            // 切换来源时清掉攒帧缓冲，避免旧来源的半个 10ms 块被拼进新数据。
+            webrtcManager.resetSharedAudio();
+            updateMovieAudioEnabled();
+            publishShareState();
+        };
+        QObject::connect(&screenShareController,
+                         &ScreenShareController::audioActiveChanged,
+                         &app, updateAudioState);
+        QObject::connect(&screenShareController,
+                         &ScreenShareController::audioEnabledChanged,
+                         &app, [updateMovieAudioEnabled] { updateMovieAudioEnabled(); });
+
+        // 服务端状态是观众侧的权威来源，也反过来约束房主的本地采集：
+        //   · 服务端说 media，但本地还在采集 → 停止采集（例如服务端重置/拒绝）；
+        //   · 服务端说 screen/window，但本地没有采集 → 房主进程重启/重连后
+        //     已无法恢复原来的窗口选择，回退到 media，避免僵尸共享状态。
+        QObject::connect(&roomSession, &RoomSession::shareStateChanged, &app,
+                         [&roomSession, &screenShareController] {
+                             if (!roomSession.isHost())
+                                 return;
+
+                             if (roomSession.screenSharing()) {
+                                 if (!screenShareController.isActive()
+                                     && roomSession.roomMode()
+                                            == RoomSession::RoomMode::Share) {
+                                     LOG_WARN("ScreenShare")
+                                         << "服务端处于屏幕共享态，但本地没有采集，回退到 media";
+                                     roomSession.setShareState(
+                                         RoomSession::ShareSource::Media, false);
+                                 }
+                             } else if (screenShareController.isActive()) {
+                                 screenShareController.stop();
+                             }
+                         });
+
+        // 离开房间、切走共享模式或失去房主身份时立即停止采集；
+        // 不等服务端状态（Phase 2 才有服务端 share_state）。
+        QObject::connect(&roomSession, &RoomSession::left,
+                         &screenShareController, &ScreenShareController::stop);
+        QObject::connect(&roomSession, &RoomSession::roomModeChanged, &app,
+                         [&roomSession, &screenShareController] {
+                             if (roomSession.roomMode() != RoomSession::RoomMode::Share)
+                                 screenShareController.stop();
+                         });
+        QObject::connect(&roomSession, &RoomSession::isHostChanged, &app,
+                         [&roomSession, &screenShareController] {
+                             if (!roomSession.isHost())
+                                 screenShareController.stop();
+                         });
+
+        // 兜底：服务端仍可能主动切条目（例如当前条目被删除）。收到切换通知时
+        // 先停共享，否则新条目会在「采集预览占着界面、播放器脱钩」的状态下加载。
+        // 用户主动点击「切到此条」已在 RoomSession::switchTo 被拒绝 ——
+        // 共享期间必须先显式停止共享，才能切回电影。
+        QObject::connect(&roomSession, &RoomSession::playlistAboutToSwitch, &app,
+                         [&screenShareController](const QString &) {
+                             if (screenShareController.isActive())
+                                 screenShareController.stop();
+                         });
 
         // 「电影音量」是单一取值，需同时管住两个出声位置：
         //   同步模式 / 共享模式的房主 → 声音来自本机播放器（m_audioOutput）
@@ -288,6 +451,7 @@ int main(int argc, char *argv[]) {
         engine->rootContext()->setContextProperty("danmakuController", &danmakuController);
         engine->rootContext()->setContextProperty("signalingChannel", &signalingChannel);
         engine->rootContext()->setContextProperty("fileTransferManager", &fileTransferManager);
+        engine->rootContext()->setContextProperty("screenShare", &screenShareController);
         // 界面用的探测器：添加条目时解析链接（标题/时长/画质档位/流列表），只解析不下载；
         // 实际下载走 playbackSync 那条线
         engine->rootContext()->setContextProperty("urlInspector", &urlInspector);

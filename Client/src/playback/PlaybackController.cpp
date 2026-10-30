@@ -284,6 +284,11 @@ void PlaybackController::onVideoFrame(const QVideoFrame &frame) {
     if (m_showingRemote)
         return;
 
+    // 屏幕共享预览帧已经由 main.cpp 从 ScreenShareController 直接送进
+    // WebRTC；这里若再转发一次，同一帧会从电影入口重复进视频轨。
+    if (m_screenSharePreview)
+        return;
+
     // 诊断：前 3 帧 + 每 300 帧打印一次
     static int count = 0;
     if (count < 3 || count % 300 == 0) {
@@ -424,6 +429,27 @@ void PlaybackController::setShowingRemote(bool showing) {
     emit showingRemoteChanged();
 }
 
+void PlaybackController::setScreenSharePreviewActive(bool active) {
+    if (m_screenSharePreview == active)
+        return;
+
+    m_screenSharePreview = active;
+    applyVideoSink();
+    // 切换瞬间清掉上一路的最后一帧：开始共享时清电影画面，停止时清采集画面。
+    clearVideoFrame();
+
+    LOG_DEBUG("Playback") << (active ? "屏幕共享预览开启" : "屏幕共享预览关闭");
+}
+
+void PlaybackController::presentScreenShareFrame(const QVideoFrame &frame) {
+    if (!m_screenSharePreview || m_showingRemote || m_outputSink.isNull())
+        return;
+    if (!frame.isValid())
+        return;
+
+    m_outputSink->setVideoFrame(frame);
+}
+
 void PlaybackController::applyVideoSink() {
     // bindVideoOutput 还没交过来 sink
     if (m_outputSink == nullptr)
@@ -442,6 +468,14 @@ void PlaybackController::applyVideoSink() {
         clearVideoFrame();
 
         LOG_DEBUG("Playback") << "applyVideoSink: 显示远端,播放器已脱钩";
+    } else if (m_screenSharePreview) {
+        // 屏幕共享：播放器暂时脱钩，采集帧由 presentScreenShareFrame() 送入。
+        // 不在这里清屏——切换时 setScreenSharePreviewActive() 已清过一次。
+        m_player->setVideoSink(nullptr);
+        if (m_webrtcManager != nullptr)
+            m_webrtcManager->setRemoteVideoEnabled(false);
+
+        LOG_DEBUG("Playback") << "applyVideoSink: 屏幕共享预览,播放器已脱钩";
     } else {
         // 显示本地画面，播放器往 sink 送帧
         m_player->setVideoSink(m_outputSink.data());

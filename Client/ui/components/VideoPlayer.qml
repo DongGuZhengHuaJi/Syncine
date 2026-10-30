@@ -28,10 +28,16 @@ Item {
     signal loadRequested()
     // 控制条上的齿轮：声音设置。弹窗声明在 RoomPage 根上，这里只往上传意图
     signal audioSettingsRequested()
+    // 控制条上的屏幕共享按钮，弹窗同样在 RoomPage 根上
+    signal screenShareRequested()
 
     function pushDanmaku(text, sender, isSelf) {
         danmakuLayer.push(text, sender, isSelf)
     }
+
+    // 房主看本地采集状态，观众看服务端广播的共享态。
+    readonly property bool screenSharingActive:
+        roomSession.screenSharing || screenShare.active
 
     // 播放源不再由 QML 决定：房间的"当前条目"解析成本地文件 / URL 之后，
     // 由 PlaybackSync 调用 playbackController.load()。这里只管画。
@@ -61,8 +67,10 @@ Item {
         onClicked: {
             if (root.awaitingFile)
                 root.loadRequested()
-            else
+            else if (!root.screenSharingActive)
                 playbackSync.togglePlayPause()
+            else
+                showControls()
         }
         onPositionChanged: showControls()
     }
@@ -104,7 +112,7 @@ Item {
         height: 64
         radius: 32
         color: "#73000000"
-        opacity: !playbackSync.playing ? 1 : 0
+        opacity: (!playbackSync.playing && !root.screenSharingActive) ? 1 : 0
         visible: opacity > 0
         Behavior on opacity { NumberAnimation { duration: 150 } }
 
@@ -137,6 +145,7 @@ Item {
         onDanmakuToggleRequested: root.danmakuToggleRequested()
         onViewModeRequested: (mode) => root.viewModeRequested(mode)
         onAudioSettingsRequested: root.audioSettingsRequested()
+        onScreenShareRequested: root.screenShareRequested()
     }
 
     Timer {

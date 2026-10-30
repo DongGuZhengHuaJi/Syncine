@@ -60,6 +60,12 @@ public:
     const std::string &mode() const;
     void setMode(const std::string &mode);
 
+    // 共享模式当前共享源："media" / "screen" / "window"。
+    // 服务端只保存/转发，不解释采集细节。
+    const std::string &shareSource() const;
+    bool shareAudio() const;
+    void setShareState(std::string source, bool audio);
+
     bool hasPassword() const;
     bool checkPassword(const std::string &password) const;
     bool isEmpty() const;
@@ -179,6 +185,8 @@ private:
     std::string m_roomName;
     std::string m_password;
     std::string m_mode;
+    std::string m_shareSource = "media";
+    bool m_shareAudio = false;
     std::vector<Member> m_members;
 
     bool m_playing = false;

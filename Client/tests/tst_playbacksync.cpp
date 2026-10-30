@@ -228,6 +228,101 @@ void testPreparedSourceBoundToActualSource()
     CHECK(!fakePlayback().loads.isEmpty());
 }
 
+// ============================
+// 3. 屏幕共享态：入房快照、广播与模式切换
+// ============================
+
+void testScreenShareState()
+{
+    Fixture f;
+    const QString file = makeTempFile(QStringLiteral("screen.mp4"));
+    CHECK(!file.isEmpty());
+
+    RoomSnapshot snapshot = makeSnapshot(
+        QStringLiteral("room-3"), QStringLiteral("share"),
+        {makeMember(QStringLiteral("client-self"), QStringLiteral("我"), true),
+         makeMember(QStringLiteral("other"), QStringLiteral("B"), false)},
+        makeItem(QStringLiteral("item-1")));
+    snapshot.shareSource = QStringLiteral("screen");
+    snapshot.shareAudio = true;
+
+    int seekableNotifies = 0;
+    QObject::connect(&f.sync, &PlaybackSync::seekableChanged, &f.room,
+                     [&seekableNotifies] { ++seekableNotifies; });
+
+    f.room.enterRoom(snapshot);
+    CHECK(f.room.shareSource() == RoomSession::ShareSource::Screen);
+    CHECK(f.room.shareAudio());
+    CHECK(f.room.screenSharing());
+    CHECK(!f.sync.seekable());
+    CHECK(seekableNotifies > 0);
+
+    // 房主停止共享：服务端广播 media
+    f.network.messageReceived(
+        QStringLiteral(R"({"type":"share_state","source":"media","audio":false})"));
+    CHECK(f.room.shareSource() == RoomSession::ShareSource::Media);
+    CHECK(!f.room.screenSharing());
+
+    // 停止共享后进度条必须恢复可 seek（替换真实播放器的替身报告可 seek）。
+    fakePlayback().seeks.clear();
+    CHECK(f.sync.seekable());
+    f.sync.seek(1234);
+    CHECK(fakePlayback().seeks == QList<qint64>({1234}));
+
+    // 房主本地请求立即生效（不等服务端回声），这样停止共享后进度条不会
+    // 多锁一个 RTT；没有连接时发送会失败，但本地状态仍应更新。
+    f.room.setShareState(RoomSession::ShareSource::Screen, false);
+    CHECK(f.room.screenSharing());
+
+    // 屏幕共享期间不允许直接切到其他视频：必须在界面上先停止共享。
+    // 门禁在 RoomSession::switchTo 里（服务端只校验房主，不知道共享态）。
+    QString switchError;
+    QObject::connect(&f.room, &RoomSession::errorOccurred, &f.room,
+                     [&switchError](const QString &message) { switchError = message; });
+    f.room.switchTo(QStringLiteral("item-2"));
+    CHECK(switchError.contains(QStringLiteral("停止共享")));
+
+    f.room.setShareState(RoomSession::ShareSource::Media, false);
+    CHECK(!f.room.screenSharing());
+    switchError.clear();
+    f.room.switchTo(QStringLiteral("item-2"));
+    CHECK(switchError.isEmpty());
+
+    // 窗口共享 + 切回本地模式：模式变化必须清掉共享源
+    f.network.messageReceived(
+        QStringLiteral(R"({"type":"share_state","source":"window","audio":false})"));
+    CHECK(f.room.screenSharing());
+    f.network.messageReceived(
+        QStringLiteral(R"({"type":"room_mode_changed","mode":"local"})"));
+    CHECK(f.room.shareSource() == RoomSession::ShareSource::Media);
+    CHECK(!f.room.screenSharing());
+
+    // playlistAboutToSwitch 必须早于 playlistSwitched 发出：
+    // main.cpp 依赖它在 PlaybackSync 加载新条目前停止屏幕共享。
+    QStringList switchOrder;
+    QObject::connect(&f.room, &RoomSession::playlistAboutToSwitch, &f.room,
+                     [&switchOrder](const QString &) { switchOrder << "about"; });
+    QObject::connect(&f.room, &RoomSession::playlistSwitched, &f.room,
+                     [&switchOrder](const QString &) { switchOrder << "switched"; });
+    f.network.messageReceived(
+        QStringLiteral(R"({"type":"playlist_switched","itemId":"item-1",)"
+                       R"("currentIndex":0})"));
+    CHECK(switchOrder == QStringList({"about", "switched"}));
+
+    // 观众端：room_joined 随快照带 screen 时也进入共享态
+    Fixture viewer;
+    RoomSnapshot viewerSnapshot = makeSnapshot(
+        QStringLiteral("room-4"), QStringLiteral("share"),
+        {makeMember(QStringLiteral("client-self"), QStringLiteral("我"), false),
+         makeMember(QStringLiteral("host"), QStringLiteral("房主"), true)},
+        makeItem(QStringLiteral("item-1")));
+    viewerSnapshot.shareSource = QStringLiteral("window");
+    viewer.room.enterRoom(viewerSnapshot);
+    CHECK(viewer.room.screenSharing());
+    CHECK(viewer.room.shareSource() == RoomSession::ShareSource::Window);
+    CHECK(!viewer.sync.seekable());
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -243,6 +338,7 @@ int main(int argc, char **argv)
 
     testMemberRefreshDoesNotRebuildMedia();
     testPreparedSourceBoundToActualSource();
+    testScreenShareState();
 
     if (g_failures == 0) {
         std::printf("playbacksync: all checks passed\n");

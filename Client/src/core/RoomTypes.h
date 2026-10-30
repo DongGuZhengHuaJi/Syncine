@@ -84,6 +84,9 @@ struct RoomSnapshot {
     QString roomId;
     QString roomName;
     QString mode;               // 线路格式："local" / "share" / "url"
+    // 共享模式当前共享源："media" / "screen" / "window"
+    QString shareSource = QStringLiteral("media");
+    bool shareAudio = false;
     QString clientId;           // 自身的 clientId（来自 welcome 握手）
     QList<Member> members;
     bool hasState = false;      // 服务端是否下发了 state（未下发则不要对齐播放器）

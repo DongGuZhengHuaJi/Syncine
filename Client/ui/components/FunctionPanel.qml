@@ -518,16 +518,18 @@ Rectangle {
                             }
                         }
 
-                        // 非当前条目：房主可以切过去
+                        // 非当前条目：房主可以切过去。
+                        // 屏幕共享期间不能切：先停止共享，电影共享才会重新可用。
                         Text {
                             visible: !isCurrent && roomSession.isHost
                             Layout.alignment: Qt.AlignVCenter
-                            text: "切到此条"
+                            text: roomSession.screenSharing ? "停止共享后可切换" : "切到此条"
                             font.pixelSize: 12
-                            color: Style.accent
+                            color: roomSession.screenSharing ? Style.textFaint : Style.accent
                             MouseArea {
                                 anchors.fill: parent
                                 anchors.margins: -6
+                                enabled: !roomSession.screenSharing
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: roomSession.switchTo(itemId)
                             }

@@ -56,6 +56,19 @@ bool RoomSession::isHost() const {
     return m_members->isHost(m_clientId);
 }
 
+RoomSession::ShareSource RoomSession::shareSource() const {
+    return m_shareSource;
+}
+
+bool RoomSession::shareAudio() const {
+    return m_shareAudio;
+}
+
+bool RoomSession::screenSharing() const {
+    return m_inRoom && m_roomMode == RoomMode::Share
+           && m_shareSource != ShareSource::Media;
+}
+
 bool RoomSession::isMemberOnline(const QString &clientId) const {
     return m_members != nullptr && m_members->isOnline(clientId);
 }
@@ -152,6 +165,20 @@ void RoomSession::enterRoom(const RoomSnapshot &snapshot) {
     const bool modeChanged = m_roomMode != mode;
     m_roomMode = mode;
 
+    // 共享源只对共享模式有意义；其他模式强制回到 media，避免换模式后
+    // 残留上一轮的 screen/window 状态。
+    const ShareSource incomingShareSource =
+        mode == RoomMode::Share
+            ? shareSourceFromWire(snapshot.shareSource)
+            : ShareSource::Media;
+    const bool incomingShareAudio = mode == RoomMode::Share
+                                    && incomingShareSource != ShareSource::Media
+                                    && snapshot.shareAudio;
+    const bool shareChanged = m_shareSource != incomingShareSource
+                              || m_shareAudio != incomingShareAudio;
+    m_shareSource = incomingShareSource;
+    m_shareAudio = incomingShareAudio;
+
     const bool mismatchChanged = m_videoMismatched != snapshot.videoMismatched
                                  || m_shortestDuration != snapshot.shortestDuration;
     m_videoMismatched = snapshot.videoMismatched;
@@ -170,6 +197,9 @@ void RoomSession::enterRoom(const RoomSnapshot &snapshot) {
         emit videoMismatchChanged();
     if (!wasInRoom)
         emit inRoomChanged();
+    // screenSharing 还依赖 inRoom/mode；即使共享源没变也要让界面重算一次。
+    if (shareChanged || modeChanged || !wasInRoom)
+        emit shareStateChanged();
 
     // 播放列表随房间状态一并下发：队列 + 当前条目
     m_playlist->reset(snapshot.playlist, snapshot.currentIndex);
@@ -228,6 +258,10 @@ void RoomSession::clearRoomState() {
     const bool modeChanged = m_roomMode != RoomMode::Sync;
     m_roomMode = RoomMode::Sync;
 
+    const bool shareChanged = m_shareSource != ShareSource::Media || m_shareAudio;
+    m_shareSource = ShareSource::Media;
+    m_shareAudio = false;
+
     const bool mismatchChanged = m_videoMismatched || m_shortestDuration != 0;
     m_videoMismatched = false;
     m_shortestDuration = 0;
@@ -237,6 +271,8 @@ void RoomSession::clearRoomState() {
     emit inRoomChanged();
     if (modeChanged)
         emit roomModeChanged();
+    if (shareChanged || modeChanged)
+        emit shareStateChanged();
     if (mismatchChanged)
         emit videoMismatchChanged();
 }
@@ -261,6 +297,33 @@ void RoomSession::setRoomMode(RoomMode mode) {
     // 本地状态等服务端的 room_mode_changed 广播回来再改，保证全员一致
     if (!send(Protocol::encodeSetRoomMode(modeToWire(mode))))
         emit errorOccurred("未连接到服务器");
+}
+
+void RoomSession::setShareState(ShareSource source, bool audio) {
+    if (!m_inRoom) {
+        LOG_WARN("Room") << "切换共享源被拒：当前不在房间中";
+        emit errorOccurred(QStringLiteral("当前不在房间中"));
+        return;
+    }
+    if (!isHost()) {
+        LOG_WARN("Room") << "切换共享源被拒：非房主";
+        emit errorOccurred(QStringLiteral("只有房主可以共享屏幕"));
+        return;
+    }
+    if (m_roomMode != RoomMode::Share) {
+        LOG_WARN("Room") << "切换共享源被拒：不在共享模式";
+        emit errorOccurred(QStringLiteral("屏幕共享仅在共享模式下可用"));
+        return;
+    }
+
+    LOG_INFO("Room") << "请求切换共享源:" << shareSourceToWire(source)
+                     << (audio ? "(含声音)" : "");
+    // 房主本地先改：采集开关、播放门控都依赖这个状态，若等网络来回，
+    // 停止共享后进度条会多锁住一个 RTT。观众侧仍以服务端广播为准；
+    // 服务端若拒绝，后续的 share_state 会把它纠正回来。
+    applyShareState(source, audio);
+    if (!send(Protocol::encodeSetShareState(shareSourceToWire(source), audio)))
+        emit errorOccurred(QStringLiteral("未连接到服务器"));
 }
 
 void RoomSession::sendChat(const QString &text) {
@@ -413,6 +476,15 @@ void RoomSession::switchTo(const QString &itemId) {
     if (!m_inRoom || itemId.isEmpty())
         return;
 
+    // 屏幕共享与「房主共享本地电影」互斥。共享期间不允许直接切到另一条视频：
+    // 否则要么静默停掉共享（当前条目已在观众侧消失），要么在新电影加载的同时
+    // 还占着采集预览。要求用户先显式停止共享，状态变化只有一个入口。
+    if (screenSharing()) {
+        LOG_WARN("Room") << "屏幕共享期间切换条目被拒: itemId=" << itemId;
+        emit errorOccurred(QStringLiteral("请先停止共享屏幕，再切换到其他视频"));
+        return;
+    }
+
     LOG_INFO("Room") << "请求切换到条目: itemId=" << itemId;
     send(Protocol::encodePlaylistSwitch(itemId));
 }
@@ -462,10 +534,22 @@ void RoomSession::onMessage(const QString &text) {
         const RoomMode mode = modeFromWire(message->mode);
         if (mode != m_roomMode) {
             m_roomMode = mode;
+            // 服务端在切模式时也会重置共享源；这里同步一份，
+            // 避免 share_state 广播到达前界面还显示上一轮的共享态。
+            const bool shareChanged = m_shareSource != ShareSource::Media
+                                      || m_shareAudio;
+            m_shareSource = ShareSource::Media;
+            m_shareAudio = false;
             emit roomModeChanged();
+            if (shareChanged || m_roomMode != RoomMode::Share)
+                emit shareStateChanged();
         }
         break;
     }
+
+    case Protocol::MessageType::ShareState:
+        handleShareState(*message);
+        break;
 
     case Protocol::MessageType::VideoStatus:
         handleVideoStatus(*message);
@@ -551,6 +635,30 @@ void RoomSession::handlePlayback(const Protocol::Message &message) {
                                  message.rate);
 }
 
+void RoomSession::handleShareState(const Protocol::Message &message) {
+    // 共享源只对共享模式有意义；服务端只会给共享模式广播，
+    // 但旧服务端/乱序消息也可能把 media 之外的源带进来。
+    if (m_roomMode != RoomMode::Share)
+        return;
+
+    applyShareState(shareSourceFromWire(message.shareSource),
+                    message.shareAudio);
+}
+
+void RoomSession::applyShareState(ShareSource source, bool audio) {
+    if (source == ShareSource::Media)
+        audio = false;
+
+    if (m_shareSource == source && m_shareAudio == audio)
+        return;
+
+    m_shareSource = source;
+    m_shareAudio = audio;
+    LOG_INFO("Room") << "共享源更新:" << shareSourceToWire(source)
+                     << (audio ? "(含声音)" : "");
+    emit shareStateChanged();
+}
+
 void RoomSession::handleVideoStatus(const Protocol::Message &message) {
     // 只有属于当前条目的状态才有效：切模式/切条目后，旧条目的延迟上报
     // （不论是 loaded=true 还是卸载）都会把成员表改回旧状态，误导门禁。
@@ -583,6 +691,11 @@ void RoomSession::handlePlaylistChanged(const Protocol::Message &message) {
 }
 
 void RoomSession::handlePlaylistSwitched(const Protocol::Message &message) {
+    // 先让上层处理「切换前」事务（例如停止屏幕共享），再改当前条目。
+    // PlaybackSync 的 playlistSwitched 处理器依赖这个顺序：它加载新条目时，
+    // 采集预览必须已经关闭、播放器已经重新接回 VideoOutput。
+    emit playlistAboutToSwitch(message.itemId);
+
     m_playlist->setCurrentIndex(message.currentIndex);
 
     // 以 model 中的状态为准（itemId 与 currentIndex 一致）；
@@ -663,6 +776,26 @@ RoomSession::RoomMode RoomSession::modeFromWire(const QString &mode) {
     if (mode == QLatin1String("url"))
         return RoomMode::Url;
     return RoomMode::Sync;
+}
+
+QString RoomSession::shareSourceToWire(ShareSource source) {
+    switch (source) {
+    case ShareSource::Screen:
+        return QStringLiteral("screen");
+    case ShareSource::Window:
+        return QStringLiteral("window");
+    case ShareSource::Media:
+        break;
+    }
+    return QStringLiteral("media");
+}
+
+RoomSession::ShareSource RoomSession::shareSourceFromWire(const QString &source) {
+    if (source == QLatin1String("screen"))
+        return ShareSource::Screen;
+    if (source == QLatin1String("window"))
+        return ShareSource::Window;
+    return ShareSource::Media;
 }
 
 QString RoomSession::actionToWire(PlaybackAction action) {

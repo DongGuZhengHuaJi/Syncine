@@ -226,6 +226,8 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
         reply["resumeToken"] = room->resumeTokenFor(session);
         reply["roomName"] = room->roomName();
         reply["mode"] = room->mode();
+        reply["shareSource"] = room->shareSource();
+        reply["shareAudio"] = room->shareAudio();
         reply["members"] = room->membersArray();
         reply["state"] = room->stateJson(); // 建房者即房主，播放列表给全
         reply["videoMismatched"] = room->videoMismatched();
@@ -287,6 +289,9 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
         reply["resumeToken"] = targetRoom->resumeTokenFor(session);
         reply["roomName"] = targetRoom->roomName();
         reply["mode"] = targetRoom->mode();
+        // 共享源随入房消息下发：迟到者不必等 DataChannel/额外消息。
+        reply["shareSource"] = targetRoom->shareSource();
+        reply["shareAudio"] = targetRoom->shareAudio();
         reply["members"] = targetRoom->membersArray();
         // 共享模式下播放列表是房主自己的文件清单，观众不参与，给空列表
         reply["state"] = targetRoom->stateJson(targetRoom->mode() != "share"
@@ -356,6 +361,8 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
         reply["resumeToken"] = room->resumeTokenFor(session);
         reply["roomName"] = room->roomName();
         reply["mode"] = room->mode();
+        reply["shareSource"] = room->shareSource();
+        reply["shareAudio"] = room->shareAudio();
         reply["members"] = room->membersArray();
         reply["state"] = room->stateJson(room->mode() != "share"
                                          || room->isHost(session));
@@ -409,6 +416,8 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
         }
 
         const std::string beforeItem = room->currentItemId();
+        const std::string beforeShareSource = room->shareSource();
+        const bool beforeShareAudio = room->shareAudio();
         room->setMode(mode);
         // 换模式等于换一份播放列表：当前条目变了，旧的成员视频状态全部作废
         if (room->currentItemId() != beforeItem)
@@ -419,6 +428,17 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
         notice["type"] = "room_mode_changed";
         notice["mode"] = mode;
         room->broadcast(notice);
+
+        // 换模式会重置共享源；有变化时补一条 share_state，观众端据此
+        // 立即退出屏幕共享的播放门控。
+        if (room->shareSource() != beforeShareSource
+            || room->shareAudio() != beforeShareAudio) {
+            json share;
+            share["type"] = "share_state";
+            share["source"] = room->shareSource();
+            share["audio"] = room->shareAudio();
+            room->broadcast(share);
+        }
 
         // 播放列表按模式各存一份，换模式等于换了一份列表，需推送新的那份，
         // 否则界面上仍显示上一个模式的条目
@@ -458,6 +478,48 @@ void LogicSystem::dispatchMessage(const std::shared_ptr<Session> &session,
         broadcastMismatchIfChanged(room);
 
         LOG_INFO("Logic") << "房间 " << roomIt->second << " 模式切换: " << mode;
+        return;
+    }
+
+    if (type == "set_share_state") {
+        auto roomIt = m_sessionRooms.find(session);
+        if (roomIt == m_sessionRooms.end()) {
+            replyError(session, "not_in_room", "当前不在房间中");
+            return;
+        }
+        auto it = m_rooms.find(roomIt->second);
+        if (it == m_rooms.end()) {
+            replyError(session, "not_in_room", "当前不在房间中");
+            return;
+        }
+        const auto room = it->second;
+
+        if (!room->isHost(session)) {
+            replyError(session, "not_host", "只有房主可以共享屏幕");
+            return;
+        }
+        if (room->mode() != "share") {
+            replyError(session, "bad_message", "屏幕共享仅在共享模式下可用");
+            return;
+        }
+
+        std::string source = message.value("source", "media");
+        if (source != "media" && source != "screen" && source != "window") {
+            replyError(session, "bad_message", "未知的共享源");
+            return;
+        }
+        const bool audio = message.value("audio", false);
+        room->setShareState(std::move(source), audio);
+
+        json share;
+        share["type"] = "share_state";
+        share["source"] = room->shareSource();
+        share["audio"] = room->shareAudio();
+        room->broadcast(share);
+
+        LOG_INFO("Logic") << "房间 " << roomIt->second << " 共享源切换: "
+                          << room->shareSource()
+                          << (room->shareAudio() ? " (含声音)" : "");
         return;
     }
 

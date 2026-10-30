@@ -69,6 +69,10 @@ public:
     void pushPcm(const int16_t *data, size_t samplesPerChannel,
                  int sampleRate, size_t channels);
 
+    // 清空攒帧缓冲。电影音频与系统声音切换、开始/停止屏幕共享时调用，
+    // 避免旧格式/旧来源的半个 10ms 块和新数据拼在一起。
+    void reset();
+
 protected:
     // 受保护的析构：引用计数归零时由 scoped_refptr 释放，不允许在栈上或
     // 通过 delete 直接销毁。这是 WebRTC 引用计数类的惯例。

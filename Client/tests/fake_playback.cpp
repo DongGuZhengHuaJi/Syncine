@@ -28,6 +28,7 @@ void FakePlaybackLog::clear()
 {
     loads.clear();
     unloads = 0;
+    seeks.clear();
 }
 
 // ============================
@@ -51,7 +52,7 @@ bool PlaybackController::playing() const
 
 bool PlaybackController::seekable() const
 {
-    return false;
+    return g_log.seekable;
 }
 
 qint64 PlaybackController::position() const
@@ -173,8 +174,9 @@ void PlaybackController::togglePlayPause()
 {
 }
 
-void PlaybackController::seek(qint64)
+void PlaybackController::seek(qint64 position)
 {
+    g_log.seeks.append(position);
 }
 
 void PlaybackController::seekRelative(qint64)

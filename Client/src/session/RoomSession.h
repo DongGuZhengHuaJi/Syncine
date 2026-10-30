@@ -56,6 +56,21 @@ class RoomSession : public QObject {
                READ isHost
                NOTIFY isHostChanged)
 
+    // 共享模式当前共享源。Media = 房主本地电影；Screen/Window = 屏幕共享。
+    // 由服务端 share_state / room_joined 下发，房主通过 setShareState 请求。
+    Q_PROPERTY(ShareSource shareSource
+               READ shareSource
+               NOTIFY shareStateChanged)
+
+    Q_PROPERTY(bool shareAudio
+               READ shareAudio
+               NOTIFY shareStateChanged)
+
+    // 派生量：当前是否处于「屏幕/窗口共享」状态。观众端据此禁用电影控制。
+    Q_PROPERTY(bool screenSharing
+               READ screenSharing
+               NOTIFY shareStateChanged)
+
     // 成员表本身是 model,内容变化由 model 自己的信号通知 QML
     Q_PROPERTY(MemberModel *members
                READ members
@@ -95,6 +110,14 @@ public:
     };
     Q_ENUM(PlaybackAction)
 
+    // 共享源。Media 是旧行为（房主推本地电影），Screen/Window 是屏幕共享。
+    enum class ShareSource {
+        Media,
+        Screen,
+        Window,
+    };
+    Q_ENUM(ShareSource)
+
     explicit RoomSession(NetworkManager *networkManager, QObject *parent = nullptr);
     ~RoomSession() override = default;
 
@@ -105,6 +128,9 @@ public:
     QString clientId() const;
     RoomMode roomMode() const;
     bool isHost() const;
+    ShareSource shareSource() const;
+    bool shareAudio() const;
+    bool screenSharing() const;
     // 某成员当前是否在线（断线等待重连期间为 false）
     bool isMemberOnline(const QString &clientId) const;
     MemberModel *members() const;
@@ -139,6 +165,10 @@ public:
     // ---- QML 调用的房间内操作 ----
     Q_INVOKABLE void setRoomMode(RoomMode mode);
     Q_INVOKABLE void sendChat(const QString &text);
+
+    // 房主请求切换共享源。与 setRoomMode 一样，本地状态等服务端广播回来再改；
+    // 采集的启停由 main.cpp 根据 shareStateChanged 驱动。
+    Q_INVOKABLE void setShareState(ShareSource source, bool audio);
 
     // ---- 播放列表（QML 调用） ----
     //
@@ -187,6 +217,7 @@ signals:
     void clientIdChanged();
     void roomModeChanged();
     void isHostChanged();
+    void shareStateChanged();
     void videoMismatchChanged();
 
     // 成员表内容变化（增删改），供 C++ 侧重算派生量
@@ -209,6 +240,10 @@ signals:
     // itemId 为空表示当前无条目（列表已空），此时应卸载播放器。
     void playlistSwitched(const QString &itemId);
 
+    // 在真正切换之前发出（早于上面的 playlistSwitched）。共享期间切条目要先停
+    // 屏幕共享：等 PlaybackSync 加载完新条目再停，播放器/预览状态会对不上。
+    void playlistAboutToSwitch(const QString &itemId);
+
     // 收到房主的位置广播（非命令——仅用于更新界面，不驱动本地播放器）
     void playbackPositionReceived(qint64 position, bool playing);
 
@@ -223,6 +258,7 @@ private:
     void handleMemberOnline(const Protocol::Message &message);
     void handleMemberOffline(const Protocol::Message &message);
     void handlePlayback(const Protocol::Message &message);
+    void handleShareState(const Protocol::Message &message);
     void handleVideoStatus(const Protocol::Message &message);
     void handleVideoMismatch(const Protocol::Message &message);
     void handlePlaylistChanged(const Protocol::Message &message);
@@ -238,6 +274,10 @@ private:
 
     static QString modeToWire(RoomMode mode);
     static RoomMode modeFromWire(const QString &mode);
+    static QString shareSourceToWire(ShareSource source);
+    static ShareSource shareSourceFromWire(const QString &source = QString());
+    // 更新共享源；仅在值真正变化时发 shareStateChanged。
+    void applyShareState(ShareSource source, bool audio);
     static QString actionToWire(PlaybackAction action);
     static PlaybackAction actionFromWire(const QString &action);
 
@@ -251,6 +291,8 @@ private:
     bool m_inRoom = false;
     bool m_isHost = false;
     RoomMode m_roomMode = RoomMode::Sync;
+    ShareSource m_shareSource = ShareSource::Media;
+    bool m_shareAudio = false;
     bool m_videoMismatched = false;
     qint64 m_shortestDuration = 0;
     // 每次上报 video_status 递增；服务端据此丢弃乱序到达的旧状态

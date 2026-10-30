@@ -33,6 +33,8 @@ enum class MessageType {
     Playback,
     PlaybackPosition,   // 房主周期性广播的播放位置（观众据此绘制进度条）
     RoomModeChanged,
+    // 共享模式下的共享源变化（房主广播）：media / screen / window
+    ShareState,
     VideoStatus,
     VideoMismatch,
     PlaylistChanged,    // 列表内容变化（增/删）；带完整列表 + currentIndex
@@ -62,6 +64,10 @@ struct Message {
     QString roomId;
     QString roomName;
     QString mode;               // 线路格式："local" / "share" / "url"
+    // 共享模式当前共享源（room_created / room_joined 顶层与 share_state 共用）：
+    // "media"（房主本地电影）/ "screen" / "window"
+    QString shareSource = QStringLiteral("media");
+    bool shareAudio = false;
     QList<Member> members;
     bool videoMismatched = false;
     qint64 shortestDuration = 0;
@@ -139,6 +145,9 @@ QString encodeResume(const QString &roomId,
 QString encodeLeaveRoom();
 
 QString encodeSetRoomMode(const QString &mode);
+
+// 共享源（仅房主、仅共享模式）。source: "media" / "screen" / "window"
+QString encodeSetShareState(const QString &source, bool audio);
 
 QString encodeChat(const QString &text);
 

@@ -6,6 +6,13 @@
 
 ### 共享模式
 
+- **系统声音排除自身**：共享系统声音时不再把房间语音采回去。Windows 使用 WASAPI
+  进程回环（`EXCLUDE_TARGET_PROCESS_TREE`），失败回退整机 loopback；Linux 使用
+  虚拟 Sink + 流路由（`module-null-sink` + `module-loopback`），把其他应用的流
+  移到虚拟 Sink、本进程的流留在真实 Sink，再采集虚拟 Sink 的 monitor。
+  `SYNCINE_SCREEN_AUDIO_ISOLATE=0` / `SYNCINE_SCREEN_AUDIO_PROCESS_LOOPBACK=0`
+  可强制回退。Linux 实测隔离模式 ADM 开关前后房间语音能量差约 0dB，回退模式约
+  14dB；Windows 进程回环分支待真机验证。
 - **观众端停止推流**：视频与电影声的发送开关改为“共享模式且是房主”才开启，通过
   `encodings[0].active` 真正停止 RTP；观众端同时停止喂帧和 PCM，不再占用上行带宽。
 - **建连即停发**：视频轨的初始 `active` 随 `AddTrack` 传入，连接建立后再补写一次，

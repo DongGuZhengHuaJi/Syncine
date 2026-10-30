@@ -23,6 +23,9 @@ struct FakePlaybackLog {
     // 最近一次 load/unload 之后播放器的源；无效 = 未加载
     QUrl source;
     bool showingRemote = false;
+    // 替身默认报告可 seek；测试可据此验证共享门控解除后进度条恢复。
+    bool seekable = true;
+    QList<qint64> seeks;
 
     // 只清调用记录，不动 source（source 是播放器状态，不是调用日志）
     void clear();

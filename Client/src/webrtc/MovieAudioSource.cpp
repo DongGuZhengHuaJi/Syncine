@@ -38,6 +38,13 @@ void MovieAudioSource::RemoveSink(webrtc::AudioTrackSinkInterface *sink) {
                   m_sinks.end());
 }
 
+void MovieAudioSource::reset() {
+    webrtc::MutexLock lock(&m_sinkLock);
+    m_pending.clear();
+    m_pendingSampleRate = 0;
+    m_pendingChannels = 0;
+}
+
 void MovieAudioSource::pushPcm(const int16_t *data, size_t samplesPerChannel,
                                int sampleRate, size_t channels) {
     // 参数自检。调用方（WebrtcManager）已经把过关，这里是纵深防御：

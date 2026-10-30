@@ -30,6 +30,26 @@ void Room::setMode(const std::string &mode) {
         return;
     LOG_DEBUG("Room") << "模式切换: " << m_mode << " → " << mode;
     m_mode = mode;
+    // 共享源属于当前模式；切走/换回都从「房主本地电影」重新开始。
+    m_shareSource = "media";
+    m_shareAudio = false;
+}
+
+const std::string &Room::shareSource() const {
+    return m_shareSource;
+}
+
+bool Room::shareAudio() const {
+    return m_shareAudio;
+}
+
+void Room::setShareState(std::string source, bool audio) {
+    if (source != "screen" && source != "window")
+        source = "media";
+    if (source == "media")
+        audio = false;
+    m_shareSource = std::move(source);
+    m_shareAudio = audio;
 }
 
 bool Room::hasPassword() const {

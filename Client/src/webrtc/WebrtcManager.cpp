@@ -1091,6 +1091,28 @@ void WebrtcManager::setLocalVideoEnabled(bool enabled) {
                        << "(当前" << m_peers.size() << "个对端)";
 }
 
+void WebrtcManager::setScreenShareActive(bool active) {
+    if (m_videoSource != nullptr)
+        m_videoSource->setScreenCast(active);
+
+    // content_hint 有线程约束（RTC_DCHECK_RUN_ON(signaling_thread_)），
+    // 必须在 media 工厂的信令线程上设置。轨道为所有 media 连接共用，
+    // 改一次即对所有观众生效。
+    if (m_localVideoTrack != nullptr && m_mediaSignalingThread != nullptr
+        && m_initialized) {
+        const webrtc::scoped_refptr<webrtc::VideoTrackInterface> track =
+            m_localVideoTrack;
+        m_mediaSignalingThread->BlockingCall([track, active] {
+            track->set_content_hint(
+                active ? webrtc::VideoTrackInterface::ContentHint::kText
+                       : webrtc::VideoTrackInterface::ContentHint::kNone);
+        });
+    }
+
+    LOG_DEBUG("WebRTC") << (active ? "切换到屏幕共享编码模式"
+                                   : "切回普通视频编码模式");
+}
+
 void WebrtcManager::setLocalVideoSending(bool enabled) {
     if (m_videoSending == enabled)
         return;
@@ -1236,6 +1258,11 @@ void WebrtcManager::pushMovieAudioPcm(const int16_t *data, size_t samplesPerChan
     }
 
     m_movieAudioSource->pushPcm(data, samplesPerChannel, sampleRate, channels);
+}
+
+void WebrtcManager::resetSharedAudio() {
+    if (m_movieAudioSource != nullptr)
+        m_movieAudioSource->reset();
 }
 
 webrtc::scoped_refptr<webrtc::AudioTrackInterface> WebrtcManager::getOrCreateMovieAudioTrack() {

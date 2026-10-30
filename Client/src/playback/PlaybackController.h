@@ -120,6 +120,12 @@ public:
     bool showingRemote() const;
     void setShowingRemote(bool showing);
 
+    // 屏幕共享时的本机预览：房主的界面显示正在推出去的那一路画面，
+    // 而不是停在已暂停电影的最后一帧/黑屏。开启时播放器与 VideoOutput 脱钩；
+    // 关闭时恢复本地播放器。只影响显示，不影响推流（帧由 main.cpp 另送一份）。
+    void setScreenSharePreviewActive(bool active);
+    void presentScreenShareFrame(const QVideoFrame &frame);
+
     // 远端画面往哪送 —— 就是界面那个 VideoOutput 的 sink。
     // 由 WebrtcManager 的远端渲染器往这里推帧。
     QVideoSink *remoteSinkForRenderer() const {
@@ -220,6 +226,8 @@ private:
     WebrtcManager *m_webrtcManager = nullptr;
 
     bool m_showingRemote = false;
+    // 屏幕共享本机预览：显示采集帧，播放器暂时不往 outputSink 送。
+    bool m_screenSharePreview = false;
     // 播放器因卸载/换源/播完而停止，不是用户主动暂停。PlaybackSync 据此
     // 不广播 Pause，避免把房间里的其他人按停。
     bool m_lifecycleStop = false;

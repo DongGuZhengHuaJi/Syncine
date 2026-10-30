@@ -92,6 +92,15 @@ PlaybackSync::PlaybackSync(RoomSession *session,
     // ---- 房间 -> 本地播放器 / 同步状态 ----
     connect(m_session, &RoomSession::playbackCommandReceived,
             this, &PlaybackSync::onRemoteCommand);
+
+    // seekable() 现在也取决于共享态。QML 对 seekable 的绑定只会在
+    // seekableChanged 时重算，共享开始/结束时必须显式通知一次，
+    // 否则停止共享后进度条会停留在禁用状态。
+    connect(m_session, &RoomSession::shareStateChanged,
+            this, [this] {
+                emit seekableChanged();
+                emit gateChanged();
+            });
     connect(m_session, &RoomSession::playbackPositionReceived,
             this, &PlaybackSync::onPositionUpdate);
 
@@ -174,7 +183,14 @@ bool PlaybackSync::playing() const {
     return m_playback != nullptr && m_playback->playing();
 }
 
+bool PlaybackSync::screenSharing() const {
+    return m_session != nullptr && m_session->screenSharing();
+}
+
 bool PlaybackSync::seekable() const {
+    if (screenSharing())
+        return false;
+
     if (m_showRemote)
         return m_syncedDuration > 0;      // 知道时长就能拖进度条
 
@@ -454,6 +470,9 @@ void PlaybackSync::retryItem(const QString &itemId)
 // ============================
 
 void PlaybackSync::play() {
+    if (screenSharing())
+        return;
+
     // 观众：自己没有媒体，直接给房间发命令。
     // 乐观置位让界面立刻响应；房主执行后会周期回传状态做最终确认。
     if (m_showRemote && m_session->inRoom()) {
@@ -468,6 +487,9 @@ void PlaybackSync::play() {
 }
 
 void PlaybackSync::pause() {
+    if (screenSharing())
+        return;
+
     if (m_showRemote && m_session->inRoom()) {
         m_session->sendPlayback(RoomSession::PlaybackAction::Pause, m_syncedPosition);
         updateSyncedState(m_syncedPosition, false);
@@ -486,6 +508,9 @@ void PlaybackSync::togglePlayPause() {
 }
 
 void PlaybackSync::seek(qint64 position) {
+    if (screenSharing())
+        return;
+
     if (m_showRemote && m_session->inRoom()) {
         const qint64 clamped = qBound<qint64>(0, position, m_syncedDuration);
         m_session->sendPlayback(RoomSession::PlaybackAction::Seek, clamped);
@@ -1071,6 +1096,8 @@ void PlaybackSync::onPositionTimer() {
         return;
     if (m_session->roomMode() == RoomSession::RoomMode::Sync)
         return;
+    if (screenSharing())
+        return;
     if (live())
         return;   // 直播没有共同时间轴:位置广播和纠偏都没有意义
     if (!m_playback->playing())
@@ -1111,6 +1138,11 @@ void PlaybackSync::pushVideoStatus() {
 void PlaybackSync::onRemoteCommand(RoomSession::PlaybackAction action, qint64 position,
                                    qreal rate) {
     if (m_session == nullptr || m_playback == nullptr)
+        return;
+
+    // 屏幕共享没有共同电影时间轴。观众端不更新同步状态，房主端不执行
+    // 电影操作，避免共享期间有人按播放/拖动把房主的电影唤醒。
+    if (screenSharing())
         return;
 
     rate = qBound(0.25, rate, 4.0);

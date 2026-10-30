@@ -197,6 +197,9 @@ private slots:
     void onUrlFailed(const QString &message);
 
 private:
+    // 当前是否处于屏幕/窗口共享。共享期间电影控制与命令全部无效，
+    // 观众只接收画面/声音，房主的电影保持暂停。
+    bool screenSharing() const;
     void pushVideoStatus();
     // 房间状态变化的公共处理。reloadMedia 为 false 时只刷新显示/门禁等
     // 派生状态，不碰播放器；成员列表刷新走这条路径，避免无意义地重建解码器。

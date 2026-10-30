@@ -12,7 +12,9 @@ Slider {
     signal interacted()
 
     height: 18
+    // 屏幕共享期间进度条没有意义。房主本地采集与服务端广播的共享态都要算上。
     enabled: playbackSync.seekable
+             && !roomSession.screenSharing && !screenShare.active
 
     from: 0
     to: 1

@@ -9,12 +9,16 @@
 #include <QVideoFrameFormat>
 #include <QtGlobal>
 
+#include <cstdint>
+#include <vector>
+
 #include "core/Log.h"
 
 #include "api/video/i420_buffer.h"
 #include "api/video/nv12_buffer.h"
 #include "libyuv/convert.h"
 #include "libyuv/scale.h"
+#include "libyuv/scale_argb.h"
 #include "libyuv/video_common.h"
 #include "rtc_base/time_utils.h"
 
@@ -39,9 +43,38 @@ uint32_t toLibyuvFourcc(QVideoFrameFormat::PixelFormat format) {
         return libyuv::FOURCC_NV21;
     case QVideoFrameFormat::Format_YUYV:
         return libyuv::FOURCC_YUY2;
+    // ---- RGB 格式（屏幕/窗口采集最常见的就是这些）----
+    //
+    // Qt 的 Format_* 名字按**内存字节顺序**命名，libyuv 的 FourCC 按
+    // 32 位字命名；两者名字相似但对应关系是反的。实测映射：
+    //   QImage::Format_ARGB32（内存 B,G,R,A）↔ Format_BGRA8888，
+    //   而 libyuv 的 FOURCC_ARGB 正是「bgra in memory」。
+    //
+    // 不要凭枚举名直接写成 FOURCC_BGRA，否则红蓝通道会对调且无任何报错。
+    case QVideoFrameFormat::Format_BGRA8888:
+    case QVideoFrameFormat::Format_BGRA8888_Premultiplied:
+    case QVideoFrameFormat::Format_BGRX8888:
+        return libyuv::FOURCC_ARGB;
+    case QVideoFrameFormat::Format_RGBA8888:
+    case QVideoFrameFormat::Format_RGBX8888:
+        return libyuv::FOURCC_ABGR;
+    case QVideoFrameFormat::Format_ARGB8888:
+    case QVideoFrameFormat::Format_ARGB8888_Premultiplied:
+    case QVideoFrameFormat::Format_XRGB8888:
+        return libyuv::FOURCC_BGRA;
+    case QVideoFrameFormat::Format_ABGR8888:
+    case QVideoFrameFormat::Format_XBGR8888:
+        return libyuv::FOURCC_RGBA;
     default:
         return 0;
     }
+}
+
+bool isRgbFourcc(uint32_t fourcc) {
+    return fourcc == libyuv::FOURCC_ARGB
+        || fourcc == libyuv::FOURCC_ABGR
+        || fourcc == libyuv::FOURCC_BGRA
+        || fourcc == libyuv::FOURCC_RGBA;
 }
 
 // 10bit 的两种布局。其 FourCC 为 0（并非「不认识」，而是没有对应的 8bit 四字码），
@@ -73,6 +106,10 @@ VideoTrackSource::~VideoTrackSource() {
 
 void VideoTrackSource::setMaxEncodeHeight(int height) {
     m_maxEncodeHeight.store(qMax(0, height), std::memory_order_relaxed);
+}
+
+void VideoTrackSource::setScreenCast(bool screencast) {
+    m_screencast.store(screencast, std::memory_order_relaxed);
 }
 
 void VideoTrackSource::shutdown() {
@@ -226,6 +263,7 @@ std::optional<webrtc::VideoFrame> VideoTrackSource::convertQtFrame(
     const QVideoFrameFormat::PixelFormat pixelFormat = mapped.surfaceFormat().pixelFormat();
     const uint32_t fourcc = toLibyuvFourcc(pixelFormat);
     const bool tenBit = isTenBit(pixelFormat);
+    const bool rgb = isRgbFourcc(fourcc);
 
     if (fourcc == 0 && !tenBit) {
         static std::atomic<bool> warned{false};
@@ -322,8 +360,83 @@ std::optional<webrtc::VideoFrame> VideoTrackSource::convertQtFrame(
     int ret = 0;
     bool scaledDirectly = false;
 
+    // ---- RGB 源 ----
+    //
+    // 屏幕/窗口采集在 X11 下给 BGRX8888，Windows 常见 BGRA8888；
+    // 这些不在原来的 YUV 分支里，必须单独处理，否则整路视频会被丢弃。
+    //
+    // 缩放用 ARGBScale：它只按 4 字节像素做插值，不解释通道顺序，
+    // 因此对 BGRA/RGBA/ARGB/ABGR 都适用。先缩到目标尺寸再转 I420，
+    // 避免对 4K 帧做整帧 I420 分配。
+    if (rgb) {
+        buffer = webrtc::I420Buffer::Create(outWidth, outHeight);
+
+        const uint8_t *rgbSrc = mapped.planeCount() > 0 ? mapped.bits(0) : nullptr;
+        int rgbStride = mapped.planeCount() > 0 ? mapped.bytesPerLine(0) : 0;
+        if (rgbSrc == nullptr) {
+            ret = -1;
+        }
+
+        // thread_local：worker 与 GUI 回退路径各有一份，避免每帧重新分配。
+        static thread_local std::vector<uint8_t> scaleBuffer;
+        if (ret == 0 && scaleNeeded) {
+            scaleBuffer.resize(static_cast<size_t>(outWidth)
+                               * static_cast<size_t>(outHeight) * 4);
+            ret = libyuv::ARGBScale(
+                rgbSrc, rgbStride, width, height,
+                scaleBuffer.data(), outWidth * 4, outWidth, outHeight,
+                libyuv::kFilterBox);
+            if (ret == 0) {
+                rgbSrc = scaleBuffer.data();
+                rgbStride = outWidth * 4;
+            }
+        }
+
+        if (ret == 0) {
+            switch (fourcc) {
+            case libyuv::FOURCC_ARGB:    // 内存 B,G,R,A
+                ret = libyuv::ARGBToI420(
+                    rgbSrc, rgbStride,
+                    buffer->MutableDataY(), buffer->StrideY(),
+                    buffer->MutableDataU(), buffer->StrideU(),
+                    buffer->MutableDataV(), buffer->StrideV(),
+                    outWidth, outHeight);
+                break;
+            case libyuv::FOURCC_ABGR:    // 内存 R,G,B,A
+                ret = libyuv::ABGRToI420(
+                    rgbSrc, rgbStride,
+                    buffer->MutableDataY(), buffer->StrideY(),
+                    buffer->MutableDataU(), buffer->StrideU(),
+                    buffer->MutableDataV(), buffer->StrideV(),
+                    outWidth, outHeight);
+                break;
+            case libyuv::FOURCC_BGRA:    // 内存 A,R,G,B
+                ret = libyuv::BGRAToI420(
+                    rgbSrc, rgbStride,
+                    buffer->MutableDataY(), buffer->StrideY(),
+                    buffer->MutableDataU(), buffer->StrideU(),
+                    buffer->MutableDataV(), buffer->StrideV(),
+                    outWidth, outHeight);
+                break;
+            case libyuv::FOURCC_RGBA:    // 内存 A,B,G,R
+                ret = libyuv::RGBAToI420(
+                    rgbSrc, rgbStride,
+                    buffer->MutableDataY(), buffer->StrideY(),
+                    buffer->MutableDataU(), buffer->StrideU(),
+                    buffer->MutableDataV(), buffer->StrideV(),
+                    outWidth, outHeight);
+                break;
+            default:
+                ret = -1;
+                break;
+            }
+        }
+
+        scaledDirectly = true;
+    }
+
     // 常见格式直接在源平面上缩放，跳过整帧 4K I420 的分配与搬运。
-    if (scaleNeeded && fourcc == libyuv::FOURCC_I420) {
+    if (!scaledDirectly && scaleNeeded && fourcc == libyuv::FOURCC_I420) {
         buffer = webrtc::I420Buffer::Create(outWidth, outHeight);
         ret = libyuv::I420Scale(
             srcY, srcStrideY, srcU, srcStrideU, srcV, srcStrideV, width, height,
@@ -576,9 +689,9 @@ bool VideoTrackSource::remote() const {
 // ============================
 
 bool VideoTrackSource::is_screencast() const {
-    // 本端发送的是解码后的视频帧，并非屏幕采集。
-    // 该标志会影响编码器的码率策略，取值错误会导致画质异常。
-    return false;
+    // 屏幕上文字多、静态区域多，编码器对 screencast 的调参（关闭自动缩放/
+    // 降噪）更适合这类内容；普通电影/解码帧保持 false。
+    return m_screencast.load(std::memory_order_relaxed);
 }
 
 std::optional<bool> VideoTrackSource::needs_denoising() const {

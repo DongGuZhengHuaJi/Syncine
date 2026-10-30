@@ -100,6 +100,41 @@ find_package(Qt6 REQUIRED COMPONENTS
 )
 
 # ----------------------------------------------------------------------
+# 4.1 系统声音采集的源文件与平台依赖
+#
+# Linux 走 libpulse（Qt/ADM 都过滤 monitor source）；构建机没装
+# libpulse-dev 时仍可编译，只是界面里系统声音开关不可用。
+# Windows 走 WASAPI loopback，需要系统自带的 Mmdevapi/ole32/uuid。
+# ----------------------------------------------------------------------
+
+set(SYNCINE_SYSTEM_AUDIO_SOURCES
+        src/capture/SystemAudioCapture.cpp
+        src/capture/SystemAudioCapture.h
+)
+
+if (WIN32)
+    list(APPEND SYNCINE_SYSTEM_AUDIO_SOURCES
+            src/capture/WasapiLoopbackCapture.cpp
+            src/capture/WasapiLoopbackCapture.h)
+elseif (UNIX AND NOT APPLE)
+    find_package(PkgConfig QUIET)
+    if (PkgConfig_FOUND)
+        pkg_check_modules(SYNCINE_PULSE QUIET libpulse)
+        # pa_simple_* 在独立的 libpulse-simple 里
+        pkg_check_modules(SYNCINE_PULSE_SIMPLE QUIET libpulse-simple)
+    endif()
+
+    # 两个库都在才编译 Linux 后端；否则界面里系统声音开关显示不可用。
+    if (SYNCINE_PULSE_FOUND AND SYNCINE_PULSE_SIMPLE_FOUND)
+        list(APPEND SYNCINE_SYSTEM_AUDIO_SOURCES
+                src/capture/PulseMonitorCapture.cpp
+                src/capture/PulseMonitorCapture.h
+                src/capture/PulseSinkRouter.cpp
+                src/capture/PulseSinkRouter.h)
+    endif()
+endif()
+
+# ----------------------------------------------------------------------
 # 5. WebRTC
 #
 # 路径解析、宏对齐、系统库、CREL 链接器都在 cmake/FindWebRTC.cmake 里，
@@ -212,6 +247,11 @@ qt_add_executable(Syncine
         src/transfer/FileTransferManager.h
         src/transfer/TransferChannels.h
 
+        # capture：屏幕/窗口/系统声音采集（只认识 Qt Multimedia，不认识 WebRTC）
+        src/capture/ScreenShareController.cpp
+        src/capture/ScreenShareController.h
+        ${SYNCINE_SYSTEM_AUDIO_SOURCES}
+
         # webrtc
         src/webrtc/WebrtcManager.cpp
         src/webrtc/WebrtcManager.h
@@ -242,6 +282,7 @@ qt_add_executable(Syncine
 target_include_directories(Syncine
         PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/capture"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/danmaku"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/media"
@@ -299,6 +340,7 @@ qt_add_qml_module(Syncine
         ui/components/PlaybackControl.qml
         ui/components/PlaybackSeekControl.qml
         ui/components/FileTransferDialog.qml
+        ui/components/ScreenShareDialog.qml
 
         # Pages
         ui/pages/SettingsPage.qml
@@ -331,6 +373,18 @@ target_link_libraries(Syncine
         # WebRTC
         WebRTC::WebRTC
 )
+
+if (SYNCINE_PULSE_FOUND AND SYNCINE_PULSE_SIMPLE_FOUND)
+    target_compile_definitions(Syncine PRIVATE SYNCINE_HAVE_PULSE=1)
+    target_include_directories(Syncine PRIVATE ${SYNCINE_PULSE_INCLUDE_DIRS}
+            ${SYNCINE_PULSE_SIMPLE_INCLUDE_DIRS})
+    target_link_libraries(Syncine PRIVATE ${SYNCINE_PULSE_LIBRARIES}
+            ${SYNCINE_PULSE_SIMPLE_LIBRARIES})
+endif()
+
+if (WIN32)
+    target_link_libraries(Syncine PRIVATE ole32 uuid Mmdevapi)
+endif()
 
 # ======================================================================
 # 12.1 纯逻辑测试（不依赖 QML / 网络 / WebRTC 运行时）
@@ -579,6 +633,174 @@ target_link_libraries(syncine_share_memory_probe
 )
 
 add_test(NAME share_memory COMMAND syncine_share_memory_probe)
+
+# ======================================================================
+# 12.5 屏幕/窗口/系统声音采集探针（Phase 0，手动运行）
+#
+# 不属于 CTest：需要真实图形会话，而且会实际抓屏。
+# 用途见 tests/capture_probe.cpp 顶部注释。
+# Linux 额外用 libpulse 枚举 monitor source（只枚举，不录音）；
+# 构建机没有 libpulse-dev 时照样能编译，只是少了这一段输出。
+# ======================================================================
+
+add_executable(syncine_capture_probe
+        tests/capture_probe.cpp
+)
+
+target_link_libraries(syncine_capture_probe
+        PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Multimedia
+)
+
+if (UNIX AND NOT APPLE)
+    find_package(PkgConfig QUIET)
+    if (PkgConfig_FOUND)
+        pkg_check_modules(SYNCINE_PROBE_PULSE QUIET libpulse)
+        if (SYNCINE_PROBE_PULSE_FOUND)
+            target_compile_definitions(syncine_capture_probe
+                    PRIVATE SYNCINE_PROBE_HAVE_PULSE=1)
+            target_include_directories(syncine_capture_probe
+                    PRIVATE ${SYNCINE_PROBE_PULSE_INCLUDE_DIRS})
+            target_link_libraries(syncine_capture_probe
+                    PRIVATE ${SYNCINE_PROBE_PULSE_LIBRARIES})
+        endif()
+    endif()
+endif()
+
+# ======================================================================
+# 12.6 ScreenShareController 冒烟测试（需要真实图形会话，手动运行）
+#
+# 启动一次整屏采集，统计 frameAvailable 的帧率与尺寸。不进 CTest：
+# CI 使用 offscreen，没有屏幕可采。
+# ======================================================================
+
+add_executable(syncine_screenshare_tests
+        tests/tst_screensharecontroller.cpp
+        src/capture/ScreenShareController.cpp
+        src/capture/ScreenShareController.h
+        ${SYNCINE_SYSTEM_AUDIO_SOURCES}
+        src/core/Log.cpp
+        src/core/Log.h
+)
+
+target_include_directories(syncine_screenshare_tests
+        PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/capture"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+)
+
+target_link_libraries(syncine_screenshare_tests
+        PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Multimedia
+)
+
+if (SYNCINE_PULSE_FOUND AND SYNCINE_PULSE_SIMPLE_FOUND)
+    target_compile_definitions(syncine_screenshare_tests
+            PRIVATE SYNCINE_HAVE_PULSE=1)
+    target_include_directories(syncine_screenshare_tests
+            PRIVATE ${SYNCINE_PULSE_INCLUDE_DIRS}
+            ${SYNCINE_PULSE_SIMPLE_INCLUDE_DIRS})
+    target_link_libraries(syncine_screenshare_tests
+            PRIVATE ${SYNCINE_PULSE_LIBRARIES}
+            ${SYNCINE_PULSE_SIMPLE_LIBRARIES})
+endif()
+
+# 控制器在 Linux 下直接用 Xlib 解析无标题窗口的 WM_CLASS/PID。
+# 主程序通过 WebRTC::WebRTC 已间接链接 X11，这个测试目标需要显式链接。
+if (UNIX AND NOT APPLE)
+    target_link_libraries(syncine_screenshare_tests PRIVATE X11)
+endif()
+
+if (WIN32)
+    target_link_libraries(syncine_screenshare_tests PRIVATE ole32 uuid Mmdevapi)
+endif()
+
+# ======================================================================
+# 12.7 屏幕共享本机预览（PlaybackController）
+#
+# 采集帧应出现在界面的 QVideoSink 上，但不能从 onVideoFrame 回灌进
+# 电影推流入口。只借 WebRTC 头文件，不链接 libwebrtc.a。
+# ======================================================================
+
+add_executable(syncine_sharepreview_tests
+        tests/tst_sharepreview.cpp
+        tests/stub_webrtcmanager.cpp
+        src/playback/PlaybackController.cpp
+        src/playback/PlaybackController.h
+        src/core/Log.cpp
+        src/core/Log.h
+        src/core/MediaHash.cpp
+        src/core/MediaHash.h
+)
+
+target_include_directories(syncine_sharepreview_tests
+        PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/playback"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/webrtc"
+)
+
+target_link_libraries(syncine_sharepreview_tests
+        PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Multimedia
+        syncine_webrtc_headers
+)
+
+add_test(NAME share_preview COMMAND syncine_sharepreview_tests)
+set_tests_properties(share_preview PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# ======================================================================
+# 12.8 系统声音回声探针（Linux，手动运行，不进 CTest）
+#
+# 用真实 WebRTC ADM 播放房间语音，另用 QAudioSink 播放「其他应用」，
+# 采集默认 sink 的 monitor，统计原始信号与 APM 回声消除后的能量。
+# 需要真实音频会话（会实际出声），因此不能放进 CTest。
+# 用法与判定见 tests/echo_probe.cpp 顶部。
+# ======================================================================
+
+if (UNIX AND NOT APPLE AND SYNCINE_PULSE_FOUND AND SYNCINE_PULSE_SIMPLE_FOUND)
+    add_executable(syncine_echo_probe
+            tests/echo_probe.cpp
+            src/capture/PulseMonitorCapture.cpp
+            src/capture/PulseMonitorCapture.h
+            src/capture/PulseSinkRouter.cpp
+            src/capture/PulseSinkRouter.h
+            src/core/Log.cpp
+            src/core/Log.h
+    )
+
+    target_include_directories(syncine_echo_probe
+            PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/capture"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+    )
+
+    target_compile_definitions(syncine_echo_probe
+            PRIVATE SYNCINE_HAVE_PULSE=1)
+    target_include_directories(syncine_echo_probe
+            PRIVATE ${SYNCINE_PULSE_INCLUDE_DIRS}
+            ${SYNCINE_PULSE_SIMPLE_INCLUDE_DIRS})
+
+    target_link_libraries(syncine_echo_probe
+            PRIVATE
+            Qt6::Core
+            Qt6::Gui
+            Qt6::Multimedia
+            ${SYNCINE_PULSE_LIBRARIES}
+            ${SYNCINE_PULSE_SIMPLE_LIBRARIES}
+            WebRTC::WebRTC
+    )
+endif()
 
 # ======================================================================
 # 13. 安装规则 —— 打包的基石

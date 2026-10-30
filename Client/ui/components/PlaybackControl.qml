@@ -23,6 +23,10 @@ Rectangle {
     readonly property var danmakuAreas: [10, 25, 50, 75, 100]
     readonly property var danmakuSpeedLabels: ["0.5x", "0.75x", "1.0x", "1.25x", "1.5x"]
 
+    // 房主：本地采集状态；观众：服务端广播的共享态。
+    readonly property bool screenSharingActive:
+        roomSession.screenSharing || screenShare.active
+
     function rateLabel(rate) {
         // 1.0 → "1.0x"，0.75 → "0.75x"
         return (Math.abs(rate - Math.round(rate)) < 0.001
@@ -37,13 +41,18 @@ Rectangle {
     // 齿轮（= 声音设置）。弹窗本身声明在 RoomPage 根上，这里只发意图 ——
     // 理由见 AudioSettingsDialog 顶部
     signal audioSettingsRequested()
+    // 共享屏幕的入口。弹窗同样声明在 RoomPage 根上。
+    signal screenShareRequested()
 
     // 窗口全屏/屏幕全屏时，弹幕输入框并进这一行（非全屏时它在播放器下方）
     property bool inlineDanmaku: false
     property string viewMode: "normal"
     property bool danmakuVisible: true
 
-    implicitHeight: 74
+    // 屏幕共享没有共同电影时间轴：整条进度条收起，控制条随之变矮。
+    // 不能只禁用：一条灰掉的进度条仍会让人以为是可拖动的电影时间轴。
+    readonly property bool seekRowVisible: !screenSharingActive
+    implicitHeight: seekRowVisible ? 74 : 53
     color: Style.playerBar
 
     // 画质选择浮层：贴在画质按钮正上方
@@ -470,6 +479,7 @@ Rectangle {
 
         PlaybackSeekControl {
             Layout.fillWidth: true
+            visible: root.seekRowVisible
             onInteracted: root.interacted()
         }
 
@@ -481,6 +491,8 @@ Rectangle {
             ControlButton {
                 iconName: playbackSync.playing ? "pause" : "play"
                 tip: playbackSync.playing ? "暂停" : "播放"
+                // Phase 1 只有房主知道自己在共享屏幕；观众端共享态门控在 Phase 2
+                enabled: !root.screenSharingActive
                 onClicked: {
                     playbackSync.togglePlayPause()
                     root.interacted()
@@ -490,6 +502,7 @@ Rectangle {
             ControlButton {
                 text: "-10"
                 tip: "后退 10 秒"
+                enabled: !root.screenSharingActive
                 onClicked: {
                     playbackSync.seekRelative(-10000)
                     root.interacted()
@@ -499,6 +512,7 @@ Rectangle {
             ControlButton {
                 text: "+10"
                 tip: "前进 10 秒"
+                enabled: !root.screenSharingActive
                 onClicked: {
                     playbackSync.seekRelative(10000)
                     root.interacted()
@@ -512,29 +526,38 @@ Rectangle {
 
                 // 直播：没有总时长，也没有可拖的时间轴 —— 直接标出来
                 Text {
-                    visible: playbackSync.live
+                    visible: playbackSync.live && !root.screenSharingActive
                     anchors.verticalCenter: parent.verticalCenter
                     text: "● 直播"
                     color: Style.accent
                     font.pixelSize: 12
                 }
 
+                // 屏幕共享没有共同电影时间轴，时间显示换成状态文案
                 Text {
-                    visible: !playbackSync.live
+                    visible: root.screenSharingActive
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "● 屏幕共享"
+                    color: Style.accent
+                    font.pixelSize: 12
+                }
+
+                Text {
+                    visible: !playbackSync.live && !root.screenSharingActive
                     text: Style.formatTime(playbackSync.position)
                     color: Style.playerIcon
                     font.pixelSize: 12
                 }
 
                 Text {
-                    visible: !playbackSync.live
+                    visible: !playbackSync.live && !root.screenSharingActive
                     text: "/"
                     color: Style.playerIconDim
                     font.pixelSize: 12
                 }
 
                 Text {
-                    visible: !playbackSync.live
+                    visible: !playbackSync.live && !root.screenSharingActive
                     text: Style.formatTime(playbackSync.duration)
                     color: Style.playerIconDim
                     font.pixelSize: 12
@@ -626,6 +649,22 @@ Rectangle {
                 text: root.videoQualities[signalingChannel.videoQuality]
                 tip: "推送画质"
                 onClicked: qualityPopup.opened ? qualityPopup.close() : qualityPopup.open()
+            }
+
+            // ── 屏幕共享 ────────────────────────────
+            // Phase 1 只有房主、共享模式下可用；服务端 share_state 与观众端门控
+            // 在 Phase 2 接入。
+            ControlButton {
+                id: screenShareBtn
+                visible: roomSession.roomMode === RoomSession.Share
+                         && roomSession.isHost
+                iconName: "screen-share"
+                active: screenShare.active
+                tip: screenShare.active ? "正在共享屏幕" : "共享屏幕"
+                onClicked: {
+                    root.screenShareRequested()
+                    root.interacted()
+                }
             }
 
             // ── 弹幕开关 ────────────────────────────

@@ -30,6 +30,7 @@ MessageType typeFromString(const QString &type) {
         {"playback", MessageType::Playback},
         {"playback_position", MessageType::PlaybackPosition},
         {"room_mode_changed", MessageType::RoomModeChanged},
+        {"share_state", MessageType::ShareState},
         {"video_status", MessageType::VideoStatus},
         {"video_mismatch", MessageType::VideoMismatch},
         {"playlist_changed", MessageType::PlaylistChanged},
@@ -152,6 +153,12 @@ std::optional<Message> decode(const QString &text) {
         message.resumed = object.value("resumed").toBool(false);
         message.roomName = object.value("roomName").toString();
         message.mode = object.value("mode").toString();
+        // 旧服务端没有这两个字段：默认按「房主共享本地电影」处理，
+        // 与旧版共享模式的语义一致。
+        message.shareSource = object.value("shareSource").toString();
+        if (message.shareSource.isEmpty())
+            message.shareSource = QStringLiteral("media");
+        message.shareAudio = object.value("shareAudio").toBool(false);
         message.videoMismatched = object.value("videoMismatched").toBool(false);
         message.shortestDuration = int64Of(object, "shortestDuration");
 
@@ -210,6 +217,13 @@ std::optional<Message> decode(const QString &text) {
 
     case MessageType::RoomModeChanged:
         message.mode = object.value("mode").toString();
+        break;
+
+    case MessageType::ShareState:
+        message.shareSource = object.value("source").toString();
+        if (message.shareSource.isEmpty())
+            message.shareSource = QStringLiteral("media");
+        message.shareAudio = object.value("audio").toBool(false);
         break;
 
     case MessageType::VideoStatus:
@@ -311,6 +325,14 @@ QString encodeSetRoomMode(const QString &mode) {
     QJsonObject message;
     message["type"] = "set_room_mode";
     message["mode"] = mode;
+    return serialize(message);
+}
+
+QString encodeSetShareState(const QString &source, bool audio) {
+    QJsonObject message;
+    message["type"] = "set_share_state";
+    message["source"] = source;
+    message["audio"] = audio;
     return serialize(message);
 }
 

@@ -26,11 +26,17 @@ Item {
     // 顶栏：窗口全屏和屏幕全屏都收起
     readonly property bool chromeVisible: viewMode === "normal" || viewMode === "theater"
 
+    // 屏幕共享态有两个来源：房主本地的采集状态，以及服务端广播给所有人的
+    // share_state。房主刚点开始时前者先变，观众只会有后者。
+    readonly property bool sharingScreen:
+        roomSession.screenSharing || screenShare.active
+
     // 这一端"需要自己加载片子"吗：本地模式是人人都要，共享模式只有房主要
     //(观众的画面是房主推过来的，他们本机没有文件)
     readonly property bool needsLocalFile:
-        roomSession.roomMode === RoomSession.Sync
-        || (roomSession.roomMode === RoomSession.Share && roomSession.isHost)
+        !root.sharingScreen
+        && (roomSession.roomMode === RoomSession.Sync
+            || (roomSession.roomMode === RoomSession.Share && roomSession.isHost))
 
     // 自己这边还没有可播的片子 —— 这时候点画面 = 去选文件，而不是播放/暂停。
     // 用 hasLoaded 而不是"条目有没有映射":文件被删/拷走后映射还在，
@@ -98,6 +104,7 @@ Item {
             win.visibility = root.visibilityBeforeFullscreen
 
         fileTransferDialog.close()
+        screenShareDialog.close()
         messageDialog.close()
         mismatchDialog.close()
 
@@ -174,6 +181,11 @@ Item {
         id: fileTransferDialog
     }
 
+    // 屏幕/窗口共享：入口在播放控制条上（仅共享模式 + 房主）
+    ScreenShareDialog {
+        id: screenShareDialog
+    }
+
     function openTransferDialog(peerId, nickname) {
         if (peerId === "")
             return
@@ -239,6 +251,7 @@ Item {
             addVideoDialog.close()      // 房间都没了,开着的加条目窗口不该留着
             audioSettingsDialog.close() // 同理
             fileTransferDialog.close()
+            screenShareDialog.close()
             messageDialog.close()
             mismatchDialog.close()
             if (leaving)
@@ -513,6 +526,7 @@ Item {
                         onViewModeRequested: (mode) => root.setViewMode(mode)
                         onLoadRequested: root.requestNewItem()
                         onAudioSettingsRequested: audioSettingsDialog.open()
+                        onScreenShareRequested: screenShareDialog.open()
                     }
 
                     // 非全屏时，弹幕输入框在播放器下方
@@ -558,6 +572,9 @@ Item {
         }
 
         if (mode === RoomSession.Share) {
+            // 屏幕共享期间画面就是屏幕，不再提示选片
+            if (root.sharingScreen)
+                return ""
             // 观众的画面来自房主，他们本地没什么可做的，不给提示；
             // 房主还没选片子才提示
             if (roomSession.isHost && !playbackController.hasLoaded)

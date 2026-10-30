@@ -589,6 +589,8 @@ RoomSnapshot SessionController::snapshotFrom(const Protocol::Message &message) c
     snapshot.roomId = message.roomId;
     snapshot.roomName = message.roomName;
     snapshot.mode = message.mode;
+    snapshot.shareSource = message.shareSource;
+    snapshot.shareAudio = message.shareAudio;
     snapshot.clientId = m_clientId;
     snapshot.members = message.members;
     snapshot.hasState = message.hasState;

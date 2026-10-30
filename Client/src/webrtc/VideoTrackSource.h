@@ -58,6 +58,10 @@ public:
     // 在转换阶段先把 4K 源缩到 1080p，避免整帧 I420 转换/分配拖垮 GUI/CPU。
     void setMaxEncodeHeight(int height);
 
+    // 屏幕共享标志。影响编码器对「屏幕内容」的调参（is_screencast），
+    // 由 WebrtcManager 在屏幕共享开始/停止时切换。
+    void setScreenCast(bool screencast);
+
     // 当前订阅者数量
     int sinkCount() const {
         return m_sinkCount.load(std::memory_order_relaxed);
@@ -136,6 +140,7 @@ private:
     std::atomic<int> m_width{0};
     std::atomic<int> m_height{0};
     std::atomic<bool> m_hasReceivedFrame{false};
+    std::atomic<bool> m_screencast{false};
     std::atomic<int> m_maxEncodeHeight{0};
 
     // 上一帧的单调时间戳，用于保证严格递增。只在 GUI 线程访问。

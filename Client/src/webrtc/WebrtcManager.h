@@ -173,6 +173,11 @@ public:
     // 非共享模式与观众端传 false：发送流 Stop()，不再发黑帧，省上行带宽。
     void setLocalVideoSending(bool enabled);
 
+    // 屏幕共享标志：切换 VideoTrackSource 的 is_screencast，并给视频轨设置
+    // content hint（kText），让编码器按屏幕内容调参。轨道本身不变，不需要重协商。
+    // 只在 Qt 主线程调用；内部会投递到 media 信令线程。
+    void setScreenShareActive(bool active);
+
     bool localVideoEnabled() const {
         return m_localVideoTrack != nullptr && m_localVideoTrack->enabled();
     }
@@ -210,6 +215,9 @@ public:
     // 推送一帧电影 PCM（交错 int16）。data 长度 = samplesPerChannel * channels。
     void pushMovieAudioPcm(const int16_t *data, size_t samplesPerChannel,
                            int sampleRate, size_t channels);
+
+    // 清空电影/系统声音共用的攒帧缓冲。切换音频来源前调用。
+    void resetSharedAudio();
 
     // 开关电影音轨（只控制静音）。暂停或非共享时关闭；轨道本身保留在 SDP 中不动。
     void setMovieAudioEnabled(bool enabled);

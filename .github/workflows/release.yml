@@ -33,7 +33,8 @@ jobs:
             zlib1g-dev \
             libgl1-mesa-dev \
             libx11-dev libxcomposite-dev libxdamage-dev libxext-dev \
-            libxfixes-dev libxrandr-dev libxrender-dev libxtst-dev
+            libxfixes-dev libxrandr-dev libxrender-dev libxtst-dev \
+            libpulse-dev
 
       - name: 安装 Qt
         uses: jurplel/install-qt-action@v4
