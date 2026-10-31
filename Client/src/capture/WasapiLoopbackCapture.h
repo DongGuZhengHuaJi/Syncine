@@ -1,9 +1,14 @@
 //
 // Windows 系统声音采集：WASAPI loopback。
 //
-// 采集默认输出设备（或按 AppSettings 的听筒描述匹配到的 endpoint）的
-// 混音输出，转换为 48k/2ch/Int16。当前版本是整机 loopback，
-// 会包含本软件自己播放的远端语音；进程回环（排除自身）留待后续。
+// 首选进程回环（ActivateAudioInterfaceAsync +
+// PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE），只采集其他进程的
+// 声音，排除本软件自己播放的远端语音；进程回环不可用时默认关闭系统声音
+// 采集（而不是回退整机 loopback，避免永久回声），可用环境变量
+// SYNCINE_SCREEN_AUDIO_ALLOW_FULL_LOOPBACK=1 强制回退。
+//
+// 输出统一为 48k/2ch/Int16。进程回环不支持 GetMixFormat，必须显式给
+// WAVEFORMATEX；整机 loopback 仍走 GetMixFormat。
 //
 
 #ifndef SYNCINE_WASAPILOOPBACKCAPTURE_H

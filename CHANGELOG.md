@@ -7,12 +7,15 @@
 ### 共享模式
 
 - **系统声音排除自身**：共享系统声音时不再把房间语音采回去。Windows 使用 WASAPI
-  进程回环（`EXCLUDE_TARGET_PROCESS_TREE`），失败回退整机 loopback；Linux 使用
-  虚拟 Sink + 流路由（`module-null-sink` + `module-loopback`），把其他应用的流
-  移到虚拟 Sink、本进程的流留在真实 Sink，再采集虚拟 Sink 的 monitor。
+  进程回环（`EXCLUDE_TARGET_PROCESS_TREE`），Linux 使用虚拟 Sink + 流路由
+  （`module-null-sink` + `module-loopback`），把其他应用的流移到虚拟 Sink、
+  本进程的流留在真实 Sink，再采集虚拟 Sink 的 monitor。
   `SYNCINE_SCREEN_AUDIO_ISOLATE=0` / `SYNCINE_SCREEN_AUDIO_PROCESS_LOOPBACK=0`
   可强制回退。Linux 实测隔离模式 ADM 开关前后房间语音能量差约 0dB，回退模式约
-  14dB；Windows 进程回环分支待真机验证。
+  14dB；Windows 实测进程回环排除自身后本进程单音 RMS 为 0，整机 loopback 控制组
+  RMS 约 5600，回声消除成立。Windows 进程回环不可用时默认关闭系统声音采集以避免
+  永久回声，只有显式设置 `SYNCINE_SCREEN_AUDIO_ALLOW_FULL_LOOPBACK=1` 才回退整机
+  loopback（排查用，会录到本软件声音）。
 - **观众端停止推流**：视频与电影声的发送开关改为“共享模式且是房主”才开启，通过
   `encodings[0].active` 真正停止 RTP；观众端同时停止喂帧和 PCM，不再占用上行带宽。
 - **建连即停发**：视频轨的初始 `active` 随 `AddTrack` 传入，连接建立后再补写一次，
@@ -35,6 +38,11 @@
 
 ### 修复
 
+- **Windows 日志中文乱码**：日志文件本身是 UTF-8，但控制台默认代码页是 936，
+  `fprintf` 写出的 UTF-8 中文会被按 GBK 解释；部分 Windows 编辑器/日志工具
+  打开无 BOM 的 UTF-8 文件也会按 ANSI 显示。现在 Windows 启动时把控制台
+  切到 UTF-8（并开启 VT 转义），新日志文件写 UTF-8 BOM，已有当天日志在启动
+  时补 BOM；Linux 行为不变。
 - **共享模式停止推流后的 RSS 抬升**：`setLocalVideoSending(false)` 不再把已有 sender 的 `encodings[0].active` 改回 false。该字段 false→true 会让 libwebrtc 在恢复共享时 `ReleaseEncoder() + InitEncode()`，4K 下每轮重新分配几十 MB 帧缓冲。停发改由“轨道 disabled + 停止喂帧”完成：编码器 2 秒后超时并停掉填充，上行只剩 RTCP；停发期间新建的连接仍以 active=false 起步。实测 4K 下“推流 → 删除当前播放条目”8 轮累计 RSS 从 +356MB 降到 +12MB。
 - **本地播放反复加载的内存平台**：卸载时用 2×2 黑帧替换 `QVideoSink` 里保留的最后一帧（4K 下一帧十几 MB，删条目/切网链模式时会在下载期间一直挂着）；glibc 平台卸载后调用 `malloc_trim(0)`，把解码器/帧池释放后留在 arena 里的内存归还系统。实测同一段 4K 连续 50 轮加载/卸载：卸载后 RSS 从 429–599MB 降到 205–269MB，解码峰值从 774MB 降到 535MB，末轮只比最低点高 11MB。新增 `syncine_memory_probe` 验收工具。
 - **成员表刷新重建解码器**：`membersChanged` 不再触发完整的媒体重算，普通成员加入/离开、`video_status` 回显只刷新显示与门禁；只有房主身份变化才重新决定“本地解码还是看远端”。新增 `syncine_playback_tests` 覆盖该行为。

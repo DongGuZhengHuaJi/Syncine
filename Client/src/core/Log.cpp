@@ -19,7 +19,14 @@
 #include <deque>
 #include <thread>
 #ifdef _WIN32
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
 #  include <io.h> // _isatty / _fileno
+#  include <windows.h>
 #  define isatty _isatty
 #  define fileno _fileno
 #else
@@ -27,6 +34,37 @@
 #endif
 
 namespace {
+
+// Windows 控制台默认代码页是 936（GBK），而日志统一以 UTF-8 字节写入
+// stdout/stderr。不切代码页时，fprintf 出去的 UTF-8 中文会被控制台按 GBK
+// 解释，出现「寮€濮嬪叡浜?」这类乱码。这里把当前控制台切到 UTF-8，并尽量
+// 打开 VT 转义支持（日志里的颜色是 ANSI 序列）。
+// 输出被重定向到文件/管道时，改代码页不影响原始字节，日志文件仍是 UTF-8。
+void configureWindowsConsole()
+{
+#ifdef _WIN32
+    if (GetConsoleWindow() == nullptr)
+        return;
+
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+
+    auto enableVirtualTerminal = [](DWORD stdHandle) {
+        const HANDLE handle = GetStdHandle(stdHandle);
+        if (handle == nullptr || handle == INVALID_HANDLE_VALUE)
+            return;
+        DWORD mode = 0;
+        if (!GetConsoleMode(handle, &mode))
+            return;
+#ifdef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+#endif
+        SetConsoleMode(handle, mode);
+    };
+    enableVirtualTerminal(STD_OUTPUT_HANDLE);
+    enableVirtualTerminal(STD_ERROR_HANDLE);
+#endif
+}
 
 // ── 文件策略，调整此处即可 ──────────────────────────────────
 constexpr qint64 kMaxFileBytes = 8 * 1024 * 1024; // 单文件达到 8MB 即切分
@@ -156,9 +194,39 @@ QString rollPath(int index)
 }
 
 // 以下 open/rotate/cleanup 三个函数均要求调用方已持有 g_fileMutex
+
+#ifdef _WIN32
+// 旧版本写出的日志没有 BOM；Windows 上部分查看器会按 ANSI/GBK 打开。
+// 启动时把当天已有的日志补成 UTF-8 BOM 版本，避免用户升级后仍看到旧文件乱码。
+// 文件最大 8MB，一次性重写成本可以接受；已有 BOM 的文件不动。
+void ensureLogFileHasBomLocked()
+{
+    static const char kBom[] = {'\xEF', '\xBB', '\xBF'};
+    QFile probe(g_state.path);
+    if (!probe.exists() || probe.size() == 0)
+        return;
+    if (!probe.open(QIODevice::ReadOnly))
+        return;
+    const QByteArray content = probe.readAll();
+    probe.close();
+    if (content.startsWith(QByteArray(kBom, 3)))
+        return;
+
+    QFile rewrite(g_state.path);
+    if (!rewrite.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return;
+    rewrite.write(kBom, 3);
+    rewrite.write(content);
+    rewrite.close();
+}
+#endif
+
 void openFileLocked()
 {
     QDir().mkpath(g_state.dir);
+#ifdef _WIN32
+    ensureLogFileHasBomLocked();
+#endif
     g_state.file.setFileName(g_state.path);
 
     if (!g_state.file.open(QIODevice::WriteOnly | QIODevice::Append)) {
@@ -167,6 +235,14 @@ void openFileLocked()
                      qPrintable(g_state.path));
         return;
     }
+
+    // Windows 上很多查看器（记事本、部分日志工具）按 ANSI/GBK 打开无 BOM
+    // 的文本，UTF-8 中文会显示成乱码。只给新建的空日志文件写 UTF-8 BOM，
+    // 已有文件不追加（否则 BOM 会跑到文件中间）。Linux 不需要 BOM。
+#ifdef _WIN32
+    if (g_state.file.size() == 0)
+        g_state.file.write("\xEF\xBB\xBF", 3);
+#endif
 
     const QByteArray banner = QStringLiteral("\n──────── %1 启动 ────────\n")
                                   .arg(QDateTime::currentDateTime().toString(
@@ -394,6 +470,9 @@ void Log::init(const QString &filePrefix)
     if (g_initialized.load())
         return;
     g_initialized.store(true);
+
+    // 必须在第一条日志输出之前执行，否则控制台仍按旧代码页解释 UTF-8。
+    configureWindowsConsole();
 
     const QByteArray envLevel = qgetenv("SYNCINE_LOG_LEVEL");
     if (!envLevel.isEmpty())

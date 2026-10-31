@@ -122,9 +122,15 @@ struct ProcessLoopbackState {
 
 // ActivateAudioInterfaceAsync 是异步的：用 RuntimeClass 实现 COM 回调，
 // 激活完成后把 IAudioClient 交给等待线程。
+//
+// 必须同时继承 FtmBase（free-threaded marshaler）：ActivateAudioInterfaceAsync
+// 在 MTA 工作线程上回调，而调用它的采集线程也是 MTA。若回调对象不是敏捷对象，
+// Windows 会直接返回 E_ILLEGAL_METHOD_CALL (0x8000000E)，进程回环永远起不来，
+// 只能回退到整机 loopback —— 那就会把本软件自己播放的房间语音也采进去。
 class ProcessLoopbackHandler
     : public Microsoft::WRL::RuntimeClass<
           Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          Microsoft::WRL::FtmBase,
           IActivateAudioInterfaceCompletionHandler> {
 public:
     explicit ProcessLoopbackHandler(std::shared_ptr<ProcessLoopbackState> state)
@@ -288,6 +294,11 @@ void WasapiLoopbackCapture::threadLoop(QString endpointId)
     ComPtr<IAudioClient> client;
     ComPtr<IAudioCaptureClient> capture;
     WAVEFORMATEX *mixFormat = nullptr;
+    bool mixFormatOwned = false;
+    // 进程回环没有 GetMixFormat（实测返回 E_NOTIMPL），必须由调用方
+    // 显式指定格式。这里固定 48kHz/2ch/16bit：与 WebRTC 的 Opus 原生
+    // 采样率一致，下文的转换循环也就不用做重采样。
+    WAVEFORMATEX processFormat = {};
     bool started = false;
     bool processLoopback = false;
 
@@ -299,10 +310,10 @@ void WasapiLoopbackCapture::threadLoop(QString endpointId)
     auto resetClient = [&] {
         capture.Reset();
         client.Reset();
-        if (mixFormat != nullptr) {
+        if (mixFormatOwned && mixFormat != nullptr)
             CoTaskMemFree(mixFormat);
-            mixFormat = nullptr;
-        }
+        mixFormat = nullptr;
+        mixFormatOwned = false;
         started = false;
     };
 
@@ -351,25 +362,45 @@ void WasapiLoopbackCapture::threadLoop(QString endpointId)
 #if SYNCINE_HAVE_PROCESS_LOOPBACK
             if (!activateProcessLoopback(&client, error))
                 return false;
+
+            processFormat.wFormatTag = WAVE_FORMAT_PCM;
+            processFormat.nChannels = 2;
+            processFormat.nSamplesPerSec = 48000;
+            processFormat.wBitsPerSample = 16;
+            processFormat.nBlockAlign = 4;
+            processFormat.nAvgBytesPerSec = 48000 * processFormat.nBlockAlign;
+            processFormat.cbSize = 0;
+            mixFormat = &processFormat;
+            mixFormatOwned = false;
 #else
             *error = QStringLiteral("当前 Windows SDK 不支持进程回环");
             return false;
 #endif
-        } else if (!openEndpoint(error)) {
-            return false;
-        }
+        } else {
+            if (!openEndpoint(error))
+                return false;
 
-        HRESULT hr = client->GetMixFormat(&mixFormat);
-        if (FAILED(hr) || mixFormat == nullptr) {
-            *error = QStringLiteral("读取 WASAPI 混音格式失败");
-            return false;
+            const HRESULT formatResult = client->GetMixFormat(&mixFormat);
+            if (FAILED(formatResult) || mixFormat == nullptr) {
+                *error = QStringLiteral("读取 WASAPI 混音格式失败：0x%1")
+                             .arg(static_cast<quint32>(formatResult), 8, 16,
+                                  QLatin1Char('0'));
+                return false;
+            }
+            mixFormatOwned = true;
         }
 
         // 进程回环要求 buffer duration 为 0；普通 loopback 沿用 100ms。
-        hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                                AUDCLNT_STREAMFLAGS_LOOPBACK,
-                                useProcessLoopback ? 0 : 1000000, 0,
-                                mixFormat, nullptr);
+        // AUTOCONVERTPCM：进程回环的虚拟设备不接受 SRC_DEFAULT_QUALITY，
+        // 但接受 AUTOCONVERTPCM；显式 48k/2ch/16bit 在输出端不匹配时由
+        // 音频引擎转换，避免 Initialize 因格式不支持而失败。
+        DWORD flags = AUDCLNT_STREAMFLAGS_LOOPBACK;
+        if (useProcessLoopback)
+            flags |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM;
+
+        HRESULT hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags,
+                                        useProcessLoopback ? 0 : 1000000, 0,
+                                        mixFormat, nullptr);
         if (FAILED(hr)) {
             *error = QStringLiteral("初始化 WASAPI loopback 失败：0x%1")
                          .arg(static_cast<quint32>(hr), 8, 16,
@@ -379,13 +410,17 @@ void WasapiLoopbackCapture::threadLoop(QString endpointId)
 
         hr = client->GetService(IID_PPV_ARGS(capture.GetAddressOf()));
         if (FAILED(hr) || capture == nullptr) {
-            *error = QStringLiteral("获取 WASAPI 采集接口失败");
+            *error = QStringLiteral("获取 WASAPI 采集接口失败：0x%1")
+                         .arg(static_cast<quint32>(hr), 8, 16,
+                              QLatin1Char('0'));
             return false;
         }
 
         hr = client->Start();
         if (FAILED(hr)) {
-            *error = QStringLiteral("启动 WASAPI loopback 失败");
+            *error = QStringLiteral("启动 WASAPI loopback 失败：0x%1")
+                         .arg(static_cast<quint32>(hr), 8, 16,
+                              QLatin1Char('0'));
             return false;
         }
 
@@ -396,14 +431,27 @@ void WasapiLoopbackCapture::threadLoop(QString endpointId)
     do {
         // 默认优先进程回环；环境变量 SYNCINE_SCREEN_AUDIO_PROCESS_LOOPBACK=0
         // 可强制回退到整机 loopback（排查用）。
-        const bool wantProcessLoopback =
-            !qEnvironmentVariableIsSet("SYNCINE_SCREEN_AUDIO_PROCESS_LOOPBACK")
-            || qEnvironmentVariableIntValue(
-                   "SYNCINE_SCREEN_AUDIO_PROCESS_LOOPBACK") != 0;
+        const bool processLoopbackDisabled =
+            qEnvironmentVariableIsSet("SYNCINE_SCREEN_AUDIO_PROCESS_LOOPBACK")
+            && qEnvironmentVariableIntValue(
+                   "SYNCINE_SCREEN_AUDIO_PROCESS_LOOPBACK") == 0;
+        const bool wantProcessLoopback = !processLoopbackDisabled;
 
+        // 进程回环不可用时，默认「宁可没有系统声音，也不要永久回声」：
+        // 整机 loopback 会把本软件播放的远端语音一起采回去，观众听到的是
+        // 自己声音的延迟回放，形成停不下来的回声。只有显式设置
+        // SYNCINE_SCREEN_AUDIO_ALLOW_FULL_LOOPBACK=1，或主动用
+        // SYNCINE_SCREEN_AUDIO_PROCESS_LOOPBACK=0 强制回退时才允许。
+        const bool allowFullLoopback =
+            processLoopbackDisabled
+            || (qEnvironmentVariableIsSet(
+                    "SYNCINE_SCREEN_AUDIO_ALLOW_FULL_LOOPBACK")
+                && qEnvironmentVariableIntValue(
+                       "SYNCINE_SCREEN_AUDIO_ALLOW_FULL_LOOPBACK") != 0);
+
+        QString processError;
         bool prepared = false;
         if (wantProcessLoopback) {
-            QString processError;
             prepared = prepare(true, &processError);
             if (prepared) {
                 processLoopback = true;
@@ -411,11 +459,19 @@ void WasapiLoopbackCapture::threadLoop(QString endpointId)
                     << "系统声音采集：进程回环（排除 Syncine 自身进程树）";
             } else {
                 LOG_WARN("ScreenAudio")
-                    << "进程回环不可用，回退到整机 loopback：" << processError;
+                    << "进程回环不可用：" << processError;
             }
         }
 
         if (!prepared) {
+            if (!allowFullLoopback) {
+                fail(QStringLiteral(
+                         "系统不支持排除本软件声音的进程回环，已停止共享系统"
+                         "声音以避免回声：%1")
+                         .arg(processError));
+                break;
+            }
+
             QString endpointError;
             if (!prepare(false, &endpointError)) {
                 fail(QStringLiteral("打开系统声音采集失败：%1")

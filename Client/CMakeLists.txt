@@ -721,6 +721,47 @@ if (WIN32)
 endif()
 
 # ======================================================================
+# 12.6b Windows 系统声音「排除自身」验证（手动运行）
+#
+# 进程回环的两个关键点都在这里回归：
+#   · 回调对象必须是 FtmBase（敏捷对象），否则 ActivateAudioInterfaceAsync
+#     直接返回 E_ILLEGAL_METHOD_CALL；
+#   · 进程回环不支持 GetMixFormat，必须显式给 WAVEFORMATEX。
+# 用 PlaySound 在本进程内放单音：进程回环应几乎静音，整机 loopback 控制组
+# 应明显采到单音。需要真实音频设备，不进 CTest。
+# ======================================================================
+
+if (WIN32)
+    add_executable(syncine_wasapi_echo
+            tests/tst_wasapi_echo.cpp
+            src/capture/WasapiLoopbackCapture.cpp
+            src/capture/WasapiLoopbackCapture.h
+            src/capture/SystemAudioCapture.cpp
+            src/capture/SystemAudioCapture.h
+            src/core/Log.cpp
+            src/core/Log.h
+    )
+
+    target_include_directories(syncine_wasapi_echo
+            PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/capture"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+    )
+
+    target_link_libraries(syncine_wasapi_echo
+            PRIVATE
+            Qt6::Core
+            Qt6::Gui
+            Qt6::Multimedia
+            ole32
+            uuid
+            Mmdevapi
+            winmm
+    )
+endif()
+
+# ======================================================================
 # 12.7 屏幕共享本机预览（PlaybackController）
 #
 # 采集帧应出现在界面的 QVideoSink 上，但不能从 onVideoFrame 回灌进

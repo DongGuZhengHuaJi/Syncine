@@ -241,7 +241,7 @@ Popup {
             Text {
                 Layout.fillWidth: true
                 visible: screenShare.audioAvailable && screenShare.audioEnabled
-                text: "系统声音包含其他应用的输出。本软件自身的声音会被排除：Windows 使用进程回环，Linux 使用虚拟 Sink 路由；系统不支持时会回退到整机采集，可能产生回声。"
+                text: "系统声音包含其他应用的输出。本软件自身的声音会被排除：Windows 使用进程回环，Linux 使用虚拟 Sink 路由；系统不支持排除时不会退回整机采集，而是关闭系统声音以避免回声。"
                 wrapMode: Text.Wrap
                 font.pixelSize: 11
                 color: Style.textSecondary
