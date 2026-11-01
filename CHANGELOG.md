@@ -4,8 +4,24 @@
 
 ## [未发布]
 
-### 共享模式
+## [1.6.0] — 2026-11-01
 
+> 本版客户端与服务端需要一起升级：屏幕共享新增 `set_share_state` / `share_state`，
+> 入房消息新增 `shareSource` / `shareAudio`。旧服务端不支持屏幕共享；旧客户端
+> 能看到画面、听到声音，但不会进入共享态。
+
+### 屏幕与窗口共享
+
+- **整屏/窗口共享**：共享模式下，房主可以把整个屏幕或单个窗口实时共享给其他成员。
+  采集帧复用现有视频轨，不新增轨道、不重新协商；RGB/ARGB 帧在转换 worker 中转
+  I420，采集回调只做 30fps 节流与最新帧投递，并设置 `is_screencast` 与
+  `content_hint=kText`。控制条新增「共享屏幕」按钮与选择对话框（屏幕/窗口、
+  系统声音开关）。共享期间电影自动暂停，播放/暂停/进度条/切条目按共享态门控。
+- **共享状态与恢复**：服务端保存并广播 `shareSource` / `shareAudio`，房主开始、
+  停止共享和切换屏幕/窗口都走 `set_share_state`；迟到加入与断线恢复的观众从
+  `room_created` / `room_joined` / `resume` 直接拿到共享状态。
+- **房主预览**：房主端把采集帧写进界面 `QVideoSink`，开始共享后本地不再黑屏；
+  预览帧有回灌保护，不会重复进入电影推流入口。
 - **系统声音排除自身**：共享系统声音时不再把房间语音采回去。Windows 使用 WASAPI
   进程回环（`EXCLUDE_TARGET_PROCESS_TREE`），Linux 使用虚拟 Sink + 流路由
   （`module-null-sink` + `module-loopback`），把其他应用的流移到虚拟 Sink、
@@ -16,12 +32,33 @@
   RMS 约 5600，回声消除成立。Windows 进程回环不可用时默认关闭系统声音采集以避免
   永久回声，只有显式设置 `SYNCINE_SCREEN_AUDIO_ALLOW_FULL_LOOPBACK=1` 才回退整机
   loopback（排查用，会录到本软件声音）。
+
+### 修复
+
+- **Windows 日志中文乱码**：日志文件本身是 UTF-8，但控制台默认代码页是 936，
+  `fprintf` 写出的 UTF-8 中文会被按 GBK 解释；部分 Windows 编辑器/日志工具
+  打开无 BOM 的 UTF-8 文件也会按 ANSI 显示。现在 Windows 启动时把控制台
+  切到 UTF-8（并开启 VT 转义），新日志文件写 UTF-8 BOM，已有当天日志在启动
+  时补 BOM；Linux 行为不变。
+- **Windows 构建**：补 `windows.h` 与 `mmreg.h` 的包含顺序、在 `ksmedia.h`
+  前先包含 `ks.h`，并按 `WIN10_FE` 启用进程回环所需类型，修复 Windows 打包构建。
+- **共享模式停止推流后的 RSS 抬升**：`setLocalVideoSending(false)` 不再把已有 sender 的 `encodings[0].active` 改回 false。该字段 false→true 会让 libwebrtc 在恢复共享时 `ReleaseEncoder() + InitEncode()`，4K 下每轮重新分配几十 MB 帧缓冲。停发改由“轨道 disabled + 停止喂帧”完成：编码器 2 秒后超时并停掉填充，上行只剩 RTCP；停发期间新建的连接仍以 active=false 起步。实测 4K 下“推流 → 删除当前播放条目”8 轮累计 RSS 从 +356MB 降到 +12MB。
+- **本地播放反复加载的内存平台**：卸载时用 2×2 黑帧替换 `QVideoSink` 里保留的最后一帧（4K 下一帧十几 MB，删条目/切网链模式时会在下载期间一直挂着）；glibc 平台卸载后调用 `malloc_trim(0)`，把解码器/帧池释放后留在 arena 里的内存归还系统。实测同一段 4K 连续 50 轮加载/卸载：卸载后 RSS 从 429–599MB 降到 205–269MB，解码峰值从 774MB 降到 535MB，末轮只比最低点高 11MB。新增 `syncine_memory_probe` 验收工具。
+- **成员表刷新重建解码器**：`membersChanged` 不再触发完整的媒体重算，普通成员加入/离开、`video_status` 回显只刷新显示与门禁；只有房主身份变化才重新决定“本地解码还是看远端”。新增 `syncine_playback_tests` 覆盖该行为。
+
+### 网链
+
+- **“已就绪”标记绑定实际播放源**：条目 id 相同、但播放器里是本地文件时，切回网链模式不再被误判为“已准备”而跳过重新解析；`preparedSourceLoaded()` 同时校验条目 id 与实际 source。
+
+## [1.5.0] — 2026-11-01
+
+### 共享模式
+
 - **观众端停止推流**：视频与电影声的发送开关改为“共享模式且是房主”才开启，通过
   `encodings[0].active` 真正停止 RTP；观众端同时停止喂帧和 PCM，不再占用上行带宽。
 - **建连即停发**：视频轨的初始 `active` 随 `AddTrack` 传入，连接建立后再补写一次，
   避免非共享模式/观众端在建连瞬间先发几帧。
 - **黑帧回灌修复**：切换画面时注入的清屏黑帧不再被当成真实解码帧转发给推流端。
-
 - **音画同步**：视频与电影声使用同一个 MediaStream id（`syncine-media`），接收侧 libwebrtc 才会把两条流放进同一 sync_group 做投递对齐。
 - **音频积压补偿**：`MovieAudioPlayer::playoutDelayMs()` 用环形缓冲 + QAudioSink 缓冲估算“还要多久响出”；视频按 `到达时间 + 当前延迟` 排期，延迟用时间基非对称 EMA 平滑，队列有界（24 帧 / 64MB）。
 - **seek 清缓冲**：观众收到远端 seek 时清空电影声环形缓冲并丢弃 250ms 内来自 NetEq 的旧音频，同时清空视频待显示队列。
@@ -38,14 +75,6 @@
 
 ### 修复
 
-- **Windows 日志中文乱码**：日志文件本身是 UTF-8，但控制台默认代码页是 936，
-  `fprintf` 写出的 UTF-8 中文会被按 GBK 解释；部分 Windows 编辑器/日志工具
-  打开无 BOM 的 UTF-8 文件也会按 ANSI 显示。现在 Windows 启动时把控制台
-  切到 UTF-8（并开启 VT 转义），新日志文件写 UTF-8 BOM，已有当天日志在启动
-  时补 BOM；Linux 行为不变。
-- **共享模式停止推流后的 RSS 抬升**：`setLocalVideoSending(false)` 不再把已有 sender 的 `encodings[0].active` 改回 false。该字段 false→true 会让 libwebrtc 在恢复共享时 `ReleaseEncoder() + InitEncode()`，4K 下每轮重新分配几十 MB 帧缓冲。停发改由“轨道 disabled + 停止喂帧”完成：编码器 2 秒后超时并停掉填充，上行只剩 RTCP；停发期间新建的连接仍以 active=false 起步。实测 4K 下“推流 → 删除当前播放条目”8 轮累计 RSS 从 +356MB 降到 +12MB。
-- **本地播放反复加载的内存平台**：卸载时用 2×2 黑帧替换 `QVideoSink` 里保留的最后一帧（4K 下一帧十几 MB，删条目/切网链模式时会在下载期间一直挂着）；glibc 平台卸载后调用 `malloc_trim(0)`，把解码器/帧池释放后留在 arena 里的内存归还系统。实测同一段 4K 连续 50 轮加载/卸载：卸载后 RSS 从 429–599MB 降到 205–269MB，解码峰值从 774MB 降到 535MB，末轮只比最低点高 11MB。新增 `syncine_memory_probe` 验收工具。
-- **成员表刷新重建解码器**：`membersChanged` 不再触发完整的媒体重算，普通成员加入/离开、`video_status` 回显只刷新显示与门禁；只有房主身份变化才重新决定“本地解码还是看远端”。新增 `syncine_playback_tests` 覆盖该行为。
 - **共享模式观众端总时长一直为 0、无法拖动进度条**：共享模式观众按设计拿到空播放列表，`video_status` 的条目过滤会把房主上报的 duration 一并丢弃。现在共享模式观众放行房主的视频状态（服务端已按当前条目/seq 过滤），成员表能拿到时长，进度条恢复可拖动。
 - **接收端 4K 内存暴涨到 GB 级**：转换 worker 之前每转好一帧就 `invokeMethod` 投一个 lambda 到 GUI；GUI 忙时事件队列里的 `QVideoFrame` 无界堆积（4K 每帧约 12MB）。改为“有界转换队列（16 帧 / 48MB）+ 单次唤醒事件”，worker 队列也压到 8 帧；GUI 忙时丢弃最老帧而不是无限占内存。
 - **共享模式默认画质改为高清 1080p**：4K 源不再默认按原画整帧转换/编码；发送端在转换阶段按目标短边前置缩放（I420/NV12/NV21 直接在源平面缩放），显著降低 Windows 主机的 CPU/内存压力。需要 4K 原画可在播放控制条切换。
@@ -54,7 +83,6 @@
 
 ### 网链
 
-- **“已就绪”标记绑定实际播放源**：条目 id 相同、但播放器里是本地文件时，切回网链模式不再被误判为“已准备”而跳过重新解析；`preparedSourceLoaded()` 同时校验条目 id 与实际 source。
 - **手选 format_id**：新条目用 `id:` 前缀记录手选流；裸数字 spec 先判断是否为源内真实分辨率高度，再按 format_id 解释。纯数字 format_id（30080/137）不再被当成档位静默忽略；显式 `id:` 不存在时直接报错，不再回退最高画质。
 - **测试骨架**：新增 `Client/tests` 与 CTest，覆盖档位/手选 id/`id:` 前缀/缺失 id/标签显示。
 - **平台注册表**：按 URL host 后缀识别 Bilibili / Generic，不再在下载流程里硬编码站点；B 站始终带 cookie，Generic 默认不带（设置页可开启“通用链接也使用 Cookie”），避免把登录态发给任意站点。
