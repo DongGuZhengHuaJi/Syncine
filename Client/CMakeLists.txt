@@ -34,7 +34,7 @@ endif()
 # SYNCINE_VERSION 都由它派生。改版本只改这一行。
 # ----------------------------------------------------------------------
 
-project(Syncine VERSION 1.5.0 LANGUAGES CXX)
+project(Syncine VERSION 1.6.0 LANGUAGES CXX)
 
 # WebRTC 使用 C++20
 set(CMAKE_CXX_STANDARD 20)
@@ -154,7 +154,7 @@ find_package(WebRTC REQUIRED)
 # 把 CMake 里的版本号导出给 C++ 代码（「关于」对话框等）。
 # ----------------------------------------------------------------------
 
-# 联调时用提交号区分“同为 1.5.0 但来自不同提交”的构建。
+# 联调时用提交号区分“同为 1.6.0 但来自不同提交”的构建。
 # CI 在 checkout 后配置，拿到的就是该 tag/commit 的哈希。
 execute_process(
         COMMAND git rev-parse --short HEAD
