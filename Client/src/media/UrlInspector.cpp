@@ -9,22 +9,13 @@
 #include "core/CookieManager.h"
 #include "core/Log.h"
 #include "core/Toolchain.h"
+#include "core/YtDlpOutput.h"
 #include "media/FormatModel.h"
 #include "media/MediaPlatform.h"
 
 namespace {
 
 constexpr int kTailLines = 15;
-
-QString errorFromOutput(const QStringList &output, const QString &fallback)
-{
-    for (int i = output.size() - 1; i >= 0; --i) {
-        const QString line = output.at(i).trimmed();
-        if (line.startsWith(QLatin1String("ERROR:")))
-            return line;
-    }
-    return output.isEmpty() ? fallback : output.join(QLatin1Char('\n'));
-}
 
 QVariantMap toMap(const QualityOption &option)
 {
@@ -65,7 +56,7 @@ UrlInspector::UrlInspector(const Toolchain *toolchain,
             m_process->deleteLater();
             m_process = nullptr;
         }
-        fail(QStringLiteral("yt-dlp 解析超时（30 秒没有输出），请检查网络后重试"));
+        fail(QStringLiteral("yt-dlp 解析超时（60 秒没有输出），请检查网络后重试"));
     });
 }
 
@@ -106,8 +97,13 @@ void UrlInspector::inspect(const QString &url)
     m_process->setProcessChannelMode(QProcess::MergedChannels);
     m_process->setProgram(m_toolchain->ytDlpPath());
 
-    QStringList args{QStringLiteral("-J"), QStringLiteral("--no-playlist")};
+    // --flat-playlist：只列条目，不逐集完整解析。插件/番剧可能有上百集，
+    // 非 flat 会把每一集都解析一遍（实测 198 集超过 70 秒），大列表无法使用；
+    // flat 只需数秒。flat 条目缺少 webpage_url 时由 FormatModel 回退到 url。
+    QStringList args{QStringLiteral("-J"), QStringLiteral("--no-playlist"),
+                     QStringLiteral("--flat-playlist")};
     args << m_toolchain->ffmpegLocationArgs();
+    args << m_toolchain->pluginArgs();
     const MediaPlatform *platform = mediaPlatformRegistry().detect(QUrl(url));
     if (m_cookies != nullptr && platformUsesCookies(platform, m_genericCookies))
         args << m_cookies->cookieArgs();
@@ -116,7 +112,9 @@ void UrlInspector::inspect(const QString &url)
     LOG_DEBUG("UrlInspector") << "yt-dlp" << args.join(QLatin1Char(' '));
 
     connect(m_process, &QProcess::readyReadStandardOutput, this, [this]() {
-        m_stallTimer.start(30 * 1000);
+        // 插件站点的单集解析可能要拉页面、API 和多条 m3u8，实测接近 30 秒；
+        // 60 秒只在前一次输出之后重新计时，不会无限等。
+        m_stallTimer.start(60 * 1000);
         const QByteArray raw = m_process->readAllStandardOutput();
         m_outputBuffer.append(raw);
         for (const QString &line : QString::fromUtf8(raw).split(QLatin1Char('\n'),
@@ -150,22 +148,19 @@ void UrlInspector::inspect(const QString &url)
             });
 
     m_process->start();
-    m_stallTimer.start(30 * 1000);
+    m_stallTimer.start(60 * 1000);
 }
 
 void UrlInspector::handleFinished(int exitCode)
 {
-    const QByteArray output = m_outputBuffer;
-    const int start = output.indexOf('{');
-    const QJsonDocument document = start >= 0
-        ? QJsonDocument::fromJson(output.mid(start))
-        : QJsonDocument();
-    if (exitCode != 0 || !document.isObject()) {
-        fail(errorFromOutput(m_outputTail, QStringLiteral("yt-dlp 没能解析这个链接")));
+    const QJsonObject root = YtDlpOutput::parseJsonObject(m_outputBuffer);
+    if (exitCode != 0 || root.isEmpty()) {
+        fail(YtDlpOutput::lastError(m_outputTail,
+                                    QStringLiteral("yt-dlp 没能解析这个链接")));
         return;
     }
 
-    applyJson(document.object());
+    applyJson(root);
 }
 
 // json 解析结果，填充档位/详情列表，发 inspected 信号
@@ -173,6 +168,14 @@ void UrlInspector::applyJson(const QJsonObject &root)
 {
     resetResults();
     m_info = MediaFormats::parseMediaInfo(root);
+
+    // 插件可能返回了应用不认识的字段，或者条目/格式全被过滤掉。
+    // 直接给出明确失败，避免弹窗停在“解析完成但没有任何选项”。
+    if (m_info.formats.isEmpty() && m_info.episodes.isEmpty()) {
+        fail(QStringLiteral(
+            "yt-dlp 没有返回可用的视频格式或剧集（插件可能返回了不支持的字段或空结果）"));
+        return;
+    }
 
     // ---- 多集链接：只列剧集，不挑流 ----
     if (m_info.isPlaylist()) {

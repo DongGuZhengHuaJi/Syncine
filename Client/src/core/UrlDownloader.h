@@ -152,7 +152,8 @@ private:
     // 探测 + 按 spec 解析：决定了"直链"还是"下载合并"之后自动接着走
     void startResolve(const QString &url, const QString &spec);
     void handleResolveFinished(int exitCode);
-    // 真的去试一下这个直链能不能拉（不带任何自定义头，和播放器处境一致）
+    // 真的去试一下这个直链能不能拉（不带任何自定义头，和播放器处境一致）。
+    // 只用于点播；直播不能预请求，见 handleResolveFinished。
     void verifyDirectUrl(const QString &url);
     // 掐掉还在飞的直链试拉，免得它的回调晚一步把已经作废的结果当成新的
     void abortVerify();

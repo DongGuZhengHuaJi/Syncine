@@ -14,8 +14,10 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QEventLoop>
 #include <QFile>
 #include <QTemporaryDir>
+#include <QTimer>
 
 #include <cstdio>
 
@@ -229,7 +231,51 @@ void testPreparedSourceBoundToActualSource()
 }
 
 // ============================
-// 3. 屏幕共享态：入房快照、广播与模式切换
+// 3. 直播重连上限
+// ============================
+
+void testLiveRetryCap()
+{
+    Fixture f;
+    PlaylistEntry liveItem = makeItem(QStringLiteral("live-item"));
+    // URL 留空：prepareUrlItem 不会真的起 yt-dlp，但条目仍是直播，
+    // 足以驱动 PlaybackSync 的重连状态机。
+    liveItem.live = true;
+
+    f.room.enterRoom(makeSnapshot(
+        QStringLiteral("room-live"), QStringLiteral("url"),
+        {makeMember(QStringLiteral("client-self"), QStringLiteral("我"), true)},
+        liveItem));
+
+    CHECK(f.sync.live());
+    CHECK(f.sync.downloadStage().isEmpty());
+
+    // 重连定时器是 3 秒；这里按真实时间等它触发。3.3 秒留出 CoarseTimer
+    // 的抖动余量，3 次重连约 10 秒（只在这一条回归测试里）。
+    auto waitForReconnect = []() {
+        QEventLoop loop;
+        QTimer::singleShot(3300, &loop, &QEventLoop::quit);
+        loop.exec();
+    };
+
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        const int unloadsBefore = fakePlayback().unloads;
+        f.playback.errorOccurred(QStringLiteral("Demuxing failed"));
+        waitForReconnect();
+        CHECK(fakePlayback().unloads == unloadsBefore + 1);
+        CHECK(f.sync.downloadStage() != QLatin1String("failed"));
+    }
+
+    // 第 4 次错误达到上限：不再排队，条目进入失败态并带提示。
+    f.playback.errorOccurred(QStringLiteral("Demuxing failed"));
+    CHECK(f.sync.downloadStage() == QLatin1String("failed"));
+    CHECK(f.sync.downloadError().contains(QStringLiteral("连续重连")));
+    CHECK(f.sync.downloadStageText().contains(QStringLiteral("直播连接失败")));
+    CHECK(f.sync.downloadShortText() == QStringLiteral("直播失败"));
+}
+
+// ============================
+// 4. 屏幕共享态：入房快照、广播与模式切换
 // ============================
 
 void testScreenShareState()
@@ -338,6 +384,7 @@ int main(int argc, char **argv)
 
     testMemberRefreshDoesNotRebuildMedia();
     testPreparedSourceBoundToActualSource();
+    testLiveRetryCap();
     testScreenShareState();
 
     if (g_failures == 0) {

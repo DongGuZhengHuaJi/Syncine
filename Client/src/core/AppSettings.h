@@ -76,6 +76,25 @@ class AppSettings : public QObject {
                WRITE setGenericCookies
                NOTIFY genericCookiesChanged)
 
+    // ---- yt-dlp 用户插件 ----
+    // 默认关闭：插件是任意 Python 代码，会以当前用户权限执行。
+    Q_PROPERTY(bool pluginsEnabled
+               READ pluginsEnabled
+               WRITE setPluginsEnabled
+               NOTIFY pluginsEnabledChanged)
+
+    // 用户插件根目录。每个插件放在一个子目录中：
+    //   <插件根目录>/<插件名>/yt_dlp_plugins/extractor/*.py
+    // 默认 <AppData>/yt-dlp-plugins。
+    Q_PROPERTY(QString pluginDirectory
+               READ pluginDirectory
+               WRITE setPluginDirectory
+               NOTIFY pluginDirectoryChanged)
+
+    Q_PROPERTY(bool pluginDirectoryExists
+               READ pluginDirectoryExists
+               NOTIFY pluginDirectoryChanged)
+
     // ---- 弹幕显示 ----
     // 显示区域：弹幕只占播放器顶部的这个百分比，档位 10/25/50/75/100。
     Q_PROPERTY(int danmakuArea
@@ -162,6 +181,17 @@ public:
     bool genericCookies() const { return m_genericCookies; }
     Q_INVOKABLE void setGenericCookies(bool enabled);
 
+    bool pluginsEnabled() const { return m_pluginsEnabled; }
+    Q_INVOKABLE void setPluginsEnabled(bool enabled);
+
+    QString pluginDirectory() const { return m_pluginDirectory; }
+    Q_INVOKABLE void setPluginDirectory(const QString &directory);
+    bool pluginDirectoryExists() const;
+
+    Q_INVOKABLE QString defaultPluginDirectory() const;
+    // 创建（如不存在）并用系统文件管理器打开插件目录。
+    Q_INVOKABLE void openPluginDirectory();
+
     int danmakuArea() const { return m_danmakuArea; }
     Q_INVOKABLE void setDanmakuArea(int area);
 
@@ -213,6 +243,8 @@ signals:
     void defaultQualityChanged();
     void hdrAllowedChanged();
     void genericCookiesChanged();
+    void pluginsEnabledChanged();
+    void pluginDirectoryChanged();
     void danmakuAreaChanged();
     void danmakuOpacityChanged();
     void danmakuFontSizeChanged();
@@ -233,6 +265,8 @@ private:
     QString m_defaultQuality;
     bool m_hdrAllowed = false;
     bool m_genericCookies = false;
+    bool m_pluginsEnabled = false;
+    QString m_pluginDirectory;
     int m_danmakuArea = 100;
     int m_danmakuOpacity = 100;
     int m_danmakuFontSize = 100;

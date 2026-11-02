@@ -68,7 +68,8 @@
 - 网链模式条目显示下载进度；画面/声音分离下载时按整体进度折算。
 - 电影音量与语音音量可分别调节。
 - 可从浏览器或 `cookies.txt` 文件导入 Cookie，供 yt-dlp 下载需要登录的站点。
-- 随包携带 ffmpeg 与 yt-dlp，用户无需另外安装。
+- 内置 yt-dlp 斗鱼直播插件，随包提供、始终启用；设置 → 播放与下载 → yt-dlp 插件里还可以额外启用用户提供的 extractor（默认关闭，插件是任意 Python 代码，只使用可信来源）。
+- 随包携带 ffmpeg、yt-dlp 与斗鱼签名所需的 qjs（Linux/macOS；Windows 随包带 Node.js），用户无需另外安装 Node.js 或命令行工具。
 
 ---
 
@@ -193,7 +194,7 @@ ws://8.148.12.233:8765
 | 链接器 | lld ≥ 19.1 | MSVC 自带的 `link.exe` |
 | zlib | `zlib1g-dev` | vcpkg 的 `zlib:x64-windows-static-md`（或等价的静态库） |
 | WebRTC | 见 [`third_party/webrtc/README.md`](third_party/webrtc/README.md) | 同上，两个平台各有一份预编译产物 |
-| ffmpeg / yt-dlp | 见 [`Client/tools/README.md`](Client/tools/README.md) | 同上（Windows 用 `yt-dlp.exe` 与 BtbN 的 `win64-lgpl` 构建） |
+| ffmpeg / yt-dlp / qjs | 见 [`Client/tools/README.md`](Client/tools/README.md) | 同上（Windows 用 `yt-dlp.exe`、BtbN 的 `win64-lgpl` 构建，以及 Node.js 代替 qjs） |
 
 > 电影音轨用到 `QAudioBufferOutput`，Qt 6.8 才引入，所以 Qt 不能低于 6.8。
 > WebRTC 按平台分别编译：Linux 那份是 Chromium 的 clang 编的，**Windows 那份必须用 MSVC 编**，无法从 Linux 交叉编译。
@@ -236,8 +237,9 @@ cd build-release && cpack
 ::    预编译 webrtc.lib 由 VS 2026（MSVC 14.51）的 STL 编出，用 VS 2022 链接会缺 __std_* 符号
 ::    确保 cl.exe / link.exe / VCToolsRedistDir 在环境里
 
-:: 1) 随包工具 → Client\tools\{ffmpeg,yt-dlp}
-::    yt-dlp.exe 与 BtbN 的 ffmpeg-master-latest-win64-lgpl，见 Client/tools/README.md
+:: 1) 随包工具 → Client\tools\{ffmpeg,yt-dlp,node}
+::    yt-dlp.exe、BtbN 的 ffmpeg-master-latest-win64-lgpl，以及 Node.js
+::    （斗鱼签名用；Linux/macOS 用更小的 qjs），见 Client/tools/README.md
 
 :: 2) WebRTC：使用预编译产物 webrtc-windows-x64-bf31ff6f.zip
 ::    自己从源码编见 third_party\webrtc\README.md 第 4.2 节

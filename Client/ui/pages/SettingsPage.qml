@@ -439,6 +439,130 @@ Item {
                 }
             }
 
+            // ── 播放与下载：yt-dlp 用户插件 ──────────
+            Card {
+                width: parent.width
+                visible: root.section === "playback"
+
+                Column {
+                    width: parent.width
+                    spacing: 10
+
+                    Label {
+                        text: "yt-dlp 插件"
+                        font.pixelSize: 15
+                        font.bold: true
+                        color: Style.textPrimary
+                    }
+
+                    Label {
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        font.pixelSize: 12
+                        color: Style.textFaint
+                        text: "客户端内置斗鱼直播插件（随包提供，始终启用）。"
+                              + "下面的开关只控制你自己添加的额外插件；"
+                              + "额外插件是任意 Python 代码，会以当前用户权限执行，"
+                              + "请只使用可信来源。"
+                    }
+
+                    Label {
+                        width: parent.width
+                        visible: toolchain.bundledPluginDirectory !== ""
+                        wrapMode: Text.Wrap
+                        font.pixelSize: 11
+                        color: Style.textFaint
+                        text: "内置插件目录：" + toolchain.bundledPluginDirectory
+                    }
+
+                    OptionList {
+                        width: parent.width
+                        options: [
+                            { label: "关闭额外插件(推荐)", value: false },
+                            { label: "启用额外插件", value: true }
+                        ]
+                        selectedValue: appSettings.pluginsEnabled
+                        onPicked: (value) => appSettings.setPluginsEnabled(value)
+                    }
+
+                    Label {
+                        width: parent.width
+                        text: "额外插件目录"
+                        font.pixelSize: 12
+                        color: Style.textSecondary
+                    }
+
+                    Label {
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        font.pixelSize: 11
+                        color: Style.textFaint
+                        text: appSettings.pluginDirectory
+                    }
+
+                    Label {
+                        width: parent.width
+                        visible: appSettings.pluginsEnabled
+                                 && !appSettings.pluginDirectoryExists
+                        wrapMode: Text.Wrap
+                        font.pixelSize: 12
+                        color: Style.danger
+                        text: "目录不存在，启用后不会加载任何插件。点「打开目录」会自动创建。"
+                    }
+
+                    Label {
+                        width: parent.width
+                        visible: appSettings.pluginsEnabled
+                                 && appSettings.pluginDirectoryExists
+                        wrapMode: Text.Wrap
+                        font.pixelSize: 11
+                        color: Style.textFaint
+                        text: "额外插件放在这里，每个插件一个子目录：<插件名>/yt_dlp_plugins/extractor/*.py。内置插件不受此目录影响。"
+                    }
+
+                    RowLayout {
+                        width: parent.width
+                        spacing: 8
+
+                        GhostButton {
+                            text: "选择目录…"
+                            onClicked: pluginDirDialog.open()
+                        }
+
+                        GhostButton {
+                            text: "打开目录"
+                            onClicked: appSettings.openPluginDirectory()
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        Text {
+                            text: "恢复默认"
+                            font.pixelSize: 12
+                            color: Style.accent
+
+                            MouseArea {
+                                anchors.fill: parent
+                                anchors.margins: -6
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: appSettings.setPluginDirectory(
+                                               appSettings.defaultPluginDirectory())
+                            }
+                        }
+                    }
+
+                    Label {
+                        width: parent.width
+                        visible: appSettings.pluginsEnabled
+                        wrapMode: Text.Wrap
+                        font.pixelSize: 12
+                        color: Style.danger
+                        text: "插件代码可以读写本机文件、访问网络并读取 Syncine 的 Cookie；"
+                              + "不同客户端插件不一致时，同一条目可能解析出不同画质。"
+                    }
+                }
+            }
+
             // ── 音频：麦克风 / 听筒 ──────────────────
             Card {
                 width: parent.width
@@ -586,6 +710,13 @@ Item {
         nameFilters: ["Cookie 文件 (*.txt)", "所有文件 (*)"]
         // selectedFile 是 url —— C++ 那边收的就是 QUrl(直接当字符串用会拿到 "file:///...")
         onAccepted: cookieManager.importFromFile(selectedFile)
+    }
+
+    FolderDialog {
+        id: pluginDirDialog
+        title: "选择 yt-dlp 插件目录"
+        // 选择的是“插件根目录”，里面每个子目录是一个插件
+        onAccepted: appSettings.setPluginDirectory(selectedFolder)
     }
 
     // ⚠️ 返回按钮**必须定义在 Flickable 后面**(QML 里后声明的兄弟节点在上面，

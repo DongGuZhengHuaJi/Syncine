@@ -21,6 +21,8 @@ const char *kKeyServerUrl = "server/userUrl";
 const char *kKeyQuality = "playback/quality";
 const char *kKeyHdrAllowed = "playback/hdrAllowed";
 const char *kKeyGenericCookies = "cookies/useForGeneric";
+const char *kKeyPluginsEnabled = "ytdlp/pluginsEnabled";
+const char *kKeyPluginDirectory = "ytdlp/pluginDirectory";
 const char *kKeyDanmakuArea = "danmaku/area";
 const char *kKeyDanmakuOpacity = "danmaku/opacity";
 const char *kKeyDanmakuFontSize = "danmaku/fontSize";
@@ -71,6 +73,10 @@ AppSettings::AppSettings(QObject *parent)
         m_defaultQuality.clear();
     m_hdrAllowed = m_settings->value(QLatin1String(kKeyHdrAllowed), false).toBool();
     m_genericCookies = m_settings->value(QLatin1String(kKeyGenericCookies), false).toBool();
+    m_pluginsEnabled = m_settings->value(QLatin1String(kKeyPluginsEnabled), false).toBool();
+    m_pluginDirectory = m_settings->value(QLatin1String(kKeyPluginDirectory)).toString().trimmed();
+    if (m_pluginDirectory.isEmpty())
+        m_pluginDirectory = defaultPluginDirectory();
     m_danmakuArea = qBound(10, m_settings->value(QLatin1String(kKeyDanmakuArea), 100).toInt(), 100);
     m_danmakuOpacity = qBound(10, m_settings->value(QLatin1String(kKeyDanmakuOpacity), 100).toInt(), 100);
     m_danmakuFontSize = qBound(50, m_settings->value(QLatin1String(kKeyDanmakuFontSize), 100).toInt(), 200);
@@ -85,6 +91,8 @@ AppSettings::AppSettings(QObject *parent)
                          << " 服务器地址:" << (m_serverUrl.isEmpty() ? "(兜底)" : m_serverUrl)
                          << " 画质:" << (m_defaultQuality.isEmpty() ? "(不设限)" : m_defaultQuality)
                          << " HDR:" << (m_hdrAllowed ? 1 : 0)
+                         << " 插件:" << (m_pluginsEnabled ? "启用" : "关闭")
+                         << " 插件目录:" << m_pluginDirectory
                          << " 日志级别:" << m_logLevel;
 }
 
@@ -190,6 +198,68 @@ void AppSettings::setGenericCookies(bool enabled)
     m_genericCookies = enabled;
     m_settings->setValue(QLatin1String(kKeyGenericCookies), m_genericCookies);
     emit genericCookiesChanged();
+}
+
+void AppSettings::setPluginsEnabled(bool enabled)
+{
+    if (m_pluginsEnabled == enabled)
+        return;
+
+    m_pluginsEnabled = enabled;
+    m_settings->setValue(QLatin1String(kKeyPluginsEnabled), m_pluginsEnabled);
+    LOG_INFO("Settings") << "yt-dlp 用户插件:" << (enabled ? "启用" : "关闭");
+    emit pluginsEnabledChanged();
+}
+
+QString AppSettings::defaultPluginDirectory() const
+{
+    const QString dataDir =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    return (dataDir.isEmpty() ? QDir::homePath() + QStringLiteral("/.syncine") : dataDir)
+           + QStringLiteral("/yt-dlp-plugins");
+}
+
+void AppSettings::setPluginDirectory(const QString &directory)
+{
+    QString normalized = directory.trimmed();
+
+    // FolderDialog 给的是 file:// URL；手填路径则原样使用
+    if (normalized.startsWith(QLatin1String("file:"), Qt::CaseInsensitive)
+        || normalized.contains(QLatin1String("://"))) {
+        normalized = QUrl(normalized).toLocalFile();
+    }
+    if (normalized == QLatin1String("~") || normalized.startsWith(QLatin1String("~/")))
+        normalized = QDir::homePath() + normalized.mid(1);
+    if (normalized.isEmpty())
+        normalized = defaultPluginDirectory();
+
+    normalized = QDir::cleanPath(normalized);
+    if (QDir::isRelativePath(normalized))
+        normalized = QFileInfo(normalized).absoluteFilePath();
+    if (m_pluginDirectory == normalized)
+        return;
+
+    m_pluginDirectory = normalized;
+    m_settings->setValue(QLatin1String(kKeyPluginDirectory), m_pluginDirectory);
+    LOG_INFO("Settings") << "yt-dlp 插件目录:" << m_pluginDirectory;
+    emit pluginDirectoryChanged();
+}
+
+bool AppSettings::pluginDirectoryExists() const
+{
+    return !m_pluginDirectory.isEmpty() && QFileInfo(m_pluginDirectory).isDir();
+}
+
+void AppSettings::openPluginDirectory()
+{
+    if (m_pluginDirectory.isEmpty())
+        return;
+
+    QDir().mkpath(m_pluginDirectory);
+    LOG_INFO("Settings") << "打开插件目录:" << m_pluginDirectory;
+    QDesktopServices::openUrl(QUrl::fromLocalFile(m_pluginDirectory));
+    // 目录可能刚创建，pluginDirectoryExists 的绑定需要重算
+    emit pluginDirectoryChanged();
 }
 
 void AppSettings::setDanmakuArea(int area)

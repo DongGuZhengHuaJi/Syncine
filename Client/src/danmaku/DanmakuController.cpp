@@ -11,6 +11,7 @@
 #include "core/CookieManager.h"
 #include "core/Log.h"
 #include "core/Toolchain.h"
+#include "danmaku/DouyuLiveDanmakuSession.h"
 #include "danmaku/LiveDanmakuSession.h"
 #include "media/FormatModel.h"
 #include "media/MediaPlatform.h"
@@ -23,6 +24,23 @@ constexpr int kMaxTailLines = 40;
 // 4x 倍速下 50ms 也只推进约 200ms，离阈值很远。
 constexpr qint64 kJumpThresholdMs = 1500;
 
+// 斗鱼直播房间页：www.douyu.com/{房间号}（短号/别名都可以）；
+// v.douyu.com 是点播，www.douyu.com/show/... 也不是直播。
+bool isDouyuLiveUrl(const QString &url)
+{
+    const QUrl parsed(url);
+    const QString host = parsed.host().toLower();
+    if (!(host == QLatin1String("douyu.com")
+          || host.endsWith(QLatin1String(".douyu.com"))
+          || host == QLatin1String("douyutv.com")
+          || host.endsWith(QLatin1String(".douyutv.com")))) {
+        return false;
+    }
+    if (host.startsWith(QLatin1String("v.")))
+        return false;
+    return !parsed.path().startsWith(QLatin1String("/show/"));
+}
+
 } // namespace
 
 DanmakuController::DanmakuController(const Toolchain *toolchain,
@@ -34,24 +52,49 @@ DanmakuController::DanmakuController(const Toolchain *toolchain,
 
     m_live = new LiveDanmakuSession(
         m_cookies != nullptr ? m_cookies->path() : QString(), this);
+    m_douyuLive = new DouyuLiveDanmakuSession(this);
+
     connect(m_live, &LiveDanmakuSession::danmakuBatch,
             this, &DanmakuController::liveDanmakuBatch);
+    connect(m_douyuLive, &DouyuLiveDanmakuSession::danmakuBatch,
+            this, &DanmakuController::liveDanmakuBatch);
+
+    // 两个会话都可能触发 connected/stopped；统一折算成控制器状态
     connect(m_live, &LiveDanmakuSession::connectedChanged,
-            this, &DanmakuController::liveConnectedChanged);
+            this, [this](bool) { emit liveConnectedChanged(liveConnected()); });
+    connect(m_douyuLive, &DouyuLiveDanmakuSession::connectedChanged,
+            this, [this](bool) { emit liveConnectedChanged(liveConnected()); });
     connect(m_live, &LiveDanmakuSession::stopped,
-            this, &DanmakuController::liveStopped);
+            this, &DanmakuController::onLiveStopped);
+    connect(m_douyuLive, &DouyuLiveDanmakuSession::stopped,
+            this, &DanmakuController::onLiveStopped);
+    connect(m_douyuLive, &DouyuLiveDanmakuSession::errorOccurred,
+            this, [](const QString &message) {
+                LOG_WARN("DouyuDanmaku") << message;
+            });
 }
 
 DanmakuController::~DanmakuController()
 {
     if (m_live != nullptr)
         m_live->stop();
+    if (m_douyuLive != nullptr)
+        m_douyuLive->stop();
     abortFetch();
 }
 
 bool DanmakuController::liveConnected() const
 {
-    return m_live != nullptr && m_live->connected();
+    return (m_live != nullptr && m_live->connected())
+           || (m_douyuLive != nullptr && m_douyuLive->connected());
+}
+
+void DanmakuController::onLiveStopped()
+{
+    const bool anyRunning = (m_live != nullptr && m_live->running())
+                            || (m_douyuLive != nullptr && m_douyuLive->running());
+    if (!anyRunning)
+        emit liveStopped();
 }
 
 // ============================
@@ -70,6 +113,8 @@ bool DanmakuController::beginItem(const QString &dir, const QString &pageUrl)
         ++m_generation;
         if (m_live != nullptr)
             m_live->stop();
+        if (m_douyuLive != nullptr)
+            m_douyuLive->stop();
         abortFetch();
         clearItems();
         m_dir = dir;
@@ -94,10 +139,29 @@ void DanmakuController::loadFor(const MediaInfo &info)
     if (m_dir.isEmpty())
         return;
 
-    // 直播走完全不同的链路：WebSocket 实时推送，没有 XML/时间轴/游标
+    // 直播走完全不同的链路：按站点选择 WebSocket 会话，没有 XML/时间轴/游标
     if (info.live) {
-        if (m_live != nullptr)
-            m_live->start(info.url.isEmpty() ? m_pageUrl : info.url);
+        const QString url = info.url.isEmpty() ? m_pageUrl : info.url;
+        if (isDouyuLiveUrl(url)) {
+            if (m_live != nullptr)
+                m_live->stop();
+            if (m_douyuLive != nullptr) {
+                // 插件的 id 是真实房间号（如 410804 -> 6436114），
+                // 比从页面再解析一次可靠
+                m_douyuLive->start(url, info.id);
+            }
+        } else if (isBilibiliUrl(url)) {
+            if (m_douyuLive != nullptr)
+                m_douyuLive->stop();
+            if (m_live != nullptr)
+                m_live->start(url);
+        } else {
+            if (m_live != nullptr)
+                m_live->stop();
+            if (m_douyuLive != nullptr)
+                m_douyuLive->stop();
+            LOG_DEBUG("Danmaku") << "不支持的直播源，跳过弹幕";
+        }
         return;
     }
 
@@ -118,7 +182,17 @@ void DanmakuController::loadFromUrl()
     if (m_dir.isEmpty())
         return;
 
+    if (isDouyuLiveUrl(m_pageUrl)) {
+        if (m_live != nullptr)
+            m_live->stop();
+        if (m_douyuLive != nullptr)
+            m_douyuLive->start(m_pageUrl, QString());
+        return;
+    }
+
     if (isLiveUrl(m_pageUrl)) {
+        if (m_douyuLive != nullptr)
+            m_douyuLive->stop();
         if (m_live != nullptr)
             m_live->start(m_pageUrl);
         return;
@@ -145,6 +219,8 @@ void DanmakuController::reset()
     ++m_generation;
     if (m_live != nullptr)
         m_live->stop();
+    if (m_douyuLive != nullptr)
+        m_douyuLive->stop();
     abortFetch();
     clearItems();
     m_dir.clear();
@@ -362,6 +438,9 @@ void DanmakuController::startFetch(quint64 generation)
         QStringLiteral("-o"), outputTemplate
     };
     args << m_toolchain->ffmpegLocationArgs();
+    // 统一带插件开关：关闭时用 --no-plugin-dirs 阻止 yt-dlp 默认插件目录，
+    // 避免不同客户端因用户插件不同而改变解析结果。
+    args << m_toolchain->pluginArgs();
     if (m_cookies != nullptr)
         args << m_cookies->cookieArgs();
     Toolchain::appendUrlArg(args, m_pageUrl);

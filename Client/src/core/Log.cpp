@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QLoggingCategory>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QStandardPaths>
@@ -470,6 +471,12 @@ void Log::init(const QString &filePrefix)
     if (g_initialized.load())
         return;
     g_initialized.store(true);
+
+    // Qt Multimedia 的 FFmpeg 后端会对同一个坏源连续打印大量
+    // "Demuxing failed"；应用层已经用 PlaybackController::errorOccurred
+    // 上报一次并做重连去重，这里关闭该分类，避免日志被刷爆。
+    QLoggingCategory::setFilterRules(
+        QStringLiteral("qt.multimedia.ffmpeg.demuxer=false"));
 
     // 必须在第一条日志输出之前执行，否则控制台仍按旧代码页解释 UTF-8。
     configureWindowsConsole();

@@ -36,6 +36,14 @@ private:
     bool &m_flag;
 };
 
+// 直播连续自动重连上限。一次错误后每 3 秒重试；连续 3 次仍失败就停手，
+// 避免需要 Referer/Cookie 的直播源无限解析重连。
+constexpr int kMaxLiveRetries = 3;
+
+// 直播连续播放这么久才算“稳定”，把重连计数清零。太短的话，播一两秒就断的
+// 坏源每次都能重置计数，永远到不了上限。
+constexpr int kLiveStableMs = 10000;
+
 } // namespace
 
 PlaybackSync::PlaybackSync(RoomSession *session,
@@ -75,6 +83,11 @@ PlaybackSync::PlaybackSync(RoomSession *session,
             this, &PlaybackSync::onMediaChanged);
     connect(m_playback, &PlaybackController::durationChanged,
             this, &PlaybackSync::onMediaChanged);
+    // 新源成功加载后取消待重连，避免把刚恢复的播放再推倒一次
+    connect(m_playback, &PlaybackController::hasLoadedChanged, this, [this]() {
+        if (m_playback != nullptr && m_playback->hasLoaded())
+            m_liveReconnectTimer.stop();
+    });
 
     // 房主/本地模式：界面状态跟着本地播放器走，这里把变化转发出去
     connect(m_playback, &PlaybackController::playingChanged,
@@ -129,26 +142,100 @@ PlaybackSync::PlaybackSync(RoomSession *session,
             });
 
     // ---- 直播掉线重连 ----
-    // 这里自动重新解析一遍再加载，延迟 3 秒避免疯狂重试。
+    // 单一去重定时器：播放器对同一个坏源会连发几十次 errorOccurred，
+    // 每个都排 3 秒 singleShot 会在到期时形成 start→cancel 的解析风暴。
+    m_liveReconnectTimer.setSingleShot(true);
+    m_liveReconnectTimer.setInterval(3000);
+    connect(&m_liveReconnectTimer, &QTimer::timeout, this, [this]() {
+        if (m_session == nullptr || !m_session->inRoom())
+            return;
+        if (m_session->roomMode() != RoomSession::RoomMode::Url || !live())
+            return;
+
+        // 新的解析/下载还在跑时不要推倒重来：播放器的错误可能来自上一条
+        // 旧源，等这次任务自己出结果。否则每 3 秒都会把健康的任务取消一次。
+        if (m_urlDownloader != nullptr) {
+            const QString stage = m_urlDownloader->stage();
+            if (stage == QLatin1String("probing")
+                || stage == QLatin1String("downloading")
+                || stage == QLatin1String("merging")
+                || stage == QLatin1String("checking")) {
+                LOG_DEBUG("Playback") << "直播重连时下载器仍在工作，保留当前任务";
+                return;
+            }
+        }
+
+        // 只有真正要重试时才消耗一次配额；上面因下载器忙而返回的不算。
+        ++m_liveRetryCount;
+        LOG_INFO("Playback") << "直播重连第" << m_liveRetryCount << "/"
+                             << kMaxLiveRetries << "次";
+
+        const QString itemId = m_session->playlist()->currentItemId();
+        // 清掉"已就绪"标记，让 prepareUrlItem 重新走一遍解析
+        clearPrepared();
+        clearDownloadItem();
+        // 上一次如果已经失败过，live 重连要允许再试；manual retry 也走同一套
+        clearFailedItem(itemId);
+        prepareUrlItem(itemId);
+    });
+
+    // 直播稳定播放一段时间才清零重连计数。不能一 load() 成功就清零：
+    // 坏源往往也能先播几秒，那样每次都会重新获得满额重试。
+    m_liveStableTimer.setSingleShot(true);
+    m_liveStableTimer.setInterval(kLiveStableMs);
+    connect(&m_liveStableTimer, &QTimer::timeout, this, [this] {
+        if (m_liveRetryCount == 0)
+            return;
+        LOG_INFO("Playback") << "直播已稳定播放，重置重连计数";
+        m_liveRetryCount = 0;
+    });
+    connect(m_playback, &PlaybackController::videoFrameAvailable, this, [this] {
+        if (m_session == nullptr
+            || m_session->roomMode() != RoomSession::RoomMode::Url
+            || !live())
+            return;
+        if (!m_liveStableTimer.isActive())
+            m_liveStableTimer.start();
+    });
+
     connect(m_playback, &PlaybackController::errorOccurred, this,
             [this](const QString &message) {
                 if (m_session == nullptr || !m_session->inRoom())
                     return;
                 if (m_session->roomMode() != RoomSession::RoomMode::Url || !live())
                     return;
+                if (m_liveReconnectTimer.isActive()) {
+                    LOG_DEBUG("Playback") << "直播重连已排队，忽略重复错误:"
+                                          << message;
+                    return;
+                }
 
-                LOG_WARN("Playback") << "直播流出错,3 秒后重连:" << message;
-                QTimer::singleShot(3000, this, [this]() {
-                    if (m_session == nullptr || !m_session->inRoom())
-                        return;
-                    if (m_session->roomMode() != RoomSession::RoomMode::Url || !live())
-                        return;
+                m_liveStableTimer.stop();
 
-                    // 清掉"已就绪"标记，让 prepareUrlItem 重新走一遍解析
+                if (m_liveRetryCount >= kMaxLiveRetries) {
+                    const QString itemId = m_session->playlist()->currentItemId();
+                    QString text =
+                        QStringLiteral("直播连续重连 %1 次仍失败，已停止自动重连。"
+                                       "请检查直播源是否需要登录/Cookie，或点刷新重试。")
+                            .arg(kMaxLiveRetries);
+                    if (!message.isEmpty())
+                        text += QStringLiteral("\n最近错误：") + message;
+                    if (!itemId.isEmpty())
+                        m_failedItems.insert(itemId, text);
+                    // 这里不直接 unload()：unload 会复位 PlaybackController 的
+                    // m_errorReported，若 stop()/setSource() 又触发 errorOccurred，
+                    // 就会在错误信号里递归。播放器已处于错误态，保留即可；
+                    // 下次切条目/手动重试时 prepareUrlItem 会正常卸载。
                     clearPrepared();
-                    clearDownloadItem();
-                    prepareUrlItem(m_session->playlist()->currentItemId());
-                });
+                    emit downloadStateChanged();
+                    LOG_WARN("Playback") << "直播重连达到上限，停止:" << message;
+                    return;
+                }
+
+                LOG_WARN("Playback") << "直播流出错,3 秒后重连(第"
+                                     << (m_liveRetryCount + 1) << "/"
+                                     << kMaxLiveRetries << "次):" << message;
+                m_liveReconnectTimer.start();
             });
 
     // 房主周期性广播位置（观众端进度条的数据源）
@@ -309,7 +396,8 @@ QString PlaybackSync::downloadStageText() const
     if (stage == QLatin1String("checking"))
         return QStringLiteral("检查动态范围中…");
     if (stage == QLatin1String("failed"))
-        return QStringLiteral("下载失败");
+        return live() ? QStringLiteral("直播连接失败，已停止自动重连")
+                      : QStringLiteral("下载失败");
     return {};
 }
 
@@ -330,7 +418,7 @@ QString PlaybackSync::downloadShortText() const
     if (stage == QLatin1String("checking"))
         return QStringLiteral("检查中");
     if (stage == QLatin1String("failed"))
-        return QStringLiteral("下载失败");
+        return live() ? QStringLiteral("直播失败") : QStringLiteral("下载失败");
     return {};
 }
 
@@ -410,6 +498,9 @@ void PlaybackSync::retryItem(const QString &itemId)
 
     if (itemId == current) {
         LOG_INFO("Playback") << "重试当前条目";
+        m_liveReconnectTimer.stop();
+        m_liveStableTimer.stop();
+        m_liveRetryCount = 0;
         // 先掐掉可能在跑的那次（失败/卡住时它可能还挂着）
         m_urlDownloader->cancel();
         // 弹幕也一起复位；beginItem 仍会优先复用已有的 danmaku.xml，
@@ -600,6 +691,10 @@ void PlaybackSync::onLocalSeeked(qint64 position) {
 }
 
 void PlaybackSync::onMediaChanged() {
+    // 新源真的加载/播起来了：取消还在排队的直播重连，避免它把刚恢复的
+    // 播放再推倒一次。
+    if (m_playback != nullptr && m_playback->hasLoaded())
+        m_liveReconnectTimer.stop();
     pushVideoStatus();
     emit gateChanged();
     emit durationChanged();
@@ -607,6 +702,9 @@ void PlaybackSync::onMediaChanged() {
 
 void PlaybackSync::onRoomChanged() {
     // 模式变化、进出房间：媒体源可能随之变化，走完整重算。
+    m_liveReconnectTimer.stop();
+    m_liveStableTimer.stop();
+    m_liveRetryCount = 0;
     handleRoomState(true);
 }
 
@@ -727,6 +825,11 @@ void PlaybackSync::handleRoomState(bool reloadMedia) {
 void PlaybackSync::onPlaylistSwitched(const QString &itemId) {
     if (m_session == nullptr || m_playback == nullptr)
         return;
+
+    // 切条目后不要再让上一条的直播重连去取消新条目的解析
+    m_liveReconnectTimer.stop();
+    m_liveStableTimer.stop();
+    m_liveRetryCount = 0;
 
     // 失败状态不在切条目时清除：切回失败条目仍然显示错误，必须由用户
     // 点刷新图标才会重新下载。离开房间/切到非网链模式时才清（见 onRoomChanged）。
@@ -979,6 +1082,8 @@ void PlaybackSync::onUrlResolved()
         return;
 
     const bool isCurrent = itemId == m_session->playlist()->currentItemId();
+    if (isCurrent)
+        m_liveReconnectTimer.stop();
     if (!isCurrent) {
         // 后台重试拿到直链：没有文件可缓存，切到该条目时重新解析即可。
         LOG_INFO("Playback") << "后台重试得到直链,无法缓存:" << itemId;
@@ -1038,6 +1143,7 @@ void PlaybackSync::onUrlReady(const QString &filePath)
 
     const bool isCurrent = itemId == m_session->playlist()->currentItemId();
     if (isCurrent) {
+        m_liveReconnectTimer.stop();
         const QUrl readySource = QUrl::fromLocalFile(filePath);
         markPrepared(itemId, readySource);
         m_playback->load(readySource);

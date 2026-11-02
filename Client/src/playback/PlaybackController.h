@@ -231,6 +231,10 @@ private:
     // 播放器因卸载/换源/播完而停止，不是用户主动暂停。PlaybackSync 据此
     // 不广播 Pause，避免把房间里的其他人按停。
     bool m_lifecycleStop = false;
+    // 同一个源只上报一次 errorOccurred。FFmpeg 对坏源/断流会连续抛几十次
+    // demux 错误；如果每次都上报，PlaybackSync 会排出大量 3 秒重连定时器，
+    // 形成 yt-dlp 重复解析风暴（实测）。
+    bool m_errorReported = false;
     // clearVideoFrame() 会把黑帧写进 outputSink，而该 sink 又连着 onVideoFrame。
     // 不清掉这个回灌，本地显示分支会把黑帧当成真实解码帧转发给推流端。
     bool m_injectingClearFrame = false;

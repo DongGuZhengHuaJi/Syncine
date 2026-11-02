@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
@@ -32,6 +33,19 @@ QString shortVersion(const QString &line)
         return parts.at(2);
     }
     return line;
+}
+
+QStringList pluginFiles(const QString &directory)
+{
+    QStringList files;
+    if (directory.isEmpty() || !QFileInfo(directory).isDir())
+        return files;
+
+    QDirIterator it(directory, {QStringLiteral("*.py")}, QDir::Files,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext())
+        files << QDir(directory).relativeFilePath(it.next());
+    return files;
 }
 
 } // namespace
@@ -116,6 +130,29 @@ void Toolchain::detect()
         LOG_INFO("Toolchain") << "ffprobe:" << m_ffprobePath;
     else if (!m_ffmpegPath.isEmpty())
         LOG_WARN("Toolchain") << "未发现 ffprobe，部分功能受到限制";
+
+    // 斗鱼签名 JS 的运行时。优先随包的 qjs（体积小），Windows 发布包也可
+    // 带 Node.js；都没有时插件会自己找系统 PATH。这里设环境变量是为了让
+    // yt-dlp 子进程里的插件能看到随包路径。
+    m_qjsPath = findTool(QStringLiteral("qjs"),
+                         {QStringLiteral("qjs") + exeSuffix});
+    if (!m_qjsPath.isEmpty()) {
+        if (qEnvironmentVariableIsEmpty("SYNCINE_QJS"))
+            qputenv("SYNCINE_QJS", m_qjsPath.toUtf8());
+        LOG_INFO("Toolchain") << "qjs:" << m_qjsPath;
+    }
+    m_nodePath = findTool(QStringLiteral("node"),
+                          {QStringLiteral("node") + exeSuffix});
+    if (!m_nodePath.isEmpty()) {
+        if (qEnvironmentVariableIsEmpty("SYNCINE_NODE"))
+            qputenv("SYNCINE_NODE", m_nodePath.toUtf8());
+        LOG_INFO("Toolchain") << "Node.js:" << m_nodePath;
+    }
+    if (m_qjsPath.isEmpty() && m_nodePath.isEmpty()) {
+        LOG_WARN("Toolchain") << "未发现 qjs/Node.js，斗鱼直播插件签名可能失败";
+    }
+
+    logPlugins();
 
     emit statusChanged();
 
@@ -202,6 +239,98 @@ QStringList Toolchain::ffmpegLocationArgs() const
     if (m_ffmpegDir.isEmpty())
         return {};
     return {QStringLiteral("--ffmpeg-location"), m_ffmpegDir};
+}
+
+void Toolchain::setPluginsEnabled(bool enabled)
+{
+    if (m_pluginsEnabled == enabled)
+        return;
+    m_pluginsEnabled = enabled;
+    LOG_INFO("Toolchain") << "yt-dlp 用户插件:" << (enabled ? "启用" : "关闭");
+}
+
+void Toolchain::setPluginDirectory(const QString &directory)
+{
+    const QString cleaned = QDir::cleanPath(directory.trimmed());
+    if (m_pluginDirectory == cleaned)
+        return;
+    m_pluginDirectory = cleaned;
+    LOG_INFO("Toolchain") << "yt-dlp 插件目录:" << m_pluginDirectory;
+}
+
+QString Toolchain::bundledPluginDirectory() const
+{
+    // 开发时 appDir 是 Client/build-*，appDir/../plugins 就是源码目录；
+    // 安装后 appDir 是 <prefix>/bin，appDir/../tools/yt-dlp-plugins 命中
+    // CMake 安装出来的位置。便携版可把 plugins/ 放在可执行文件旁。
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QStringList candidates{
+        appDir + QStringLiteral("/plugins"),
+        QDir::cleanPath(appDir + QStringLiteral("/../plugins")),
+        appDir + QStringLiteral("/tools/yt-dlp-plugins"),
+        QDir::cleanPath(appDir + QStringLiteral("/../tools/yt-dlp-plugins")),
+    };
+
+    for (const QString &candidate : candidates) {
+        if (QFileInfo(candidate).isDir())
+            return QDir::cleanPath(candidate);
+    }
+    return {};
+}
+
+QStringList Toolchain::pluginArgs() const
+{
+    // 关闭时也要带 --no-plugin-dirs：yt-dlp 默认会搜索可执行文件旁的
+    // yt-dlp-plugins 和用户配置目录，不阻止的话“关闭”只是 UI 上的说法。
+    QStringList args{QStringLiteral("--no-plugin-dirs")};
+
+    QStringList directories;
+    const QString bundled = bundledPluginDirectory();
+    if (!bundled.isEmpty())
+        directories << bundled;
+
+    if (m_pluginsEnabled && !m_pluginDirectory.isEmpty()) {
+        const QFileInfo info(m_pluginDirectory);
+        if (info.isDir()) {
+            const QString userDir = info.absoluteFilePath();
+            if (!directories.contains(userDir))
+                directories << userDir;
+        }
+    }
+
+    for (const QString &directory : directories)
+        args << QStringLiteral("--plugin-dirs") << directory;
+    return args;
+}
+
+void Toolchain::logPlugins() const
+{
+    auto logDirectory = [](const QString &label, const QString &directory) {
+        if (directory.isEmpty() || !QFileInfo(directory).isDir()) {
+            LOG_WARN("Toolchain") << label << "目录不存在:" << directory;
+            return;
+        }
+
+        const QStringList files = pluginFiles(directory);
+        if (files.isEmpty()) {
+            LOG_WARN("Toolchain") << label << "目录中没有 .py 文件:" << directory;
+            return;
+        }
+
+        QStringList shown = files.mid(0, 8);
+        if (files.size() > shown.size())
+            shown << QStringLiteral("…");
+        LOG_INFO("Toolchain") << (label + QLatin1Char(':')) << files.size()
+                              << "个文件" << shown.join(QStringLiteral(", "));
+    };
+
+    logDirectory(QStringLiteral("yt-dlp 内置插件"), bundledPluginDirectory());
+
+    if (!m_pluginsEnabled) {
+        LOG_INFO("Toolchain") << "yt-dlp 用户插件: 关闭";
+        return;
+    }
+    logDirectory(QStringLiteral("yt-dlp 用户插件"), m_pluginDirectory);
 }
 
 bool Toolchain::isSafeMediaUrl(const QString &url)

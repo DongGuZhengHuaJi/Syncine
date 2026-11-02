@@ -41,6 +41,11 @@ class Toolchain : public QObject {
                READ statusText
                NOTIFY statusChanged)
 
+    // 随包内置插件目录（空 = 未找到）。设置页据此说明内置插件始终启用。
+    Q_PROPERTY(QString bundledPluginDirectory
+               READ bundledPluginDirectory
+               CONSTANT)
+
 public:
     explicit Toolchain(QObject *parent = nullptr);
     ~Toolchain() override;
@@ -62,6 +67,11 @@ public:
     QString ytDlpVersion() const { return m_ytDlpVersion; }
     QString ffmpegVersion() const { return m_ffmpegVersion; }
 
+    // 斗鱼签名 JS 的运行时。随包优先 qjs（约 2.5MB），Windows 可随包放
+    // Node.js；都没有时插件会自己找系统 PATH。
+    QString qjsPath() const { return m_qjsPath; }
+    QString nodePath() const { return m_nodePath; }
+
     // 传给 yt-dlp 的参数：显式指定使用本项目的这一份 ffmpeg。
     //
     // 必须显式指定的原因：yt-dlp 的查找顺序为
@@ -69,6 +79,22 @@ public:
     // 用户机器上只要存在旧版 ffmpeg（如发行版自带的 4.x），就会被优先采用——
     // 旧版本转封装兼容性较差，且报错信息难以理解。
     QStringList ffmpegLocationArgs() const;
+
+    // ---- yt-dlp 插件 ----
+    // 内置插件（Client/plugins，安装后位于 tools/yt-dlp-plugins）始终加载；
+    // 这里的开关只控制用户自己添加的插件目录。
+    void setPluginsEnabled(bool enabled);
+    void setPluginDirectory(const QString &directory);
+    QString pluginDirectory() const { return m_pluginDirectory; }
+
+    // 随包内置插件目录；找不到返回空。开发时命中 Client/plugins，
+    // 安装后命中 <prefix>/tools/yt-dlp-plugins。
+    QString bundledPluginDirectory() const;
+
+    // 传给 yt-dlp 的插件参数。**总是**先给 --no-plugin-dirs（阻止默认插件目录
+    // 和用户 config 里的 --plugin-dirs），再追加内置插件目录；用户目录仅在
+    // 启用且存在时追加。目录不存在时不能传，否则 yt-dlp 会直接退出。
+    QStringList pluginArgs() const;
 
     // ---- 把外部来源的 URL 交给 yt-dlp 时的安全处理 ----
     //
@@ -97,14 +123,20 @@ private:
     static QString findTool(const QString &subdir, const QStringList &names);
     // 异步读取版本号（输出的第一行）。各工具的 args 不同，见 detect() 中的注释。
     void probeVersion(const QString &path, const QStringList &args, QString *target);
+    // 启动日志里列出插件目录中的 .py 文件，便于确认插件是否被选中。
+    void logPlugins() const;
 
     QString m_ytDlpPath;
     QString m_ffmpegPath;
     QString m_ffprobePath;
+    QString m_qjsPath;
+    QString m_nodePath;
     QString m_ffmpegDir;
     QString m_ytDlpVersion;
     QString m_ffmpegVersion;
     int m_pendingProbes = 0;
+    bool m_pluginsEnabled = false;
+    QString m_pluginDirectory;
 };
 
 #endif //SYNCINE_TOOLCHAIN_H

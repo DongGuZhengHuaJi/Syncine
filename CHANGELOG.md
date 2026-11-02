@@ -4,6 +4,38 @@
 
 ## [未发布]
 
+### 网链
+
+- **yt-dlp 用户插件**：设置 → 播放与下载 → yt-dlp 插件。默认关闭；启用后通过
+  `--plugin-dirs` 加载用户插件，关闭时用 `--no-plugin-dirs` 阻止 yt-dlp 的默认插件
+  目录和用户 config 里的 `--plugin-dirs`，避免不同客户端因插件不同而解析出不同结果。
+  插件目录可自行选择，默认 `<AppData>/yt-dlp-plugins`；每个插件放在一个子目录中：
+  `<插件名>/yt_dlp_plugins/extractor/*.py`。插件是任意 Python 代码，只启用可信来源。
+- **插件数据兼容**：flat playlist 条目缺少 `webpage_url` 时回退到 `url`；点播 HLS
+  即使没有 duration 也不再被误判为直播（只有源地址本身是 m3u8 才按直播兜底）；
+  `resolution` 可作为 width/height 的兜底；标题已含「第 N 集」时不再重复加前缀。
+- **剧集列表改为 `--flat-playlist`**：不再逐集完整解析。实测 198 集的番剧非 flat
+  超过 70 秒，会撞上解析看门狗；flat 只需数秒，插件/番剧的大列表可以正常列出。
+  缺少标题的条目显示为「第 N 集」。
+- **内置斗鱼直播插件**：`Client/plugins/douyu/...` 随包安装到
+  `tools/yt-dlp-plugins`，始终加载；设置里的「用户插件」开关只控制额外插件目录。
+- **斗鱼签名不再要求用户安装 Node.js**：Linux/macOS 随包携带 QuickJS-ng
+  `qjs`（约 2.5MB），Windows 随包携带 Node.js；启动时通过 `SYNCINE_QJS` /
+  `SYNCINE_NODE` 传给 yt-dlp。插件优先 Node（如果系统有）再回退 qjs，
+  `DOUYU_JS_RUNTIME=qjs|node` 可强制选择。实测 9999、100 均能解析并播放。
+
+### 修复
+
+- **斗鱼直播播放几秒后反复断流、重新解析**：斗鱼 CDN 的签名直链令牌一次有效，
+  原先的直链试拉（`Range: bytes=0-0`）会先消耗掉真正要播放的地址，播放器随后
+  只能收到约 300KB 就报 `Stream ends prematurely` / `Demuxing failed`。现在
+  **直播不再试拉**，直接把地址交给播放器；点播仍保留试拉，直链拉不动时自动
+  退回下载合并。真实 `UrlDownloader` + `PlaybackController` 播斗鱼 FLV 实测
+  875 帧、0 错误（修复前 76–141 帧即断）。
+- **直播重连上限**：直播连续自动重连 3 次仍失败就停止，不再无限重解析；
+  条目上显示“直播连接失败”和最近一次播放器错误，并提示检查登录/Cookie 或
+  点刷新重试。稳定播放 10 秒后重连计数自动清零。新增 `playbacksync` 回归测试。
+
 ## [1.6.0] — 2026-11-01
 
 > 本版客户端与服务端需要一起升级：屏幕共享新增 `set_share_state` / `share_state`，

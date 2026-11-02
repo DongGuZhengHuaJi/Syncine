@@ -51,6 +51,10 @@ struct MediaFormat {
         Combined,
     };
 
+    // 解析成功后的有效性标记。**不要用 formatId.isEmpty() 判断流是否存在**：
+    // 插件可以不提供 format_id，这种流仍能靠 -S 排序下载。
+    bool valid = false;
+
     QString formatId;
     QString url;
     QString protocol;      // https / m3u8_native / http_dash_segments ...
@@ -80,10 +84,13 @@ struct MediaFormat {
     bool isCombined() const { return kind == Combined; }
     // 直链这条路（QMediaPlayer 直接加载）只吃这几类：普通 http(s) 文件和 HLS。
     // FLV 直播流、DASH 等拉不了，只能走下载合并 —— 而直播又没法"下完"。
+    // **不能写 startsWith("http")**：http_dash_segments 也会被误判成可直链。
     bool isDirectPlayable() const
     {
-        return protocol.startsWith(QLatin1String("http"))
-               || protocol.contains(QLatin1String("m3u8"));
+        return protocol == QLatin1String("http")
+               || protocol == QLatin1String("https")
+               || protocol == QLatin1String("m3u8")
+               || protocol == QLatin1String("m3u8_native");
     }
 
     // 显示用的"多少 P":取短边。

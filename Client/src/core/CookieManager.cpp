@@ -435,6 +435,7 @@ void CookieManager::importFromBrowser(const QString &key)
 
     const QStringList args{
         QStringLiteral("--ignore-config"),   // 用户 ~/.config/yt-dlp/config 里的
+        QStringLiteral("--no-plugin-dirs"),  // cookie 导出不需要插件，禁止加载任意 Python
         QStringLiteral("--no-cache-dir"),    // --cookies 会在退出时被本类覆盖
         QStringLiteral("--no-warnings"),
         QStringLiteral("--cookies-from-browser"), key,

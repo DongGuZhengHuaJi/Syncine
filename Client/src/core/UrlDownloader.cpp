@@ -15,6 +15,7 @@
 #include "core/CookieManager.h"
 #include "core/Log.h"
 #include "core/Toolchain.h"
+#include "core/YtDlpOutput.h"
 #include "media/MediaPlatform.h"
 
 namespace {
@@ -60,20 +61,6 @@ QString formatEta(int seconds)
         return {};
     return QStringLiteral("%1:%2").arg(seconds / 60)
         .arg(seconds % 60, 2, 10, QLatin1Char('0'));
-}
-
-// 从 yt-dlp 的输出里挑"原因"那一行。它出错时总是打一行 ERROR: 开头的话，
-// 而周围混着别的东西(合并通道把 stderr 也并进来了，`-J` 失败时还会单独
-// 输出一个 null)—— 整段原样显示会带一堆噪声，只挑 ERROR 那行最清楚。
-// 挑不到（比如根本不是 yt-dlp 的报错）就退回整段原文。
-QString errorFromOutput(const QStringList &output, const QString &fallback)
-{
-    for (int i = output.size() - 1; i >= 0; --i) {
-        const QString line = output.at(i).trimmed();
-        if (line.startsWith(QLatin1String("ERROR:")))
-            return line;
-    }
-    return output.isEmpty() ? fallback : output.join(QLatin1Char('\n'));
 }
 
 // 手动钉的 format_id 在本端 formats 里不存在时，yt-dlp 会报这个。
@@ -187,19 +174,25 @@ void UrlDownloader::startResolve(const QString &url, const QString &spec)
 
 void UrlDownloader::handleResolveFinished(int exitCode)
 {
-    // 探测的 stdout 就是那一整份 JSON(合并通道后它可能和警告混在一起，
-    // 所以从第一个 '{' 开始截)
-    const QByteArray output = m_outputBuffer;
-    const int start = output.indexOf('{');
-    const QJsonDocument document = start >= 0
-        ? QJsonDocument::fromJson(output.mid(start))
-        : QJsonDocument();
-    if (exitCode != 0 || !document.isObject()) {
-        fail(errorFromOutput(m_outputTail, QStringLiteral("yt-dlp 没能解析这个链接")));
+    // 探测的 stdout 是 JSON，但前面可能混着 WARNING/ERROR
+    const QJsonObject root = YtDlpOutput::parseJsonObject(m_outputBuffer);
+    if (exitCode != 0 || root.isEmpty()) {
+        fail(YtDlpOutput::lastError(m_outputTail,
+                                    QStringLiteral("yt-dlp 没能解析这个链接")));
         return;
     }
 
-    m_media = MediaFormats::parseMediaInfo(document.object());
+    m_media = MediaFormats::parseMediaInfo(root);
+    if (m_media.formats.isEmpty() && m_media.episodes.isEmpty()) {
+        fail(QStringLiteral(
+            "yt-dlp 没有返回可用的视频格式或剧集（插件可能返回了不支持的字段或空结果）"));
+        return;
+    }
+    if (m_media.isPlaylist()) {
+        fail(QStringLiteral("这个链接包含多集，请先在添加条目弹窗里选择具体一集"));
+        return;
+    }
+
     m_selection = MediaFormats::resolve(m_spec, m_media, m_allowHdr);
 
     if (!m_selection.valid) {
@@ -224,9 +217,16 @@ void UrlDownloader::handleResolveFinished(int exitCode)
     emit probed();
 
     if (m_selection.direct) {
-        // 合一格式（或直播的 m3u8）:试一下能不能直接拉 —— 能就交给播放器
-        m_verifyCandidate = m_selection.url;
-        verifyDirectUrl(m_verifyCandidate);
+        // 直播不做试拉：部分 CDN（斗鱼实测）的签名令牌一次有效，任何预请求
+        // 都会让播放器只能收到一小段就断流。播放器才是真正的使用者，直接交给它。
+        if (m_media.live) {
+            LOG_INFO("UrlDownloader") << "直播直链跳过试拉，直接播放";
+            setStage(QStringLiteral("resolved"));
+            emit resolved();
+            return;
+        }
+        // 点播保留试拉：直链拉不动时能自动退回下载合并（yt-dlp 下载可带请求头）。
+        verifyDirectUrl(m_selection.url);
         return;
     }
 
@@ -235,6 +235,7 @@ void UrlDownloader::handleResolveFinished(int exitCode)
 
 void UrlDownloader::verifyDirectUrl(const QString &url)
 {
+    m_verifyCandidate = url;
     QNetworkRequest request{QUrl(url)};
     // 测试一个字节，验证能否响应
     // 不携带消息头（Referer/Cookie） —— 后续播放器无法携带
@@ -475,15 +476,16 @@ void UrlDownloader::handleDownloadFinished(int exitCode)
             return;
         }
 
-        fail(errorFromOutput(m_outputTail,
-                             QStringLiteral("yt-dlp 退出码 %1").arg(exitCode)));
+        fail(YtDlpOutput::lastError(m_outputTail,
+                                    QStringLiteral("yt-dlp 退出码 %1").arg(exitCode)));
         return;
     }
 
     // 寻找最终产物
     const QStringList finalExts{QStringLiteral("mkv"), QStringLiteral("mp4"),
                                 QStringLiteral("webm"), QStringLiteral("mov"),
-                                QStringLiteral("flv"), QStringLiteral("avi")};
+                                QStringLiteral("flv"), QStringLiteral("avi"),
+                                QStringLiteral("ts")};
     const QDir dir(m_destDir);
     const QStringList entries = dir.entryList({QStringLiteral("media.*")}, QDir::Files);
     for (const QString &name : entries) {
@@ -544,6 +546,7 @@ void UrlDownloader::startProcess(const QStringList &options, const QString &url)
     // url 在末尾，其余无限制
     QStringList args = options;
     args << m_toolchain->ffmpegLocationArgs();
+    args << m_toolchain->pluginArgs();
     // 只有平台策略允许时才带 cookie：B 站始终带，Generic 默认不带，
     // 避免把 B 站登录态发给任意站点。
     const MediaPlatform *platform = mediaPlatformRegistry().detect(QUrl(m_url));
@@ -629,9 +632,10 @@ void UrlDownloader::startProcess(const QStringList &options, const QString &url)
                     handleDownloadFinished(exitCode);
             });
 
-    // 探测 30 秒、下载 60 秒没有输出就判卡死；进入合并阶段后放宽到 3 分钟
-    // （见 handleDownloadLine 的 [Merger] 分支）。
-    startStallTimer(m_stage == QLatin1String("probing") ? 30000 : 60000);
+    // 探测 60 秒、下载 60 秒没有输出就判卡死；进入合并阶段后放宽到 3 分钟
+    // （见 handleDownloadLine 的 [Merger] 分支）。探测放宽到 60 秒是因为
+    // 插件站点解析单集可能要拉页面、API 和多条 m3u8，实测接近 30 秒。
+    startStallTimer(60000);
     process->start();
 }
 
@@ -755,9 +759,9 @@ void UrlDownloader::handleHdrProbeFinished(int exitCode)
     const bool hdr = transfer.contains(QLatin1String("smpte2084"))
                      || transfer.contains(QLatin1String("arib-std-b67"));
 
-    if (exitCode != 0 || output.isEmpty()) {
+    if (exitCode != 0) {
         QFile::remove(path);
-        fail(QStringLiteral("无法确认下载文件的动态范围（ffprobe 没有返回 color_transfer）"));
+        fail(QStringLiteral("ffprobe 读取下载文件失败，无法确认动态范围"));
         return;
     }
     if (hdr) {
@@ -767,6 +771,12 @@ void UrlDownloader::handleHdrProbeFinished(int exitCode)
         fail(QStringLiteral("下载到的是 HDR 流，已按设置拒绝；"
                             "请在设置中允许 HDR，或选择 SDR 档位"));
         return;
+    }
+    // 很多 SDR 容器（尤其插件/remux 源）没有写 color_transfer，ffprobe
+    // 会返回空或 "unknown"。不能因此判失败，按 SDR 接受并留日志。
+    if (output.isEmpty() || transfer.contains(QLatin1String("unknown"))) {
+        LOG_WARN("UrlDownloader") << "color_transfer 缺失或 unknown，按 SDR 接受:"
+                                  << path << "值=" << (output.isEmpty() ? "(空)" : output);
     }
 
     finishReady(path);

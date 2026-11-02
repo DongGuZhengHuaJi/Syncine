@@ -273,6 +273,16 @@ private:
     // 房主周期性广播自己的播放位置，观众端据此推进度条。
     // 只有"共享/网链 + 房主 + 播放中"时真正发出，其余时刻空转。
     QTimer m_positionTimer;
+    // 直播断流后的单次重连定时器。**不能每个 errorOccurred 都 singleShot**：
+    // 播放器对同一个坏源会连发几十次错误，大量定时器同时到期会形成
+    // start→cancel 的 yt-dlp 解析风暴。同一时刻只允许一个待重连。
+    QTimer m_liveReconnectTimer;
+    // 连续自动重连次数。达到上限后停止重连并在条目上显示失败原因；
+    // 稳定播放一段时间后由 m_liveStableTimer 复位。
+    int m_liveRetryCount = 0;
+    // 直播稳定播放计时器：连续播放一段时间才把 m_liveRetryCount 清零，
+    // 避免“播一两秒就断”的坏源每次都把重连次数重置掉。
+    QTimer m_liveStableTimer;
 };
 
 #endif //SYNCINE_PLAYBACKSYNC_H

@@ -613,7 +613,9 @@ Rectangle {
 
                         Text {
                             width: parent.width
-                            text: "若反复失败，请更新 yt-dlp（命令见 tools/README.md）"
+                            text: playbackSync.live
+                                  ? "请检查直播源是否需要登录/Cookie，或点刷新重试"
+                                  : "若反复失败，请更新 yt-dlp（命令见 tools/README.md）"
                             wrapMode: Text.Wrap
                             font.pixelSize: 11
                             color: Style.textFaint

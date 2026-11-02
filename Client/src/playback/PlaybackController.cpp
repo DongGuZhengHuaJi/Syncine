@@ -109,6 +109,11 @@ PlaybackController::PlaybackController(QObject *parent)
         [this](QMediaPlayer::Error,
                const QString &errorString) {
 
+            if (m_errorReported) {
+                LOG_DEBUG("Playback") << "播放器重复报错(已上报):" << errorString;
+                return;
+            }
+            m_errorReported = true;
             LOG_WARN("Playback") << "播放器报错:" << errorString;
             emit errorOccurred(errorString);
         }
@@ -142,6 +147,9 @@ PlaybackController::PlaybackController(QObject *parent)
     // 真正进入播放状态（用户点了播放）后，生命周期停止标记复位。
     connect(m_player, &QMediaPlayer::playbackStateChanged, this,
             [this](QMediaPlayer::PlaybackState state) {
+                // 实际播起来了：允许之后的错误重新上报（一次）
+                if (state == QMediaPlayer::PlayingState)
+                    m_errorReported = false;
                 if (state == QMediaPlayer::PlayingState)
                     m_lifecycleStop = false;
             });
@@ -529,6 +537,7 @@ void PlaybackController::load(const QUrl &source)
 
     // 换源会让播放器 Stopped，这个 playingChanged(false) 不是用户暂停。
     m_lifecycleStop = true;
+    m_errorReported = false;
     m_player->setSource(source);
     emit sourceChanged();
     emit hasLoadedChanged();
@@ -536,6 +545,7 @@ void PlaybackController::load(const QUrl &source)
 
 void PlaybackController::unload() {
     m_lifecycleStop = true;
+    m_errorReported = false;
     // 只有确实卸载过一个源才值得整理 allocator；重复的空卸载（共享模式观众、
     // 空列表等路径会反复走到这里）直接跳过。
     const bool hadSource = m_player->source().isValid();

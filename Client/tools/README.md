@@ -1,6 +1,6 @@
 # 外部工具
 
-网链模式(URL 播放)需要的两个**命令行**工具。
+网链模式(URL 播放)需要的**命令行**工具。
 
 > 别和 Qt 那套 FFmpeg 搞混:Qt Multimedia 用的是随 Qt 分发的**动态库**
 > (`libavcodec.so.61` 等,在 Qt 的 lib 目录里),从不调用可执行文件;
@@ -11,13 +11,22 @@
 | `yt-dlp/yt-dlp_linux` | 2026.08.19 | `github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux` | 源码 Unlicense(公有领域);**打好的可执行文件因含 PyInstaller/GPLv3+ 组件,整体按 GPLv3+ 分发** |
 | `ffmpeg/ffmpeg` | N-127271(2026-10-10) | BtbN/FFmpeg-Builds 的 `ffmpeg-master-latest-linux64-lgpl.tar.xz` | LGPL v3(见 `ffmpeg/LICENSE.txt`) |
 | `ffmpeg/ffprobe` | 同上 | 同上 | 同上 |
+| `qjs/qjs` | v0.18.0 | `github.com/quickjs-ng/quickjs/releases` 的 `qjs-linux-x86_64` | MIT(见 `qjs/LICENSE`) |
+| `node/node.exe` | v26.13.0 | `nodejs.org/dist/v26.13.0` 的 `win-x64.zip`，仅 Windows | MIT(见 `node/LICENSE`) |
 
 **为什么选 lgpl 版 ffmpeg**:合并音视频只需要转封装(`-c copy`,不重新编码),
 用不到 x264/x265 这些 GPL-only 编码器 —— LGPL 版完全够用,分发义务最轻。
 
-**体积**:`ffmpeg` 与 `ffprobe` 各约 139MB,`yt-dlp` 约 40MB。`ffplay` 用不上,没放。
-要瘦身可以删掉 `ffprobe`(省 139MB),代价是 yt-dlp 少一些修复能力
-(比如 m3u8 下载后修时间戳),它会在日志里给警告。
+**体积**:`ffmpeg` 与 `ffprobe` 各约 139MB,`yt-dlp` 约 40MB,`qjs` 约 2.5MB。
+`ffplay` 用不上,没放。要瘦身可以删掉 `ffprobe`(省 139MB),代价是 yt-dlp
+少一些修复能力(比如 m3u8 下载后修时间戳),它会在日志里给警告。
+
+**为什么还要 qjs/Node**:斗鱼直播的 `getH5Play` 需要执行站点下发的混淆
+签名 JS。旧实现要求用户自己安装 Node.js;现在 Linux/macOS 随包带
+**QuickJS-ng**(`qjs`,约 2.5MB),Windows 官方没有 qjs 预编译包,随包带
+Node.js(`node.exe`)。应用启动时把路径写入 `SYNCINE_QJS` / `SYNCINE_NODE`,
+yt-dlp 子进程里的插件据此找到运行时;插件也支持用户用 `DOUYU_QJS` /
+`DOUYU_NODE` 覆盖。两者都没有时才回退 PhantomJS 或报错。
 
 ## 怎么更新
 
@@ -46,8 +55,10 @@ ffmpeg 很少需要更新;要更新就重下最新的 `linux64-lgpl.tar.xz`,
 
 ## 跨平台
 
-二进制是平台相关的,现在只放了 **linux-x86_64**。以后做别的平台要各放各的:
-`yt-dlp.exe` / `yt-dlp_macos`,ffmpeg 用 BtbN 的 `win64`(macOS 要另找来源)。
+二进制是平台相关的。脚本会为当前平台选:
+`yt-dlp_linux` / `yt-dlp_macos` / `yt-dlp.exe`,ffmpeg 用 BtbN 的
+`linux64` / `win64`,qjs 用 QuickJS-ng 的 `linux-*` / `darwin-*`。
+Windows 没有 qjs 预编译资产,脚本改为下载 Node.js 的 `node.exe` 兜底。
 
 ## 应用怎么用它们(网链模式)
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# 下载随包分发的命令行工具（ffmpeg / ffprobe、yt-dlp）到 Client/tools/。
+# 下载随包分发的命令行工具（ffmpeg / ffprobe、yt-dlp、qjs，Windows 另含
+# Node.js）到 Client/tools/。
 #
 # 这些二进制加起来约 320 MB，不入仓库，用这个脚本获取。
 #
@@ -27,6 +28,15 @@ YTDLP_SHA256_linux_x86_64="58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d68986
 FFMPEG_BUILD="N-127271-gba987fe24d-20261010"
 FFMPEG_SHA256_linux_x86_64_ffmpeg="3b22c09db3600f234ef317ca61609c86d605359ca4164b8801f7e9e5bdb435ae"
 FFMPEG_SHA256_linux_x86_64_ffprobe="97803e1c1034443c6e696a72be65f1a17c6d8b2335a0eb33cb28204d2a9e8074"
+
+# QuickJS-ng：斗鱼插件用 qjs 执行站点签名 JS。比 Node.js（约 144MB）小得多，
+# 也不需要用户另外安装。Windows 没有官方 qjs 预编译包，改用 Node.js 兜底。
+QJS_VERSION="v0.18.0"
+QJS_SHA256_linux_x86_64="85ded23b9fabe8c1644fc40a8d2bbdd71157affcbd807359c618cc717ee24d7d"
+
+# Windows 兜底：Node.js LTS（qjs 没有 Windows 预编译资产）。
+NODE_VERSION="v26.13.0"
+NODE_SHA256_win_x64="dcc60d59a0746999f99064a01c020445d54d84228c691cdbf25b49ac3b59150a"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="${REPO_ROOT}/Client/tools"
@@ -110,6 +120,15 @@ fetch_ffmpeg() {
     archive="ffmpeg-master-latest-${tag}-lgpl.${ext}"
     url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${archive}"
 
+    local exe=""
+    [ "${tag}" = "win64" ] && exe=".exe"
+    if [ "${FORCE}" -eq 0 ] \
+        && [ -x "${DEST}/ffmpeg/ffmpeg${exe}" ] \
+        && [ -x "${DEST}/ffmpeg/ffprobe${exe}" ]; then
+        echo "    已存在，跳过（--force 可重新下载）"
+        return 0
+    fi
+
     mkdir -p "${DEST}/ffmpeg"
     echo "==> ffmpeg (${archive})"
     tmp="$(mktemp -d)"
@@ -138,9 +157,6 @@ fetch_ffmpeg() {
     bin_dir="$(find "${tmp}" -type d -name bin | head -1)"
     [ -n "${bin_dir}" ] || die "压缩包里没找到 bin/ 目录"
 
-    local exe=""
-    [ "${tag}" = "win64" ] && exe=".exe"
-
     for name in ffmpeg ffprobe; do
         cp "${bin_dir}/${name}${exe}" "${DEST}/ffmpeg/${name}${exe}"
     done
@@ -161,9 +177,94 @@ fetch_ffmpeg() {
     chmod +x "${DEST}/ffmpeg/"* 2>/dev/null || true
 }
 
+# ---- qjs（斗鱼签名 JS）-----------------------------------------------
+# Linux/macOS 使用 QuickJS-ng 的预编译二进制；Windows 没有对应资产，改由
+# fetch_node_windows 提供 Node.js。两者插件都认，优先 Node，其次 qjs。
+fetch_qjs() {
+    local os arch asset url hash=""
+    os="$(uname -s)"
+    arch="$(uname -m)"
+    case "${os}" in
+        Linux)
+            case "${arch}" in
+                x86_64|amd64) asset="qjs-linux-x86_64"; hash="${QJS_SHA256_linux_x86_64}" ;;
+                aarch64|arm64) asset="qjs-linux-aarch64" ;;
+                *) warn "没有 Linux ${arch} 的 qjs 预编译包"; return 0 ;;
+            esac
+            ;;
+        Darwin)
+            case "${arch}" in
+                x86_64|arm64) asset="qjs-darwin-${arch}" ;;
+                *) warn "没有 macOS ${arch} 的 qjs 预编译包"; return 0 ;;
+            esac
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    mkdir -p "${DEST}/qjs"
+    url="https://github.com/quickjs-ng/quickjs/releases/download/${QJS_VERSION}/${asset}"
+    echo "==> qjs ${QJS_VERSION} (${asset})"
+    fetch "${url}" "${DEST}/qjs/qjs"
+    if [ -n "${hash}" ]; then
+        verify "${DEST}/qjs/qjs" "${hash}"
+    else
+        warn "未校验 ${asset} 的哈希（本仓库只验证过 linux-x86_64 那份）"
+    fi
+    chmod +x "${DEST}/qjs/qjs" 2>/dev/null || true
+
+    # 许可证随包分发；拉不到不阻断打包
+    curl -fsSL --max-time 20 -o "${DEST}/qjs/LICENSE" \
+        "https://github.com/quickjs-ng/quickjs/raw/${QJS_VERSION}/LICENSE" \
+        || warn "未能下载 qjs 的 LICENSE，请手动补到 ${DEST}/qjs/LICENSE"
+}
+
+# ---- Windows：Node.js 兜底 --------------------------------------------
+fetch_node_windows() {
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*|Windows_NT) ;;
+        *) return 0 ;;
+    esac
+
+    local archive url tmp
+    archive="node-${NODE_VERSION}-win-x64.zip"
+    url="https://nodejs.org/dist/${NODE_VERSION}/${archive}"
+    mkdir -p "${DEST}/node"
+    echo "==> Node.js ${NODE_VERSION} (${archive}，Windows 兜底)"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+
+    fetch "${url}" "${tmp}/${archive}"
+    verify "${tmp}/${archive}" "${NODE_SHA256_win_x64}"
+
+    if command -v 7z >/dev/null 2>&1; then
+        if command -v cygpath >/dev/null 2>&1; then
+            7z x "$(cygpath -w "${tmp}/${archive}")" \
+                -o"$(cygpath -w "${tmp}")" >/dev/null
+        else
+            7z x "${tmp}/${archive}" -o"${tmp}" >/dev/null
+        fi
+    elif command -v unzip >/dev/null 2>&1; then
+        unzip -q "${tmp}/${archive}" -d "${tmp}"
+    else
+        powershell.exe -NoProfile -Command \
+            "Expand-Archive -LiteralPath '$(cygpath -w "${tmp}/${archive}")' -DestinationPath '$(cygpath -w "${tmp}")' -Force"
+    fi
+
+    local node_exe lic
+    node_exe="$(find "${tmp}" -name node.exe -type f | head -1)"
+    [ -n "${node_exe}" ] || die "Node.js 压缩包里没找到 node.exe"
+    cp "${node_exe}" "${DEST}/node/node.exe"
+    lic="$(find "${tmp}" -name LICENSE -type f | head -1)"
+    [ -n "${lic}" ] && cp "${lic}" "${DEST}/node/LICENSE"
+}
+
 echo "目标目录：${DEST}"
 fetch_ytdlp
 fetch_ffmpeg
+fetch_qjs
+fetch_node_windows
 
 echo
 echo "完成。"
@@ -172,4 +273,10 @@ if [ -x "${DEST}/ffmpeg/ffmpeg" ]; then
 fi
 if [ -x "${DEST}/yt-dlp/yt-dlp_linux" ]; then
     echo "  yt-dlp : $("${DEST}/yt-dlp/yt-dlp_linux" --version 2>/dev/null)"
+fi
+if [ -x "${DEST}/qjs/qjs" ]; then
+    echo "  qjs    : $("${DEST}/qjs/qjs" --version 2>/dev/null | head -1)"
+fi
+if [ -x "${DEST}/node/node.exe" ]; then
+    echo "  node   : $("${DEST}/node/node.exe" --version 2>/dev/null)"
 fi

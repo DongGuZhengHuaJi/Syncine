@@ -220,9 +220,11 @@ qt_add_executable(Syncine
         src/danmaku/DanmakuController.h
         src/danmaku/DanmakuXmlParser.cpp
         src/danmaku/DanmakuXmlParser.h
-        # 直播弹幕：WebSocket + zlib 解包 + DANMU_MSG
+        # 直播弹幕：B 站 WebSocket + zlib，斗鱼 12 字节 STT
         src/danmaku/LiveDanmakuSession.cpp
         src/danmaku/LiveDanmakuSession.h
+        src/danmaku/DouyuLiveDanmakuSession.cpp
+        src/danmaku/DouyuLiveDanmakuSession.h
 
         # playback：本地播放器 + 播放同步策略
         src/playback/PlaybackController.cpp
@@ -427,6 +429,36 @@ target_link_libraries(syncine_platform_tests PRIVATE Qt6::Core)
 
 add_test(NAME platform COMMAND syncine_platform_tests)
 
+add_executable(syncine_toolchain_tests
+        tests/tst_toolchain.cpp
+        src/core/Toolchain.cpp
+        src/core/Log.cpp
+)
+
+target_include_directories(syncine_toolchain_tests
+        PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+)
+
+target_link_libraries(syncine_toolchain_tests PRIVATE Qt6::Core)
+
+add_test(NAME toolchain COMMAND syncine_toolchain_tests)
+
+add_executable(syncine_ytdlpoutput_tests
+        tests/tst_ytdlpoutput.cpp
+)
+
+target_include_directories(syncine_ytdlpoutput_tests
+        PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+)
+
+target_link_libraries(syncine_ytdlpoutput_tests PRIVATE Qt6::Core)
+
+add_test(NAME ytdlpoutput COMMAND syncine_ytdlpoutput_tests)
+
 add_executable(syncine_video_tests
         tests/tst_videosource.cpp
         src/webrtc/VideoTrackSource.cpp
@@ -500,6 +532,8 @@ add_executable(syncine_playback_tests
         src/danmaku/DanmakuXmlParser.h
         src/danmaku/LiveDanmakuSession.cpp
         src/danmaku/LiveDanmakuSession.h
+        src/danmaku/DouyuLiveDanmakuSession.cpp
+        src/danmaku/DouyuLiveDanmakuSession.h
 
         src/media/FormatModel.cpp
         src/media/FormatModel.h
@@ -861,7 +895,7 @@ install(TARGETS Syncine
 
 # 随包分发的命令行工具（ffmpeg/ffprobe、yt-dlp）。
 # 用 EXISTS 包住：开发机没跑过 scripts/fetch-tools.sh 时也要能配置成功。
-foreach(tool_dir ffmpeg yt-dlp)
+foreach(tool_dir ffmpeg yt-dlp qjs node)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/${tool_dir}")
         install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tools/${tool_dir}"
                 DESTINATION tools
@@ -873,6 +907,14 @@ endforeach()
 # 工具目录的说明文档（讲清来源、版本与许可）
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/README.md")
     install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/tools/README.md" DESTINATION tools)
+endif()
+
+# 内置 yt-dlp 插件（源码在 Client/plugins，随包安装到 tools/yt-dlp-plugins）。
+# 末尾的斜杠表示安装目录内容而不是目录本身，最终布局：
+#   <prefix>/tools/yt-dlp-plugins/<插件名>/yt_dlp_plugins/extractor/*.py
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/plugins")
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/plugins/"
+            DESTINATION tools/yt-dlp-plugins)
 endif()
 
 # ----------------------------------------------------------------------

@@ -13,7 +13,8 @@
 // 缓存文件与下载的视频放在同一个条目目录（danmaku.xml），生命周期一致：
 // 切条目只停请求不删文件，退出软件时随整个 clientId 临时目录清除。
 //
-// 直播（info.live）不走 XML/游标：转给 LiveDanmakuSession 的 WebSocket 实时流，
+// 直播（info.live）不走 XML/游标：按站点转给对应的 WebSocket 实时会话
+// （B 站 LiveDanmakuSession / 斗鱼 DouyuLiveDanmakuSession），
 // 通过 liveDanmakuBatch 直接推给 QML，不进入 takeUntil。
 //
 
@@ -31,6 +32,7 @@
 #include "danmaku/DanmakuXmlParser.h"
 
 class CookieManager;
+class DouyuLiveDanmakuSession;
 class LiveDanmakuSession;
 class Toolchain;
 struct MediaInfo;
@@ -67,7 +69,7 @@ public:
     //（onRoomChanged 会被成员刷新反复触发，必须幂等）。
     // 返回 true 表示已经命中 danmaku.xml，可直接显示。
     bool beginItem(const QString &dir, const QString &pageUrl);
-    // yt-dlp 探测成功后调用；非 B 站静默跳过，直播转给 LiveDanmakuSession。
+    // yt-dlp 探测成功后调用；非 B 站/斗鱼静默跳过，直播按站点转给对应会话。
     void loadFor(const MediaInfo &info);
     // 媒体缓存命中但没有 MediaInfo 时：直接按页面 URL 尝试下载 / 连接直播。
     void loadFromUrl();
@@ -110,6 +112,8 @@ private:
     static bool isBilibiliUrl(const QString &url);
     static bool isLiveUrl(const QString &url);
     bool isBilibili(const MediaInfo &info) const;
+    // 两个直播会话都停止后才通知 QML 清屏，避免切换站点时误清
+    void onLiveStopped();
 
     void startFetch(quint64 generation);
     void handleFetchFinished(int exitCode, QProcess::ExitStatus status,
@@ -121,6 +125,7 @@ private:
     const CookieManager *m_cookies = nullptr;
     QPointer<QProcess> m_process;
     LiveDanmakuSession *m_live = nullptr;
+    DouyuLiveDanmakuSession *m_douyuLive = nullptr;
 
     QString m_dir;
     QString m_pageUrl;

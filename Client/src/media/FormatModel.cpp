@@ -6,6 +6,8 @@
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QCryptographicHash>
+#include <QRegularExpression>
+#include <QUrl>
 
 #include "core/Log.h"
 
@@ -15,17 +17,59 @@ namespace {
 // yt-dlp 的 JSON 中这些字段可能为 null（取不到），toDouble/toInteger 会当作 0。
 // 但「filesize 为 0」与「没有 filesize」在界面上需要区分，故统一收进一个字段再判断。
 
+// yt-dlp 的 JSON 里同一字段可能是数字、字符串或 null；插件尤其容易给字符串。
+QString stringOf(const QJsonValue &value)
+{
+    if (value.isString())
+        return value.toString();
+    if (value.isDouble()) {
+        const double number = value.toDouble();
+        if (number == static_cast<double>(static_cast<qint64>(number)))
+            return QString::number(static_cast<qint64>(number));
+        return QString::number(number);
+    }
+    if (value.isBool())
+        return value.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+    return {};
+}
+
 double doubleOf(const QJsonValue &value)
 {
-    // null 与缺失字段都到这里；toDouble 对 null 返回 0
-    return value.isDouble() ? value.toDouble() : 0;
+    if (value.isDouble())
+        return value.toDouble();
+    if (value.isString()) {
+        const QString text = value.toString().trimmed();
+        if (text.isEmpty() || text.compare(QLatin1String("NA"), Qt::CaseInsensitive) == 0)
+            return 0;
+        bool ok = false;
+        const double number = text.toDouble(&ok);
+        return ok ? number : 0;
+    }
+    return 0;
+}
+
+int intOf(const QJsonValue &value)
+{
+    return static_cast<int>(doubleOf(value));
 }
 
 qint64 int64Of(const QJsonValue &value)
 {
-    if (!value.isDouble())
-        return 0;
-    return static_cast<qint64>(value.toDouble());
+    return static_cast<qint64>(doubleOf(value));
+}
+
+bool boolOf(const QJsonValue &value)
+{
+    if (value.isBool())
+        return value.toBool();
+    if (value.isDouble())
+        return value.toDouble() != 0;
+    if (value.isString()) {
+        const QString text = value.toString().trimmed().toLower();
+        return text == QLatin1String("true") || text == QLatin1String("1")
+               || text == QLatin1String("yes");
+    }
+    return false;
 }
 
 // vcodec/acodec 在 yt-dlp 的 JSON 中是字符串，"none" 表示该路不存在。
@@ -33,8 +77,75 @@ qint64 int64Of(const QJsonValue &value)
 // TikTok CDN 这类只有 URL、没有编码信息的直链会被整个丢掉。
 bool hasCodec(const QJsonValue &value)
 {
-    const QString text = value.toString();
+    const QString text = stringOf(value);
     return !text.isEmpty() && text != QLatin1String("none");
+}
+
+// 源地址本身是不是 HLS 清单。只能用它判断“裸 m3u8 直播”，
+// 不能因为 formats 里有 m3u8 就判直播 —— 插件把点播 HLS 作为普通格式返回时，
+// duration 也可能为空。
+bool looksLikeHlsManifest(const QString &url)
+{
+    if (url.isEmpty())
+        return false;
+    return QUrl(url).path().endsWith(QLatin1String(".m3u8"), Qt::CaseInsensitive);
+}
+
+bool looksLikeDashManifest(const QString &url)
+{
+    if (url.isEmpty())
+        return false;
+    return QUrl(url).path().endsWith(QLatin1String(".mpd"), Qt::CaseInsensitive);
+}
+
+// duration 可能是数字、数字字符串，或只有 duration_string（"1:02:03"）。
+double durationSecondsOf(const QJsonObject &object)
+{
+    const double direct = doubleOf(object.value(QStringLiteral("duration")));
+    if (direct > 0)
+        return direct;
+
+    const QString text =
+        stringOf(object.value(QStringLiteral("duration_string"))).trimmed();
+    if (text.isEmpty())
+        return 0;
+
+    double seconds = 0;
+    const QStringList parts = text.split(QLatin1Char(':'));
+    for (const QString &part : parts) {
+        bool ok = false;
+        const double value = part.trimmed().toDouble(&ok);
+        if (!ok)
+            return 0;
+        seconds = seconds * 60 + value;
+    }
+    return seconds > 0 ? seconds : 0;
+}
+
+// 解析 "1920x1080" / "1920x1080, 1080p" / "1080p" 这类 resolution。
+bool applyResolutionText(const QString &text, int *width, int *height)
+{
+    if (text.isEmpty())
+        return false;
+
+    static const QRegularExpression pair(
+        QStringLiteral("(\\d+)\\s*[xX×]\\s*(\\d+)"));
+    QRegularExpressionMatch match = pair.match(text);
+    if (match.hasMatch()) {
+        *width = match.captured(1).toInt();
+        *height = match.captured(2).toInt();
+        return *height > 0;
+    }
+
+    static const QRegularExpression heightOnly(
+        QStringLiteral("(?:^|[^0-9])(\\d{3,4})\\s*[pP](?:[^a-zA-Z]|$)"));
+    match = heightOnly.match(text);
+    if (match.hasMatch()) {
+        *width = 0;
+        *height = match.captured(1).toInt();
+        return *height > 0;
+    }
+    return false;
 }
 
 // ---- 编码家族 ----
@@ -232,6 +343,132 @@ QList<MediaFormat> filterKind(const QList<MediaFormat> &formats, MediaFormat::Ki
     return result;
 }
 
+// 没有 codec 信息时，用 video_ext/audio_ext 和容器扩展名推断媒体类型。
+MediaFormat::Kind inferKind(bool hasVideo, bool hasAudio, bool bothExplicitNone,
+                            const QString &videoExt, const QString &audioExt,
+                            const QString &ext, const QString &sourceUrl)
+{
+    if (hasVideo && hasAudio)
+        return MediaFormat::Combined;
+    if (hasVideo)
+        return MediaFormat::VideoOnly;
+    if (hasAudio)
+        return MediaFormat::AudioOnly;
+    if (bothExplicitNone)
+        return MediaFormat::Unknown;
+
+    const bool hasSource = !sourceUrl.isEmpty();
+    const bool videoNone = videoExt == QLatin1String("none");
+    const bool audioNone = audioExt == QLatin1String("none");
+
+    static const QStringList audioExts{
+        QStringLiteral("m4a"), QStringLiteral("mp3"), QStringLiteral("opus"),
+        QStringLiteral("ogg"), QStringLiteral("oga"), QStringLiteral("aac"),
+        QStringLiteral("flac"), QStringLiteral("wav"),
+    };
+    const bool audioContainer = audioExts.contains(ext.toLower());
+
+    if (videoNone && audioNone) {
+        // 两个 ext 都明确 none：一般不是媒体；音频容器属于少见但可用的例外
+        return hasSource && audioContainer ? MediaFormat::AudioOnly
+                                           : MediaFormat::Unknown;
+    }
+    if (!videoNone && audioNone)
+        return hasSource ? MediaFormat::Combined : MediaFormat::Unknown;
+    if (videoNone && !audioNone)
+        return hasSource ? MediaFormat::AudioOnly : MediaFormat::Unknown;
+
+    // video_ext/audio_ext 都缺失：先按容器名判断音频，否则沿用
+    // “generic MP4 / HLS variant 可能带音轨”的旧行为，按合一处理。
+    if (!hasSource)
+        return MediaFormat::Unknown;
+    return audioContainer ? MediaFormat::AudioOnly : MediaFormat::Combined;
+}
+
+// 自定义 extractor 可能不写 protocol；按 URL 后缀/协议补上。
+void inferProtocol(MediaFormat *format)
+{
+    if (format == nullptr || !format->protocol.isEmpty())
+        return;
+
+    const QString sourceUrl = format->url.isEmpty() ? format->manifestUrl
+                                                    : format->url;
+    if (looksLikeHlsManifest(sourceUrl)) {
+        format->protocol = QStringLiteral("m3u8_native");
+        return;
+    }
+    if (looksLikeDashManifest(sourceUrl)) {
+        format->protocol = QStringLiteral("http_dash_segments");
+        return;
+    }
+    const QString scheme = QUrl(sourceUrl).scheme().toLower();
+    if (scheme == QLatin1String("http") || scheme == QLatin1String("https"))
+        format->protocol = scheme;
+}
+
+// 把 formats[] 的一项归一化为 MediaFormat；不能识别时返回 valid=false。
+MediaFormat parseFormatObject(const QJsonObject &object)
+{
+    MediaFormat format;
+
+    const QJsonValue vcodecValue = object.value(QStringLiteral("vcodec"));
+    const QJsonValue acodecValue = object.value(QStringLiteral("acodec"));
+    const QString vcodec = stringOf(vcodecValue);
+    const QString acodec = stringOf(acodecValue);
+    const bool hasVideo = hasCodec(vcodecValue);
+    const bool hasAudio = hasCodec(acodecValue);
+    const bool bothExplicitNone =
+        vcodec == QLatin1String("none") && acodec == QLatin1String("none");
+
+    const QString url = stringOf(object.value(QStringLiteral("url")));
+    const QString manifestUrl =
+        stringOf(object.value(QStringLiteral("manifest_url")));
+    const QString sourceUrl = url.isEmpty() ? manifestUrl : url;
+    const QString videoExt = stringOf(object.value(QStringLiteral("video_ext")));
+    const QString audioExt = stringOf(object.value(QStringLiteral("audio_ext")));
+    const QString ext = stringOf(object.value(QStringLiteral("ext")));
+
+    const MediaFormat::Kind kind = inferKind(hasVideo, hasAudio, bothExplicitNone,
+                                             videoExt, audioExt, ext, sourceUrl);
+    if (kind == MediaFormat::Unknown)
+        return format;
+
+    format.formatId = stringOf(object.value(QStringLiteral("format_id")));
+    format.url = url;
+    format.protocol = stringOf(object.value(QStringLiteral("protocol")));
+    format.manifestUrl = manifestUrl;
+    inferProtocol(&format);
+
+    const QString formatNote = stringOf(object.value(QStringLiteral("format_note")));
+    format.width = intOf(object.value(QStringLiteral("width")));
+    format.height = intOf(object.value(QStringLiteral("height")));
+    if (format.width <= 0 || format.height <= 0) {
+        if (!applyResolutionText(stringOf(object.value(QStringLiteral("resolution"))),
+                                 &format.width, &format.height)) {
+            applyResolutionText(formatNote, &format.width, &format.height);
+        }
+    }
+
+    format.fps = doubleOf(object.value(QStringLiteral("fps")));
+    format.vcodec = vcodec;
+    format.acodec = acodec;
+    format.vbr = doubleOf(object.value(QStringLiteral("vbr")));
+    format.abr = doubleOf(object.value(QStringLiteral("abr")));
+    format.tbr = doubleOf(object.value(QStringLiteral("tbr")));
+    format.filesize = int64Of(object.value(QStringLiteral("filesize")));
+    format.filesizeApprox = int64Of(object.value(QStringLiteral("filesize_approx")));
+    format.audioChannels = intOf(object.value(QStringLiteral("audio_channels")));
+    format.language = stringOf(object.value(QStringLiteral("language")));
+    format.dynamicRange = stringOf(object.value(QStringLiteral("dynamic_range")));
+    format.formatNote = formatNote;
+    format.quality = intOf(object.value(QStringLiteral("quality")));
+    format.ext = ext;
+
+    format.kind = kind;
+    format.valid = true;
+    return format;
+}
+
 // 按分辨率档挑画面：height 取自 formats 的 height 字段。
 //
 // 统一规则：height > 0 时只考虑“不超过该高度”的流；height = 0 时不设限。
@@ -251,7 +488,7 @@ MediaFormat pickVideoTier(const MediaInfo &info, int height, bool allowHdr)
     }
 
     const MediaFormat best = bestOf(candidates, allowHdr);
-    if (best.formatId.isEmpty()) {
+    if (!best.valid) {
         LOG_DEBUG("Format") << "档位无可用画面流: height=" << height
                             << " 候选=" << candidates.size()
                             << " 源内视频流=" << filterKind(info.formats, MediaFormat::VideoOnly).size()
@@ -263,7 +500,7 @@ MediaFormat pickVideoTier(const MediaInfo &info, int height, bool allowHdr)
 MediaFormat pickBestAudio(const MediaInfo &info, bool allowHdr)
 {
     const MediaFormat best = bestOf(filterKind(info.formats, MediaFormat::AudioOnly), allowHdr);
-    if (best.formatId.isEmpty())
+    if (!best.valid)
         LOG_DEBUG("Format") << "源内没有可用音频流，将依赖 yt-dlp 的 bv*+ba/b 兜底";
     return best;
 }
@@ -354,10 +591,10 @@ MediaFormat pickLiveHls(const MediaInfo &info)
             continue;
         if (vcodecRank(format.vcodec) == 0) // 已是 avc，优先级最高
             return format;
-        if (fallback.formatId.isEmpty())
+        if (!fallback.valid)
             fallback = format;
     }
-    if (!fallback.formatId.isEmpty()) {
+    if (fallback.valid) {
         LOG_WARN("Format") << "直播流中没有 avc 的 HLS，退用非 avc 版本:"
                            << fallback.formatId << fallback.protocol;
         return fallback;
@@ -385,7 +622,7 @@ MediaSelection tierSelection(const MediaInfo &info, int height, bool allowHdr)
     selection.video = video;
     selection.label = video.displayName();
 
-    if (video.formatId.isEmpty()) {
+    if (!video.valid) {
         // 没有带 height 的画面流：generic 直链单文件（height/vcodec 都未知）。
         // 选一条音视频合一的直链直接交给播放器；不要再递归。
         // 关闭 HDR 时 bestOf 会跳过 HDR 合一文件；没有 SDR 合一才报错。
@@ -393,7 +630,7 @@ MediaSelection tierSelection(const MediaInfo &info, int height, bool allowHdr)
                                     allowHdr);
         const QString target =
             direct.url.isEmpty() ? direct.manifestUrl : direct.url;
-        if (!direct.formatId.isEmpty() && !target.isEmpty()
+        if (direct.valid && !target.isEmpty()
             && direct.isDirectPlayable()) {
             selection.valid = true;
             selection.direct = true;
@@ -435,10 +672,13 @@ MediaSelection tierSelection(const MediaInfo &info, int height, bool allowHdr)
     // 精确钉死选中的流。missing id 的兜底在 UrlDownloader::handleDownloadFinished。
     if (video.isCombined()) {
         selection.formatExpression = video.formatId;
-    } else if (!selection.audio.formatId.isEmpty()) {
+    } else if (selection.audio.valid
+               && !video.formatId.isEmpty()
+               && !selection.audio.formatId.isEmpty()) {
         selection.formatExpression =
             QStringLiteral("%1+%2").arg(video.formatId, selection.audio.formatId);
     }
+    // 任一路缺 format_id 时留空，下载器会走 -S 排序；不能拼出 "+audio"
 
     if (!selection.formatExpression.isEmpty()) {
         LOG_INFO("Format") << "钉死选中的流:" << selection.formatExpression
@@ -633,72 +873,15 @@ QList<MediaFormat> parse(const QJsonArray &formats)
     QList<MediaFormat> result;
     int skipped = 0;
     for (const QJsonValue &value : formats) {
-        const QJsonObject object = value.toObject();
-
-        const QJsonValue vcodecValue = object.value(QStringLiteral("vcodec"));
-        const QJsonValue acodecValue = object.value(QStringLiteral("acodec"));
-        const bool hasVideo = hasCodec(vcodecValue);
-        const bool hasAudio = hasCodec(acodecValue);
-        const QString url = object.value(QStringLiteral("url")).toString();
-        const QString videoExt =
-            object.value(QStringLiteral("video_ext")).toString();
-        const QString audioExt =
-            object.value(QStringLiteral("audio_ext")).toString();
-        // 两者都明确是 "none" 才是故事板/缩略图；null/缺失是"未知"，不是"没有"
-        const bool bothExplicitNone =
-            vcodecValue.isString()
-            && vcodecValue.toString() == QLatin1String("none")
-            && acodecValue.isString()
-            && acodecValue.toString() == QLatin1String("none");
-
-        MediaFormat::Kind kind = MediaFormat::Unknown;
-        if (hasVideo && hasAudio) {
-            kind = MediaFormat::Combined;
-        } else if (hasVideo) {
-            kind = MediaFormat::VideoOnly;
-        } else if (hasAudio) {
-            kind = MediaFormat::AudioOnly;
-        } else if (!bothExplicitNone && !url.isEmpty()
-                   && videoExt != QLatin1String("none")) {
-            // generic 直链：codec 字段是 null/缺失，但 video_ext 表明是视频文件。
-            // **不能假设它没有音轨** —— 实测 TikTok CDN 的 MP4 就是这种 JSON
-            // （vcodec=null、acodec 缺失、audio_ext="none"），实际音视频都有。
-            kind = MediaFormat::Combined;
-        } else if (!bothExplicitNone && !url.isEmpty()
-                   && videoExt == QLatin1String("none")
-                   && audioExt != QLatin1String("none")) {
-            kind = MediaFormat::AudioOnly;
-        }
-
-        if (kind == MediaFormat::Unknown) {
+        if (!value.isObject()) {
             ++skipped;
             continue;
         }
-
-        MediaFormat format;
-        format.formatId = object.value(QStringLiteral("format_id")).toString();
-        format.url = object.value(QStringLiteral("url")).toString();
-        format.protocol = object.value(QStringLiteral("protocol")).toString();
-        format.manifestUrl = object.value(QStringLiteral("manifest_url")).toString();
-        format.width = object.value(QStringLiteral("width")).toInt(0);
-        format.height = object.value(QStringLiteral("height")).toInt(0);
-        format.fps = doubleOf(object.value(QStringLiteral("fps")));
-        format.vcodec = object.value(QStringLiteral("vcodec")).toString();
-        format.acodec = object.value(QStringLiteral("acodec")).toString();
-        format.vbr = doubleOf(object.value(QStringLiteral("vbr")));
-        format.abr = doubleOf(object.value(QStringLiteral("abr")));
-        format.tbr = doubleOf(object.value(QStringLiteral("tbr")));
-        format.filesize = int64Of(object.value(QStringLiteral("filesize")));
-        format.filesizeApprox = int64Of(object.value(QStringLiteral("filesize_approx")));
-        format.audioChannels = object.value(QStringLiteral("audio_channels")).toInt(0);
-        format.language = object.value(QStringLiteral("language")).toString();
-        format.dynamicRange = object.value(QStringLiteral("dynamic_range")).toString();
-        format.formatNote = object.value(QStringLiteral("format_note")).toString();
-        format.quality = object.value(QStringLiteral("quality")).toInt(0);
-        format.ext = object.value(QStringLiteral("ext")).toString();
-
-        format.kind = kind;
-
+        const MediaFormat format = parseFormatObject(value.toObject());
+        if (!format.valid) {
+            ++skipped;
+            continue;
+        }
         result.append(format);
     }
 
@@ -711,47 +894,120 @@ QList<MediaFormat> parse(const QJsonArray &formats)
 MediaInfo parseMediaInfo(const QJsonObject &root)
 {
     MediaInfo info;
-    info.title = root.value(QStringLiteral("title")).toString();
+    const QString rootType = stringOf(root.value(QStringLiteral("_type")));
+
+    // ---- 通用字段：任何一项都可能是 null/缺失 ----
+    info.title = stringOf(root.value(QStringLiteral("title")));
     if (info.title.isEmpty())
-        info.title = root.value(QStringLiteral("fulltitle")).toString();
-    info.uploader = root.value(QStringLiteral("uploader")).toString();
+        info.title = stringOf(root.value(QStringLiteral("fulltitle")));
+    if (info.title.isEmpty())
+        info.title = stringOf(root.value(QStringLiteral("alt_title")));
+    if (info.title.isEmpty())
+        info.title = stringOf(root.value(QStringLiteral("display_id")));
+    if (info.title.isEmpty())
+        info.title = stringOf(root.value(QStringLiteral("id")));
+
+    info.uploader = stringOf(root.value(QStringLiteral("uploader")));
     if (info.uploader.isEmpty())
-        info.uploader = root.value(QStringLiteral("channel")).toString();
-    info.url = root.value(QStringLiteral("webpage_url")).toString();
+        info.uploader = stringOf(root.value(QStringLiteral("channel")));
+    if (info.uploader.isEmpty())
+        info.uploader = stringOf(root.value(QStringLiteral("uploader_id")));
+    if (info.uploader.isEmpty())
+        info.uploader = stringOf(root.value(QStringLiteral("channel_id")));
 
-    const double seconds = doubleOf(root.value(QStringLiteral("duration")));
-    info.durationMs = static_cast<qint64>(seconds * 1000);
+    info.url = stringOf(root.value(QStringLiteral("webpage_url")));
+    if (info.url.isEmpty())
+        info.url = stringOf(root.value(QStringLiteral("original_url")));
 
-    info.live = root.value(QStringLiteral("is_live")).toBool(false);
-    info.wasLive = root.value(QStringLiteral("was_live")).toBool(false);
-    info.extractor = root.value(QStringLiteral("extractor")).toString();
+    info.durationMs = static_cast<qint64>(durationSecondsOf(root) * 1000);
+
+    info.live = boolOf(root.value(QStringLiteral("is_live")));
+    info.wasLive = boolOf(root.value(QStringLiteral("was_live")));
+    // 较新的 extractor 更常只给 live_status，is_live 可能缺失。
+    const QString liveStatus =
+        stringOf(root.value(QStringLiteral("live_status"))).toLower();
+    if (!info.live
+        && (liveStatus == QLatin1String("is_live")
+            || liveStatus == QLatin1String("is_upcoming"))) {
+        info.live = true;
+    }
+    if (!info.wasLive && liveStatus == QLatin1String("was_live"))
+        info.wasLive = true;
+
+    info.extractor = stringOf(root.value(QStringLiteral("extractor")));
     if (info.extractor.isEmpty())
-        info.extractor = root.value(QStringLiteral("extractor_key")).toString();
-    info.id = root.value(QStringLiteral("id")).toString();
+        info.extractor = stringOf(root.value(QStringLiteral("extractor_key")));
+    if (info.extractor.isEmpty())
+        info.extractor = stringOf(root.value(QStringLiteral("ie_key")));
+    info.id = stringOf(root.value(QStringLiteral("id")));
+    if (info.id.isEmpty())
+        info.id = stringOf(root.value(QStringLiteral("display_id")));
 
-    info.formats = parse(root.value(QStringLiteral("formats")).toArray());
+    // ---- formats：formats[] → requested_formats[] → 顶层单格式 ----
+    QJsonArray formatsArray = root.value(QStringLiteral("formats")).toArray();
+    if (formatsArray.isEmpty())
+        formatsArray = root.value(QStringLiteral("requested_formats")).toArray();
+    info.formats = parse(formatsArray);
+    if (info.formats.isEmpty() && rootType != QLatin1String("url")
+        && root.value(QStringLiteral("entries")).toArray().isEmpty()) {
+        // 单格式信息可能只有顶层 url/format_id，没有 formats[]。
+        // 有 entries 的是播放列表，不能把顶层的 url 当成一条视频。
+        const MediaFormat topLevel = parseFormatObject(root);
+        if (topLevel.valid)
+            info.formats.append(topLevel);
+    }
+
+    // 顶层 _type=url，或没有 webpage_url 的裸 m3u8：用顶层 url 作为源地址，
+    // 供裸 m3u8 直播兜底和相对剧集 URL 解析使用。
+    if (info.url.isEmpty()) {
+        const QString topUrl = stringOf(root.value(QStringLiteral("url")));
+        if (rootType == QLatin1String("url") || looksLikeHlsManifest(topUrl))
+            info.url = topUrl;
+    }
 
     // ---- 多集（剧集/合集）：顶层没有 formats，每一集自带 ----
-    // yt-dlp 的 _type 为 "playlist"，判据是「顶层 formats 为空 + entries 非空」。
-    // 不单独以 entries.length 判定：单视频理论上也可能有 entries，
-    // 而「顶层 formats 为空」可排除该情况。
+    // 判据仍是「顶层 formats 为空 + entries 非空」。entries 里可能有 null
+    // （下架/占位），也可能全是缺少地址的条目；两种情况都要计数并丢弃。
     const QJsonArray entries = root.value(QStringLiteral("entries")).toArray();
     if (info.formats.isEmpty() && !entries.isEmpty()) {
         info.playlistTitle = info.title;
+        if (info.playlistTitle.isEmpty())
+            info.playlistTitle = info.id;
         info.title.clear();   // 顶层 title 是整季的名字，不是某一条的名字
-        int index = 0;
         int dropped = 0;
         for (const QJsonValue &value : entries) {
+            if (!value.isObject()) {
+                ++dropped;
+                continue;
+            }
             const QJsonObject entry = value.toObject();
-            ++index;
 
             Episode episode;
-            episode.id = entry.value(QStringLiteral("id")).toString();
-            episode.title = entry.value(QStringLiteral("title")).toString();
-            episode.url = entry.value(QStringLiteral("webpage_url")).toString();
-            const double seconds = doubleOf(entry.value(QStringLiteral("duration")));
-            episode.durationMs = static_cast<qint64>(seconds * 1000);
-            episode.number = entry.value(QStringLiteral("episode_number")).toInt(0);
+            episode.id = stringOf(entry.value(QStringLiteral("id")));
+            if (episode.id.isEmpty())
+                episode.id = stringOf(entry.value(QStringLiteral("display_id")));
+            episode.title = stringOf(entry.value(QStringLiteral("title")));
+            if (episode.title.isEmpty())
+                episode.title = stringOf(entry.value(QStringLiteral("fulltitle")));
+            if (episode.title.isEmpty())
+                episode.title = stringOf(entry.value(QStringLiteral("alt_title")));
+            if (episode.title.isEmpty())
+                episode.title = stringOf(entry.value(QStringLiteral("display_id")));
+            // flat playlist（--flat-playlist）的条目只有 url，没有 webpage_url；
+            // 插件用 url_result 返回的条目也常是 _type=url。两种都要认。
+            episode.url = stringOf(entry.value(QStringLiteral("webpage_url")));
+            if (episode.url.isEmpty())
+                episode.url = stringOf(entry.value(QStringLiteral("url")));
+            if (episode.url.isEmpty())
+                episode.url = stringOf(entry.value(QStringLiteral("original_url")));
+            if (!episode.url.isEmpty()) {
+                const QUrl parsedUrl(episode.url);
+                if (parsedUrl.isRelative() && !info.url.isEmpty())
+                    episode.url = QUrl(info.url).resolved(parsedUrl).toString();
+            }
+            episode.durationMs =
+                static_cast<qint64>(durationSecondsOf(entry) * 1000);
+            episode.number = intOf(entry.value(QStringLiteral("episode_number")));
 
             // 没有播放地址的条目（下架/占位）不算一集，列出来也无法点击
             if (episode.url.isEmpty()) {
@@ -767,15 +1023,17 @@ MediaInfo parseMediaInfo(const QJsonObject &root)
                             << " 标题=" << info.playlistTitle;
     }
 
-    // yt-dlp 未提供 is_live，但 duration=0 且 formats 中含 m3u8 时，按直播处理
-    if (!info.live && info.durationMs <= 0) {
-        for (const MediaFormat &format : info.formats) {
-            if (format.protocol.contains(QLatin1String("m3u8"))) {
-                info.live = true;
-                break;
-            }
-        }
-    }
+    // 裸 m3u8 链接的直播兜底：yt-dlp 可能既不标 is_live 也不给 duration。
+    // 只认源地址本身是 HLS 清单的情况；点播 HLS 的 duration 也可能为空，
+    // 不能仅凭 formats 里有 m3u8 就判成直播（插件站点常见）。
+    if (!info.live && info.durationMs <= 0 && looksLikeHlsManifest(info.url))
+        info.live = true;
+
+    LOG_DEBUG("Format") << "解析媒体: formats=" << info.formats.size()
+                        << " entries=" << entries.size()
+                        << " episodes=" << info.episodes.size()
+                        << " live=" << info.live
+                        << " durationMs=" << info.durationMs;
     return info;
 }
 
@@ -804,6 +1062,13 @@ QString displayTitle(const Episode &episode, int fallbackIndex)
     if (!trimmed.isEmpty()
         && trimmed.startsWith(QString::number(number), Qt::CaseInsensitive)) {
         return trimmed;
+    }
+    // 站点标题常已带集号（"… 第1集"），别再叠一层"第 1 集 ·"
+    if (!trimmed.isEmpty()) {
+        const QRegularExpression embedded(
+            QStringLiteral("第\\s*%1\\s*[集话話]").arg(number));
+        if (embedded.match(trimmed).hasMatch())
+            return trimmed;
     }
     if (!trimmed.isEmpty())
         return QStringLiteral("第 %1 集 · %2").arg(number).arg(trimmed);
@@ -871,7 +1136,7 @@ QList<QualityOption> qualityOptions(const MediaInfo &info)
         }
         // 有 SDR 就展示 SDR 的（用户选"允许 HDR"是另一码事，档位本身不变）
         MediaFormat best = bestOf(tier, /*allowHdr=*/false);
-        const bool onlyHdr = best.formatId.isEmpty();
+        const bool onlyHdr = !best.valid;
         if (onlyHdr)
             best = bestOf(tier, /*allowHdr=*/true);
 
@@ -914,7 +1179,8 @@ QList<FormatChoice> detailChoices(const MediaInfo &info)
     if (info.live) {
         QList<MediaFormat> playable;
         for (const MediaFormat &format : info.formats) {
-            if (!format.protocol.contains(QLatin1String("m3u8")))
+            // HLS 和 HTTP-FLV 都可以直接交给播放器；斗鱼只提供 FLV 直链
+            if (!format.isDirectPlayable())
                 continue;
             if (format.url.isEmpty() && format.manifestUrl.isEmpty())
                 continue;
@@ -1120,16 +1386,16 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info,
         for (const MediaFormat &format : info.formats) {
             if (!ids.contains(format.formatId))
                 continue;
-            if (format.isVideo() && video.formatId.isEmpty())
+            if (format.isVideo() && !video.valid)
                 video = format;
-            else if (format.isAudio() && !format.isVideo() && audio.formatId.isEmpty())
+            else if (format.isAudio() && !format.isVideo() && !audio.valid)
                 audio = format;
         }
 
         // 一个 id 都不匹配（对方登录态/会员等级不同）。
         // 显式 id: 是用户明确的选择，失败就报错，不静默换成最高画质；
         // 旧条目的裸 id 保留“按档位重挑”的兼容兜底。
-        if (video.formatId.isEmpty() && audio.formatId.isEmpty()) {
+        if (!video.valid && !audio.valid) {
             if (prefixedIds) {
                 selection.error = QStringLiteral(
                     "手选的流（id:%1）在当前视频源中不存在；"
@@ -1143,7 +1409,7 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info,
             return tierSelection(info, 0, allowHdr);
         }
 
-        if (video.formatId.isEmpty()) {
+        if (!video.valid) {
             // 仅提供了音频时，画面补优先级最高的一条
             video = bestOf(filterKind(info.formats, MediaFormat::VideoOnly), allowHdr);
         }
@@ -1164,28 +1430,37 @@ MediaSelection resolve(const QString &spec, const MediaInfo &info,
             selection.direct = true;
             selection.video = video;
             selection.audio = video;
-            selection.url = video.url;
+            selection.url = video.url.isEmpty() ? video.manifestUrl : video.url;
+            // 直链试拉失败时还能退回 -f <id> 下载
+            selection.formatExpression = video.formatId;
             selection.label = video.displayName();
             return selection;
         }
 
-        if (video.formatId.isEmpty()) {
+        if (!video.valid) {
             selection.error = QStringLiteral("手选的条目里没有可用的画面流");
             LOG_WARN("Format") << selection.error << "spec=" << spec;
             return selection;
         }
 
-        if (audio.formatId.isEmpty())
+        if (!audio.valid)
             audio = pickBestAudio(info, allowHdr);
 
         selection.valid = true;
         selection.video = video;
         selection.audio = audio;
         selection.label = video.displayName();
-        // 精确选择即精确选择：缺少任一路由 yt-dlp 报错，不静默替换为其他流
-        selection.formatExpression = audio.formatId.isEmpty()
-            ? video.formatId
-            : QStringLiteral("%1+%2").arg(video.formatId, audio.formatId);
+        // 精确选择即精确选择：缺少任一路由 yt-dlp 报错，不静默替换为其他流。
+        // 但如果某一路没有 format_id，不能拼出 "+audio" 或 "video+" 这种
+        // 只选一半的表达式；清空后交给下载器按 -S/默认规则处理。
+        if (video.formatId.isEmpty()
+            || (audio.valid && audio.formatId.isEmpty())) {
+            selection.formatExpression.clear();
+        } else {
+            selection.formatExpression = audio.valid
+                ? QStringLiteral("%1+%2").arg(video.formatId, audio.formatId)
+                : video.formatId;
+        }
         return selection;
     }
 

@@ -72,6 +72,20 @@ int main(int argc, char *argv[]) {
         // 但启动时就把结果记进日志 —— "为什么下载失败"最常见的原因就是它俩没就位。
         Toolchain toolchain;
 
+        // yt-dlp 插件：内置插件（斗鱼）始终加载；设置里的开关只控制用户
+        // 额外插件目录。每次起进程时由 Toolchain 生成 --no-plugin-dirs /
+        // --plugin-dirs 参数，设置变化立即作用于下一次解析。
+        toolchain.setPluginsEnabled(appSettings.pluginsEnabled());
+        toolchain.setPluginDirectory(appSettings.pluginDirectory());
+        QObject::connect(&appSettings, &AppSettings::pluginsEnabledChanged, &toolchain,
+                         [&appSettings, &toolchain]() {
+                             toolchain.setPluginsEnabled(appSettings.pluginsEnabled());
+                         });
+        QObject::connect(&appSettings, &AppSettings::pluginDirectoryChanged, &toolchain,
+                         [&appSettings, &toolchain]() {
+                             toolchain.setPluginDirectory(appSettings.pluginDirectory());
+                         });
+
         // 网链模式的平台注册表：URL 匹配、B 站编号展开、cookie 策略。
         // QML 通过 mediaPlatforms 调 normalize/detect。
         PlatformBridge platformBridge;
